@@ -10,6 +10,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
+const { CryptoPanicDefense } = require("./cryptoPanic");
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const tg         = require("./telegram");
