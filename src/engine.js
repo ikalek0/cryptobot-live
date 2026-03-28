@@ -90,6 +90,18 @@ function detectRegime(h){
 }
 
 // ── Señales adaptativas ───────────────────────────────────────────────────────
+
+// Detectar volumen anómalo — si el cambio de precio reciente es 3x la media
+// Es un proxy de volumen real basado en la magnitud de movimiento de precio
+function getVolumeAnomaly(volumeHistory, symbol) {
+  const vh = volumeHistory?.[symbol] || [];
+  if (vh.length < 20) return { anomaly: false, ratio: 1.0 };
+  const recent = vh.slice(-3).reduce((a,b)=>a+b,0)/3;  // últimas 3 lecturas
+  const baseline = vh.slice(-30,-3).reduce((a,b)=>a+b,0)/27;  // media 30 lecturas previas
+  const ratio = baseline > 0 ? recent / baseline : 1.0;
+  return { anomaly: ratio > 2.5, ratio: +ratio.toFixed(2) };
+}
+
 function signalMomentum(sym,history,params){
   const h=history[sym]||[];
   if(h.length<10)return{signal:"HOLD",score:50,reason:"Sin datos",rsiVal:50,atrPct:3,mom10:0,strategy:"MOMENTUM"};
@@ -230,7 +242,14 @@ class CryptoBotFinal {
   }
 
   updatePrice(sym,price){
+    const prevPrice = this.prices[sym] || price;
     this.prices[sym]=price;
+    // Volume proxy: track magnitude of price changes
+    if(!this.volumeHistory) this.volumeHistory={};
+    if(!this.volumeHistory[sym]) this.volumeHistory[sym]=[];
+    const changePct=Math.abs((price-prevPrice)/prevPrice);
+    this.volumeHistory[sym].push(changePct);
+    if(this.volumeHistory[sym].length>100) this.volumeHistory[sym].shift();
     this.history[sym]=[...(this.history[sym]||[]),price].slice(-200);
     updateMultiTF(this.tfHistory,sym,price,this.tick);
   }
@@ -277,7 +296,18 @@ class CryptoBotFinal {
     // GESTIÓN POSICIONES — con cierre parcial
     for(const[symbol,pos]of Object.entries(this.portfolio)){
       const cp=this.prices[symbol]||pos.entryPrice;
-      const ts=this.trailing.update(symbol,cp,pos.entryPrice,this.profile.trailingPct);
+      // Dynamic trailing based on ATR volatility
+      const hArr = this.history[symbol]||[];
+      const dynTrailingPct = Math.max(0.02, Math.min(0.08,
+        hArr.length>=14 ? (atr(hArr,14)/cp)*2.5 : this.profile.trailingPct
+      ));
+      const ts=this.trailing.update(symbol,cp,pos.entryPrice,dynTrailingPct);
+      // Time stop: cerrar posición si lleva más de 8h sin moverse significativamente
+      const posAgeSec = (Date.now() - new Date(pos.ts).getTime()) / 1000;
+      const posAgeLimitSec = 8 * 3600;
+      const priceMovePct = Math.abs((cp - pos.entryPrice) / pos.entryPrice * 100);
+      const timeStop = posAgeSec > posAgeLimitSec && priceMovePct < 0.5 && (pos.profitLocked||0) < 0.3;
+
       this.portfolio[symbol].trailingStop=+ts.stopPrice.toFixed(4);
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
       this.portfolio[symbol].profitLocked=+ts.profitLocked.toFixed(2);
@@ -303,7 +333,7 @@ class CryptoBotFinal {
         continue;
       }
 
-      if(cp<=pos.stopLoss||ts.hit||sig?.signal==="SELL"||mrExit||bearSell){
+      if(cp<=pos.stopLoss||ts.hit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
         const proceeds=pos.qty*cp*(1-fee),pnl=((cp-pos.entryPrice)/pos.entryPrice)*100-fee*100*2;
         this.cash+=proceeds;
         const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
@@ -353,9 +383,12 @@ class CryptoBotFinal {
 
         for(const sig of buyable){
           const price=this.prices[sig.symbol];if(!price)continue;
+          // Volume anomaly: boost size if anomalous volume in the right direction
+          const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
+          const volBoost = volAnom.anomaly && sig.score > 60 ? 1.25 : 1.0;
           const newsMultiplier = this._cryptoPanicFn ? this._cryptoPanicFn(sig.symbol) : (this._newsMultiplier||1.0);
           const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price;
           const atrVal=atr(this.history[sig.symbol]||[price],14);
@@ -422,6 +455,7 @@ class CryptoBotFinal {
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
       priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
+      volumeAnomaly:Object.fromEntries(Object.keys(this.volumeHistory||{}).map(k=>[k,getVolumeAnomaly(this.volumeHistory,k)])),
       riskLearningStats:this.riskLearning.getStats(),
       riskLearningParams:this.riskLearning.params,
       correlationStatus:this.corrManager.getStatus(this.portfolio,this.prices),

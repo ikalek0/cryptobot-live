@@ -288,19 +288,17 @@ async function getAccountBalance() {
 // Verificar balance real al arrancar si LIVE_MODE
 async function verifyLiveBalance() {
   if (!LIVE_MODE) return;
-  console.log("[LIVE] 🔑 API Binance configurada — verificando balance...");
-  const balances = await getAccountBalance();
-  if (!balances) { console.error("[LIVE] ❌ No se pudo verificar balance Binance"); return; }
-  const usdt = balances.find(b=>b.asset==="USDT");
-  const usdtBalance = parseFloat(usdt?.free||0);
-  console.log(`[LIVE] ✅ Balance USDT real: $${usdtBalance.toFixed(2)}`);
-  tg.send && tg.send(`🔑 <b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>\nEl bot operará con dinero real.`);
-  // Sincronizar capital del bot con balance real
-  if (bot && usdtBalance > 0) {
-    console.log(`[LIVE] Capital ajustado al balance real: $${usdtBalance.toFixed(2)}`);
-  }
+  try {
+    console.log("[LIVE] API Binance configurada — verificando balance...");
+    const balances = await getAccountBalance();
+    if (!balances) { console.error("[LIVE] No se pudo verificar balance Binance"); return; }
+    const usdt = balances.find(b=>b.asset==="USDT");
+    const usdtBalance = parseFloat(usdt?.free||0);
+    console.log(`[LIVE] Balance USDT real: $${usdtBalance.toFixed(2)}`);
+    if (tg?.send) tg.send(`<b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>`);
+    if (bot && usdtBalance > 0) console.log(`[LIVE] Capital del bot: $${usdtBalance.toFixed(2)}`);
+  } catch(e) { console.warn("[LIVE] verifyLiveBalance error:", e.message); }
 }
-
 
 function startLoop(){
   connectBinance();
