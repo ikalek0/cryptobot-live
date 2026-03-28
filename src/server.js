@@ -62,7 +62,10 @@ async function initBot() {
   console.log(`\n[LIVE] Modo: ${bot.mode} | Capital: $${CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
   tg.notifyStartup(bot.mode + " (instancia controlada)");
   tg.scheduleReports(() => ({ ...bot.getState(), instance:bot.mode }));
-  tg.startCommandListener(() => ({ ...bot.getState(), instance:bot.mode, syncHistory }));
+  const tgControls = tg.startCommandListener(
+  () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
+  { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
+);
   fetchFearGreed().then(fg => { bot.fearGreed = fg.value; });
   startLoop();
 }
@@ -410,6 +413,7 @@ function startLoop(){
       return;
     }
 
+    if(tgControls?.isPaused()) bot._pausedByTelegram=true; else bot._pausedByTelegram=false;
     const{signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=bot.evaluate();
     ticks++;
 

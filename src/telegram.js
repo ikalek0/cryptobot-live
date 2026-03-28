@@ -64,24 +64,105 @@ function buildWeekly(state) {
 function notifyDailySummary(state)  { send(buildDaily(state)); }
 function notifyWeeklySummary(state) { send(buildWeekly(state)); }
 
-// ── Comando /estado ───────────────────────────────────────────────────────────
+// ── Comandos Telegram completos ───────────────────────────────────────────────
 let lastUpdateId=0;
-function startCommandListener(getState) {
+function startCommandListener(getState, botControls={}) {
   if(!TOKEN) return;
+  
+  function buildHelp(mode) {
+    return "📖 <b>Comandos BAFIR " + mode + "</b>\n\n" +
+      "<b>Info:</b>\n/estado /semana /posiciones /log\n/noticias /momentum /aprendizaje /riesgo\n\n" +
+      "<b>Control:</b>\n/pausa — pausar nuevas entradas\n/reanudar — reanudar\n/modo — configuración actual\n" +
+      (mode.includes("LIVE") ? "/balance — balance Binance real" : "");
+  }
+
+  function buildPositions(state) {
+    const entries = Object.entries(state.portfolio||{});
+    if (!entries.length) return "📭 <b>Sin posiciones abiertas</b>";
+    const lines = entries.map(([sym,pos]) => {
+      const cp=(state.prices||{})[sym]||pos.entryPrice;
+      const pnl=((cp-pos.entryPrice)/pos.entryPrice*100).toFixed(2);
+      const e=pnl>=2?"🟢":pnl>=0?"🟡":pnl>=-2?"🟠":"🔴";
+      return e+" <b>"+sym.replace("USDT","")+"</b> "+(pnl>=0?"+":"")+pnl+"% · Stop $"+pos.stopLoss+" · "+pos.strategy;
+    });
+    return "📊 <b>Posiciones abiertas ("+entries.length+")</b>\n"+lines.join("\n");
+  }
+
+  function buildLog10(state) {
+    const sells=(state.log||[]).filter(l=>l.type==="SELL").slice(0,10);
+    if(!sells.length) return "📭 Sin operaciones aún";
+    return "📋 <b>Últimas ops</b>\n"+sells.map(t=>{
+      const p=(t.pnl||0).toFixed(2),e=t.pnl>=2?"💰":t.pnl>=0?"✅":"❌";
+      const h=t.ts?new Date(t.ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}):"";
+      return e+" "+t.symbol.replace("USDT","")+" "+(t.pnl>=0?"+":"")+p+"% · "+t.reason+" "+h;
+    }).join("\n");
+  }
+
+  function buildMomentum(state) {
+    const dp=state.dailyPnlPct||0, m=state.momentumMult||1;
+    const lvl=dp<0?"🛡 Defensivo":dp<3?"— Normal":dp<7?"🚀 Boosted ×"+m.toFixed(1):dp<12?"🚀🚀 Fuerte ×"+m.toFixed(1):"🔥🔥 Máximo ×"+m.toFixed(1);
+    const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===new Date().toDateString());
+    return "⚡ <b>Momentum hoy</b>\nP&L: <b>"+(dp>=0?"+":"")+dp.toFixed(2)+"%</b>\n"+lvl+"\nOps: "+ts.length+" ("+ts.filter(l=>l.pnl>0).length+" ganadoras)";
+  }
+
+  function buildLearning(state) {
+    const t=(state.log||[]).filter(l=>l.type==="SELL").length;
+    const ph=t<100?"Fase 1 (exploración)":t<500?"Fase 2 (refinamiento)":"Fase 3 (optimizado)";
+    return "🧠 <b>Aprendizaje</b>\n"+ph+"\nTrades: "+t+"\nWR: "+(state.winRate||0)+"%\nRégimen: "+(state.marketRegime||"—");
+  }
+
+  function buildRisk(state) {
+    const p=state.optimizerParams||{};
+    return "⚙️ <b>Parámetros</b>\nScore min: "+p.minScore+"\nEMA: "+p.emaFast+"/"+p.emaSlow+"\nRSI oversold: "+p.rsiOversold+"\nATR: "+p.atrMult;
+  }
+
+  let paused=false;
+
   function poll() {
-    const req=https.get(`https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId+1}&timeout=20`,res=>{
+    const req=https.get("https://api.telegram.org/bot"+TOKEN+"/getUpdates?offset="+(lastUpdateId+1)+"&timeout=20",res=>{
       let d="";res.on("data",c=>d+=c);
       res.on("end",()=>{
         try {
           const json=JSON.parse(d);
           for(const u of(json.result||[])){
             lastUpdateId=u.update_id;
-            const text=u.message?.text||"",chatId=u.message?.chat?.id?.toString();
-            if(chatId===CHAT_ID){
-              if(text.startsWith("/estado")) send(buildDaily(getState()));
-              if(text.startsWith("/semana")) send(buildWeekly(getState()));
-              if(text.startsWith("/ayuda"))  send(`📖 <b>Comandos:</b>\n/estado — resumen ahora\n/semana — resumen semanal\n/ayuda — esta lista`);
+            const text=(u.message?.text||"").trim();
+            const chatId=u.message?.chat?.id?.toString();
+            if(chatId!==CHAT_ID){continue;}
+            const state=getState();
+            const mode=state.instance||state.mode||"BOT";
+            if(text==="/estado")       send(buildDaily(state));
+            else if(text==="/semana")  send(buildWeekly(state));
+            else if(text==="/posiciones") send(buildPositions(state));
+            else if(text==="/log")     send(buildLog10(state));
+            else if(text==="/momentum")send(buildMomentum(state));
+            else if(text==="/aprendizaje")send(buildLearning(state));
+            else if(text==="/riesgo")  send(buildRisk(state));
+            else if(text==="/pausa"){
+              paused=true;
+              if(botControls.setPaused) botControls.setPaused(true);
+              send("⏸ <b>Bot pausado</b>\nNo se abrirán nuevas posiciones. Stops activos.");
             }
+            else if(text==="/reanudar"){
+              paused=false;
+              if(botControls.setPaused) botControls.setPaused(false);
+              send("▶️ <b>Bot reanudado</b>\nOperaciones normales restauradas.");
+            }
+            else if(text==="/modo"){
+              const cp=state.cryptoPanic||{};
+              send("⚙️ <b>Modo: "+mode+"</b>\nRégimen: "+(state.marketRegime||"—")+"\nDefensivo: "+(state.marketDefensive?"SÍ":"NO")+"\nCP: "+(cp.globalDefensive?"🚨 ALERTA":"✅ OK")+"\n×"+(state.momentumMult||1).toFixed(2)+"\nPausado: "+(paused?"SÍ":"NO"));
+            }
+            else if(text==="/noticias"){
+              const cp=state.cryptoPanic||{};
+              send("📰 <b>CryptoPanic</b>\n"+(cp.globalDefensive?"🚨 DEFENSIVO GLOBAL":"✅ Normal")+"\nPares: "+((cp.defensivePairs||[]).map(p=>p.replace("USDT","")).join(",")||"ninguno")+"\nCheck: "+(cp.lastCheck?new Date(cp.lastCheck).toLocaleTimeString("es-ES"):"—"));
+            }
+            else if(text==="/balance" && botControls.getBalance){
+              botControls.getBalance().then(bal=>{
+                if(!bal||!bal.length){send("❌ Sin conexión Binance real");return;}
+                send("💰 <b>Balance</b>\n"+bal.filter(b=>parseFloat(b.free)>0.001).map(b=>b.asset+": "+parseFloat(b.free).toFixed(4)).join("\n"));
+              }).catch(()=>send("❌ Error balance"));
+            }
+            else if(text==="/ayuda") send(buildHelp(mode));
           }
         } catch(e){}
         setTimeout(poll,1000);
@@ -91,8 +172,10 @@ function startCommandListener(getState) {
     req.setTimeout(25000,()=>{req.destroy();setTimeout(poll,1000);});
   }
   poll();
-  console.log("[TG] Escuchando: /estado /semana /ayuda");
+  console.log("[TG] Comandos: /estado /posiciones /log /pausa /reanudar /momentum /noticias /riesgo /aprendizaje /ayuda");
+  return { isPaused: () => paused };
 }
+
 
 // ── Programar resúmenes ───────────────────────────────────────────────────────
 function scheduleReports(getState) {

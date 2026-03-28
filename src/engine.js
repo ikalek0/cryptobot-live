@@ -361,7 +361,9 @@ class CryptoBotFinal {
         const groupCount={};
         Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
 
-        const buyable=signals.filter(s=>{
+        // Respetar pausa de Telegram
+      if(this._pausedByTelegram) return {signals,newTrades,circuitBreaker:cb,optimizerResult:optResult,dailyLimit:paperDailyLimit||dailyLimit,dailyUsed:this.dailyTrades.count,drawdownAlert};
+      const buyable=signals.filter(s=>{
           if(s.signal!=="BUY"||s.score<regimeMin)return false;
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping||s.isFalling)return false;
