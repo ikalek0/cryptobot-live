@@ -354,8 +354,8 @@ ws.onmessage = e => {
     const msg = JSON.parse(e.data);
     if (msg.type==="tick"||msg.type==="state") {
       state = msg.data;
-      if (state.equity?.length) equityHistory = state.equity
-      window._currentState = state;.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
+      window._currentState = state;
+      if (state.equity?.length) equityHistory = state.equity.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
       render();
     }
   } catch {}
