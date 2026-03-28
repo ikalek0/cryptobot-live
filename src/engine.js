@@ -4,6 +4,7 @@
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } = require("./live_features_patch");
 const { RiskLearning } = require("./riskLearning");
+const { CorrelationManager } = require("./correlationManager");
 
 const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDT || "50000");
 const MIN_CASH_RESERVE = 0.15;
@@ -196,6 +197,7 @@ class CryptoBotFinal {
     this.partialClose    = new PartialCloseManager();
     this.confidence      = new ConfidenceScore();
     this.riskLearning    = new RiskLearning();
+    this.corrManager    = new CorrelationManager();
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
       this.cash=saved.cash||INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
@@ -211,6 +213,7 @@ class CryptoBotFinal {
       if(saved.blacklistData)this.autoBlacklist.loadJSON(saved.blacklistData);
       if(saved.confidenceData)this.confidence.loadJSON(saved.confidenceData);
       if(saved.riskLearningData)this.riskLearning.loadJSON(saved.riskLearningData);
+      if(saved.corrData)this.corrManager.loadJSON(saved.corrData);
       console.log(`[ENGINE LIVE] Restaurado tick #${this.tick} | $${this.totalValue().toFixed(2)}`);
     }else{
       this.prices={};this.history={};this.portfolio={};
@@ -351,7 +354,8 @@ class CryptoBotFinal {
         for(const sig of buyable){
           const price=this.prices[sig.symbol];if(!price)continue;
           const newsMultiplier = this._cryptoPanicFn ? this._cryptoPanicFn(sig.symbol) : (this._newsMultiplier||1.0);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier;
+          const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price;
           const atrVal=atr(this.history[sig.symbol]||[price],14);
@@ -420,6 +424,7 @@ class CryptoBotFinal {
       priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
       riskLearningStats:this.riskLearning.getStats(),
       riskLearningParams:this.riskLearning.params,
+      correlationStatus:this.corrManager.getStatus(this.portfolio,this.prices),
       maxEquity:+this.maxEquity.toFixed(2),drawdownPct:+(dd*100).toFixed(2),
       confidence: this.confidence.get(),
       autoBlacklist: this.autoBlacklist.getStatus(),

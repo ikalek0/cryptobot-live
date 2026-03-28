@@ -115,6 +115,7 @@ app.get("/api/confidence", (_,res) => {
 });
 app.post("/api/reset", async(_,res)=>{
   bot=new CryptoBotFinal(); bot.mode=LIVE_MODE?"LIVE":"PAPER";
+  await verifyLiveBalance();
   blacklist.restore({}); syncHistory=[];
   await deleteState();
   broadcast({type:"state",data:bot.getState()});
@@ -204,35 +205,100 @@ function simulatePrices(){
 let wasDefensive=false,cbNotified=false,lastFearGreedCheck=0;
 
 // ── LIVE MODE: órdenes reales ─────────────────────────────────────────────────
-// Para activar: añade BINANCE_API_KEY y BINANCE_API_SECRET en Railway
-// Luego descomenta este bloque:
-/*
-const crypto2=require("crypto"),https2=require("https");
-async function placeLiveBuy(symbol,usdtAmount){
-  try{
-    const ts=Date.now(),q=new URLSearchParams({symbol,side:"BUY",type:"MARKET",quoteOrderQty:usdtAmount.toFixed(2),timestamp:ts}).toString();
-    const sig=crypto2.createHmac("sha256",BINANCE_API_SECRET).update(q).digest("hex");
-    const order=await new Promise((resolve,reject)=>{
-      const req=https2.request({hostname:"api.binance.com",path:`/api/v3/order?${q}&signature=${sig}`,method:"POST",headers:{"X-MBX-APIKEY":BINANCE_API_KEY}},res=>{let d="";res.on("data",c=>d+=c);res.on("end",()=>{try{resolve(JSON.parse(d))}catch(e){reject(e)}});});
-      req.on("error",reject);req.setTimeout(8000,()=>{req.destroy();reject(new Error("Timeout"));});req.end();
+// ── BINANCE REAL API ──────────────────────────────────────────────────────────
+// Se activa automáticamente cuando BINANCE_API_KEY y BINANCE_API_SECRET
+// están configuradas en Railway. Sin keys → opera en modo simulado.
+const crypto2 = require("crypto");
+const https2   = require("https");
+
+function binanceRequest(method, path, params={}) {
+  if (!LIVE_MODE) return Promise.resolve(null);
+  const ts  = Date.now();
+  const all = { ...params, timestamp: ts };
+  const qs  = new URLSearchParams(all).toString();
+  const sig = crypto2.createHmac("sha256", BINANCE_API_SECRET).update(qs).digest("hex");
+  const fullPath = `/api/v3/${path}?${qs}&signature=${sig}`;
+  return new Promise((resolve, reject) => {
+    const req = https2.request({
+      hostname: "api.binance.com", path: fullPath, method,
+      headers: { "X-MBX-APIKEY": BINANCE_API_KEY }
+    }, res => {
+      let d = ""; res.on("data", c => d+=c);
+      res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
     });
-    console.log(`[LIVE][BUY] ${symbol} $${usdtAmount}`,order.orderId);
-    return order;
-  }catch(e){console.error("[LIVE][BUY]",e.message);return null;}
+    req.on("error", reject);
+    req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
+    req.end();
+  });
 }
-async function placeLiveSell(symbol,quantity){
-  try{
-    const ts=Date.now(),q=new URLSearchParams({symbol,side:"SELL",type:"MARKET",quantity:quantity.toFixed(6),timestamp:ts}).toString();
-    const sig=crypto2.createHmac("sha256",BINANCE_API_SECRET).update(q).digest("hex");
-    const order=await new Promise((resolve,reject)=>{
-      const req=https2.request({hostname:"api.binance.com",path:`/api/v3/order?${q}&signature=${sig}`,method:"POST",headers:{"X-MBX-APIKEY":BINANCE_API_KEY}},res=>{let d="";res.on("data",c=>d+=c);res.on("end",()=>{try{resolve(JSON.parse(d))}catch(e){reject(e)}});});
-      req.on("error",reject);req.setTimeout(8000,()=>{req.destroy();reject(new Error("Timeout"));});req.end();
+
+async function placeLiveBuy(symbol, usdtAmount) {
+  try {
+    if (!LIVE_MODE) return null;
+    // Safety: nunca invertir más del 40% del capital en una sola orden
+    const maxSafe = (bot?.totalValue()||500) * 0.40;
+    const safe = Math.min(usdtAmount, maxSafe);
+    if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
+    const order = await binanceRequest("POST", "order", {
+      symbol, side:"BUY", type:"MARKET", quoteOrderQty: safe.toFixed(2)
     });
-    console.log(`[LIVE][SELL] ${symbol} qty:${quantity}`,order.orderId);
+    if (order?.orderId) {
+      console.log(`[LIVE][BUY] ✅ ${symbol} $${safe.toFixed(2)} → orderId:${order.orderId}`);
+      tg.send && tg.send(`🟢 <b>ORDEN REAL EJECUTADA</b>\nBUY ${symbol} — $${safe.toFixed(2)}\nOrden: ${order.orderId}`);
+    } else {
+      console.error(`[LIVE][BUY] ❌ ${symbol}`, JSON.stringify(order));
+    }
     return order;
-  }catch(e){console.error("[LIVE][SELL]",e.message);return null;}
+  } catch(e) {
+    console.error(`[LIVE][BUY] Error ${symbol}:`, e.message);
+    return null;
+  }
 }
-*/
+
+async function placeLiveSell(symbol, quantity) {
+  try {
+    if (!LIVE_MODE) return null;
+    if (quantity <= 0) return null;
+    const order = await binanceRequest("POST", "order", {
+      symbol, side:"SELL", type:"MARKET", quantity: quantity.toFixed(6)
+    });
+    if (order?.orderId) {
+      console.log(`[LIVE][SELL] ✅ ${symbol} qty:${quantity} → orderId:${order.orderId}`);
+      tg.send && tg.send(`🔴 <b>VENTA REAL EJECUTADA</b>\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
+    } else {
+      console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
+    }
+    return order;
+  } catch(e) {
+    console.error(`[LIVE][SELL] Error ${symbol}:`, e.message);
+    return null;
+  }
+}
+
+async function getAccountBalance() {
+  try {
+    const data = await binanceRequest("GET", "account", {});
+    const balances = (data?.balances||[]).filter(b => parseFloat(b.free) > 0);
+    return balances;
+  } catch(e) { return null; }
+}
+
+// Verificar balance real al arrancar si LIVE_MODE
+async function verifyLiveBalance() {
+  if (!LIVE_MODE) return;
+  console.log("[LIVE] 🔑 API Binance configurada — verificando balance...");
+  const balances = await getAccountBalance();
+  if (!balances) { console.error("[LIVE] ❌ No se pudo verificar balance Binance"); return; }
+  const usdt = balances.find(b=>b.asset==="USDT");
+  const usdtBalance = parseFloat(usdt?.free||0);
+  console.log(`[LIVE] ✅ Balance USDT real: $${usdtBalance.toFixed(2)}`);
+  tg.send && tg.send(`🔑 <b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>\nEl bot operará con dinero real.`);
+  // Sincronizar capital del bot con balance real
+  if (bot && usdtBalance > 0) {
+    console.log(`[LIVE] Capital ajustado al balance real: $${usdtBalance.toFixed(2)}`);
+  }
+}
+
 
 function startLoop(){
   connectBinance();
@@ -357,7 +423,11 @@ function startLoop(){
         else blacklist.recordWin(trade.symbol);
       }
       // Descomentar para LIVE real:
-      // if(LIVE_MODE){ if(trade.type==="BUY") await placeLiveBuy(trade.symbol,trade.qty*trade.price); if(trade.type==="SELL") await placeLiveSell(trade.symbol,trade.qty); }
+      // ── ÓRDENES REALES BINANCE (activo cuando LIVE_MODE=true) ──────────────
+      if(LIVE_MODE){
+        if(trade.type==="BUY")  await placeLiveBuy(trade.symbol, trade.qty*trade.price);
+        if(trade.type==="SELL") await placeLiveSell(trade.symbol, trade.qty);
+      }
     }
 
     if(circuitBreaker?.triggered&&!cbNotified){tg.notifyCircuitBreaker(circuitBreaker.drawdown);cbNotified=true;}
