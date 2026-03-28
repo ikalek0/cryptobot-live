@@ -38,6 +38,7 @@ const SYNC_THRESHOLD = {
 // Si es la primera vez → esperar 1 hora para que el paper acumule datos
 const LIVE_START_DELAY_MS = 60 * 60 * 1000;
 let liveReady = true; // por defecto listo (si hay estado guardado)
+let liveStartTime = Date.now(); // para calcular tiempo restante
 
 async function initBot() {
   const saved = await loadState();
@@ -49,6 +50,7 @@ async function initBot() {
   // Solo esperar 1 hora si es el PRIMER arranque (sin estado guardado)
   if (!saved) {
     liveReady = false;
+    liveStartTime = Date.now() + LIVE_START_DELAY_MS;
     console.log(`[LIVE] ⏳ Primer arranque — esperando 1 hora para que el paper acumule datos…`);
     tg.send && tg.send("⏳ <b>LIVE iniciado por primera vez</b>\nEsperando 1 hora para que el paper acumule datos antes de operar.");
     setTimeout(() => {
