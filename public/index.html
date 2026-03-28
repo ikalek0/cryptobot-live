@@ -348,7 +348,7 @@ let equityHistory = [];
 // ── WS ────────────────────────────────────────────────────────────────────────
 const ws = new WebSocket(`wss://${location.host}`);
 ws.onopen  = () => { setLive(true); };
-ws.onclose = () => { setLive(false); setTimeout(()=>location.reload(),3000); };
+ws.onclose = () => { setLive(false); setTimeout(()=>location.reload(),5000); };
 ws.onmessage = e => {
   try {
     const msg = JSON.parse(e.data);
@@ -360,6 +360,11 @@ ws.onmessage = e => {
     }
   } catch {}
 };
+
+// HTTP fallback: muestra datos inmediatamente mientras el WS conecta
+fetch("/api/state").then(r=>r.json()).then(d=>{
+  if(!state && d?.totalValue) { state=d; window._currentState=d; if(d.equity?.length) equityHistory=d.equity.map(e=>typeof e==="object"&&e.v!==undefined?e:{v:typeof e==="object"?e.value:e,t:Date.now()}); render(); }
+}).catch(()=>{});
 
 function setLive(on) {
   document.getElementById("live-dot").className = "live-dot" + (on?" on":"");
