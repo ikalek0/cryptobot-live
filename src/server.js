@@ -484,7 +484,14 @@ function startLoop(){
 // Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
 server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🔴 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
 
-wss.on("connection",ws=>{
-  if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:bot.mode,syncHistory}}));
-  else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"LIVE",totalValue:0}}));
+wss.on("connection", ws=>{
+  // Enviar estado inicial
+  try {
+    if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:bot.mode,syncHistory}}));
+    else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"LIVE",totalValue:0}}));
+  } catch(e) {}
+  // Heartbeat: ping cada 25s para evitar que Railway cierre la conexión idle
+  const hb = setInterval(()=>{ if(ws.readyState===WebSocket.OPEN) ws.ping(); else clearInterval(hb); }, 25000);
+  ws.on("pong", ()=>{});
+  ws.on("close", ()=>clearInterval(hb));
 });

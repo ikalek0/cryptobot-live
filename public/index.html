@@ -359,6 +359,8 @@ function applyState(data) {
       {v: typeof e === 'object' ? e.value : e, t: Date.now()}
     );
   }
+  // Marcar conectado en cuanto lleguen datos válidos (HTTP poll o WS)
+  if (data.totalValue !== undefined && !data.loading) setLive(true);
   try { render(); } catch(re) { console.warn('render error:', re.message); }
 }
 
@@ -380,16 +382,33 @@ fetch('/api/state').then(r => r.json()).then(d => {
   else startHTTPPoll();
 }).catch(() => { startHTTPPoll(); });
 
-const ws = new WebSocket(`wss://${location.host}`);
-ws.onopen = () => { _wsConnected = true; stopHTTPPoll(); setLive(true); };
-ws.onclose = () => { _wsConnected = false; setLive(false); startHTTPPoll(); setTimeout(() => location.reload(), 8000); };
-ws.onerror = () => { startHTTPPoll(); };
-ws.onmessage = e => {
-  try {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'tick' || msg.type === 'state') { stopHTTPPoll(); applyState(msg.data); }
-  } catch(err) { console.warn('ws parse error:', err.message); }
-};
+// WebSocket con reconexión automática (sin recargar página)
+let _ws = null;
+let _wsRetry = 0;
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  _ws = new WebSocket(`${proto}//${location.host}`);
+  _ws.onopen = () => {
+    _wsConnected = true;
+    _wsRetry = 0;
+    stopHTTPPoll();
+    setLive(true);
+  };
+  _ws.onclose = () => {
+    _wsConnected = false;
+    startHTTPPoll(); // HTTP como fallback mientras reconecta
+    const delay = Math.min(1000 * Math.pow(2, _wsRetry++), 30000);
+    setTimeout(connectWS, delay); // reconectar con backoff
+  };
+  _ws.onerror = () => { startHTTPPoll(); };
+  _ws.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'tick' || msg.type === 'state') { stopHTTPPoll(); applyState(msg.data); }
+    } catch(err) {}
+  };
+}
+connectWS();
 
 function setLive(on) {
   document.getElementById("live-dot").className = "live-dot" + (on?" on":"");
