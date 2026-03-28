@@ -77,16 +77,57 @@ function bollingerBands(arr,p=20,mult=2){
   return{upper:mid+mult*sd,lower:mid-mult*sd,mid};
 }
 
-// ── Régimen ───────────────────────────────────────────────────────────────────
-function detectRegime(h){
-  if(!h||h.length<50)return"UNKNOWN";
-  const last=h[h.length-1],ma20=h.slice(-20).reduce((a,b)=>a+b,0)/20,ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
+// ── Régimen con ADX ───────────────────────────────────────────────────────────
+// ADX mide la FUERZA de la tendencia (no la dirección)
+// ADX > 25 = tendencia fuerte (BULL o BEAR según dirección)
+// ADX < 20 = sin tendencia (LATERAL)
+function calcADX(h, period=14) {
+  if (h.length < period*2) return 15; // sin datos = asumir lateral
+  const slice = h.slice(-(period*2+1));
+  let plusDM=0, minusDM=0, tr=0;
+  const smoothed = { plusDM:0, minusDM:0, tr:0 };
+  for (let i=1; i<slice.length; i++) {
+    const high=slice[i]*1.001, low=slice[i]*0.999; // approx sin datos OHLC
+    const prevHigh=slice[i-1]*1.001, prevLow=slice[i-1]*0.999, prevClose=slice[i-1];
+    const upMove=high-prevHigh, downMove=prevLow-low;
+    const pdm = upMove>downMove&&upMove>0 ? upMove : 0;
+    const mdm = downMove>upMove&&downMove>0 ? downMove : 0;
+    const atr=Math.max(high-low, Math.abs(high-prevClose), Math.abs(low-prevClose));
+    if (i <= period) { smoothed.plusDM+=pdm; smoothed.minusDM+=mdm; smoothed.tr+=atr; }
+    else {
+      smoothed.plusDM = smoothed.plusDM - smoothed.plusDM/period + pdm;
+      smoothed.minusDM= smoothed.minusDM- smoothed.minusDM/period + mdm;
+      smoothed.tr     = smoothed.tr     - smoothed.tr/period      + atr;
+    }
+  }
+  if (!smoothed.tr) return 15;
+  const plusDI=100*smoothed.plusDM/smoothed.tr;
+  const minusDI=100*smoothed.minusDM/smoothed.tr;
+  const dx=Math.abs(plusDI-minusDI)/(plusDI+minusDI||1)*100;
+  return +dx.toFixed(1);
+}
+
+function detectRegime(h) {
+  if (!h||h.length<50) return "UNKNOWN";
+  const last=h[h.length-1];
+  const ma20=h.slice(-20).reduce((a,b)=>a+b,0)/20;
+  const ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
   const trend20=(last-h[Math.max(0,h.length-20)])/h[Math.max(0,h.length-20)]*100;
+  const trend5 =(last-h[Math.max(0,h.length-5)]) /h[Math.max(0,h.length-5)] *100;
+  const adx=calcADX(h, 14);
   const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
-  if(vol>0.015&&Math.abs(trend20)<2)return"LATERAL";
-  if(last>ma20&&ma20>ma50&&trend20>2)return"BULL";
-  if(last<ma20&&ma20<ma50&&trend20<-2)return"BEAR";
-  return"LATERAL";
+
+  // ADX fuerte + dirección clara = tendencia
+  if (adx > 22) {
+    if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
+    if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
+  }
+  // BTC caída rápida en 5 velas = BEAR aunque ADX no lo confirme aún
+  if (trend5 < -3 && last < ma20) return "BEAR";
+  // Subida clara con MA alineadas = BULL
+  if (last>ma20 && ma20>ma50 && trend20>3 && adx>18) return "BULL";
+  // Default: LATERAL (sin tendencia confirmada)
+  return "LATERAL";
 }
 
 // ── Señales adaptativas ───────────────────────────────────────────────────────
@@ -377,6 +418,12 @@ class CryptoBotFinal {
             this.riskLearning.recordDecision("CRYPTOPANIC_PAIR", s.symbol, this.prices[s.symbol]||0, "block_entry", {score:s.score});
             return false;
           }
+          // ── BTC momentum guard: no entrar alts en LATERAL si BTC cae ────────
+          const btcHL=this.history["BTCUSDT"]||[];
+          const btcM5L=btcHL.length>5?((btcHL[btcHL.length-1]-btcHL[btcHL.length-6])/btcHL[btcHL.length-6]*100):0;
+          if(btcM5L<-2 && s.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") return false;
+          // ── MR más estricto: RSI<38 o BB<20% necesario ──────────────────────
+          if(s.strategy==="MEAN_REVERSION" && s.rsiVal>42 && (s.bbPos||0.5)>0.25) return false;
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<REENTRY_COOLDOWN)return false;
           const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=2)return false;
           if(!checkCorrelation(this.portfolio,s.symbol,this.history))return false;
