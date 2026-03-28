@@ -29,7 +29,8 @@ class TrailingStop {
     const stopPrice=this.highs[symbol]*(1-trailingPct);
     // Solo activar trailing con minimo 2% de beneficio — evita cierres prematuros por ruido de mercado
     const profitPct=(this.highs[symbol]-entryPrice)/entryPrice;
-    const hit=currentPrice<=stopPrice&&profitPct>=0.02;
+    const trailingMin = this._learnedTrailingMin || 0.02;
+    const hit=currentPrice<=stopPrice&&profitPct>=trailingMin;
     const profitLocked=((this.highs[symbol]-entryPrice)/entryPrice)*100;
     return{stopPrice,maxHigh:this.highs[symbol],hit,profitLocked};
   }

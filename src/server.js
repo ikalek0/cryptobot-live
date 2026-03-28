@@ -242,7 +242,12 @@ function startLoop(){
     simulatePrices();
 
     const marketState=marketGuard.update(bot.prices["BTCUSDT"]);
-    if(marketState?.defensive&&!wasDefensive){tg.notifyDefensiveMode(marketState.btcDrawdown);wasDefensive=true;}
+    if(marketState?.defensive&&!wasDefensive){
+      tg.notifyDefensiveMode(marketState.btcDrawdown);
+      wasDefensive=true;
+      // Record defensive mode decision for learning
+      if(bot) bot.riskLearning?.recordDecision("DEFENSIVE_MODE","BTCUSDT",bot.prices?.["BTCUSDT"]||0,"block_entry",{drawdown:marketState.btcDrawdown});
+    }
     if(!marketState?.defensive&&wasDefensive){tg.notifyDefensiveOff();wasDefensive=false;}
 
     bot.marketDefensive=marketGuard.isDefensive();
@@ -274,10 +279,60 @@ function startLoop(){
     if (todayPnlPct >= 7)  bot._dailyLimitBoost = Math.round(todayPnlPct / 5);
     else                   bot._dailyLimitBoost = 0;
 
-    bot.hourMultiplier = getTradingScore().score * momentumMult;
+    // CryptoPanic: si hay noticias negativas, reducir tamaño global
+    const cpGlobalMult = cryptoPanic.globalDefensive ? 0.3 : 1.0;
+    bot._newsMultiplier = cpGlobalMult;
+    bot._cryptoPanicStatus = cryptoPanic.getStatus();
+    // Pasar el multiplicador de noticias al engine para usarlo por par
+    // Record CryptoPanic global state for learning
+    if (cryptoPanic.globalDefensive && !bot._wasGlobalDefensive) {
+      // Just became defensive — record decision for each open position
+      for (const sym of Object.keys(bot.portfolio||{})) {
+        bot.riskLearning?.recordDecision("CRYPTOPANIC_GLOBAL", sym, bot.prices[sym]||0, "reduce_size", {global:true});
+      }
+    }
+    bot._wasGlobalDefensive = cryptoPanic.globalDefensive;
+    bot._cryptoPanicFn = (symbol) => cryptoPanic.getSizeMultiplier(symbol);
+
+    bot.hourMultiplier = getTradingScore().score * momentumMult * cpGlobalMult;
+
+    // Alertas Telegram momentum
+    const prevMomentumLevel = bot._prevMomentumLevel || 1.0;
+    if (momentumMult >= 1.6 && prevMomentumLevel < 1.6 && tg.notifyMomentumBoost)
+      tg.notifyMomentumBoost(momentumMult, todayPnlPct);
+    else if (momentumMult <= 0.7 && prevMomentumLevel > 0.7 && tg.notifyMomentumDefensive)
+      tg.notifyMomentumDefensive(todayPnlPct);
+    bot._prevMomentumLevel = momentumMult;
+
+    // Alertas Telegram CryptoPanic
+    const prevCpGlobal = bot._prevCpGlobal || false;
+    const prevCpPairs = bot._prevCpPairs || [];
+    if (cryptoPanic.globalDefensive && !prevCpGlobal && tg.notifyCryptoPanicAlert)
+      tg.notifyCryptoPanicAlert([], true);
+    else {
+      const newPairs = [...cryptoPanic.defensivePairs].filter(p => !prevCpPairs.includes(p));
+      if (newPairs.length && tg.notifyCryptoPanicAlert)
+        tg.notifyCryptoPanicAlert(newPairs.map(p=>p.replace("USDT","")), false);
+    }
+    bot._prevCpGlobal = cryptoPanic.globalDefensive;
+    bot._prevCpPairs = [...cryptoPanic.defensivePairs];
+
+    // ── Aplicar parámetros aprendidos a los subsistemas ──────────────────────
+    // Notificar si RiskLearning actualizó parámetros
+    if (bot._rlChanges?.changes?.length && tg.notifyRiskLearningUpdate) {
+      tg.notifyRiskLearningUpdate(bot._rlChanges.changes);
+      bot._rlChanges = null;
+    }
+    if (bot.riskLearning) {
+      // CryptoPanic: ajustar umbral global y expiración
+      cryptoPanic._learnedGlobalThreshold = bot.riskLearning.get("cpGlobalThreshold", 5);
+      cryptoPanic._learnedExpiryHours     = bot.riskLearning.get("cpExpiryHours", 2);
+      // TrailingStop: ajustar activación mínima
+      if (bot.trailing) bot.trailing._learnedTrailingMin = bot.riskLearning.get("trailingMinPct", 2) / 100;
+    }
 
     if (momentumMult !== 1.0 && ticks % 30 === 0) {
-      console.log(`[LIVE] Momentum x${momentumMult} | P&L hoy: +${todayPnlPct.toFixed(1)}% | Mult final: ${bot.hourMultiplier.toFixed(2)}`);
+      console.log(`[LIVE] Momentum x${momentumMult} | CryptoPanic x${cpGlobalMult} | P&L hoy: +${todayPnlPct.toFixed(1)}%`);
     }
 
     // No operar hasta que pase 1 hora desde el arranque
@@ -296,6 +351,8 @@ function startLoop(){
       if(trade.type==="SELL"){
         if(trade.pnl>=10)  tg.notifyBigWin(trade);
         if(trade.pnl<=-8)  tg.notifyBigLoss(trade);
+        // Explicabilidad: notificar trades significativos con explicación
+        if(Math.abs(trade.pnl||0)>=2) tg.notifyTradeWithExplanation(trade, bot.marketRegime, 50);
         if(trade.pnl<0){const wasBl=blacklist.isBlacklisted(trade.symbol);blacklist.recordLoss(trade.symbol);if(!wasBl&&blacklist.isBlacklisted(trade.symbol))tg.notifyBlacklist(trade.symbol);}
         else blacklist.recordWin(trade.symbol);
       }
@@ -334,6 +391,9 @@ function startLoop(){
         dailyLimit,dailyUsed,
         dailyPnlPct:bot._dailyPnlPct||0,
         momentumMult:bot.hourMultiplier,
+        cryptoPanic:bot._cryptoPanicStatus||null,
+        riskLearning:bot._rlChanges||null,
+        riskLearningStats:bot.riskLearning?.getStats()||{},
         syncHistory:syncHistory.slice(-7),
         syncThreshold:SYNC_THRESHOLD,
       }

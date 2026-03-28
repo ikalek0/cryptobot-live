@@ -122,3 +122,68 @@ function notifyMaxDrawdown(alert) {
   send(`🚨 <b>ALERTA DRAWDOWN MÁXIMO</b>\nPérdida desde máximo: <b>${alert.drawdownPct}%</b>\nMáximo histórico: $${alert.maxEquity}\nValor actual: $${alert.currentEquity}\nRevisa la estrategia manualmente.`);
 }
 module.exports.notifyMaxDrawdown = notifyMaxDrawdown;
+
+// ── Explicabilidad de trades ───────────────────────────────────────────────────
+function explainTrade(trade, regime, patternWinRate) {
+  const sym = trade.symbol?.replace("USDT","") || "—";
+  const action = trade.type === "BUY" ? "Compré" : "Vendí";
+  const reasons = [];
+
+  if (trade.type === "BUY") {
+    if (trade.score >= 75)       reasons.push(`señal muy fuerte (score ${trade.score})`);
+    else if (trade.score >= 60)  reasons.push(`señal moderada (score ${trade.score})`);
+    if (regime === "BULL")       reasons.push("mercado alcista");
+    if (regime === "LATERAL")    reasons.push("rebote en soporte Bollinger");
+    if (regime === "BEAR")       reasons.push("rebote extremo en sobreventa");
+    if (patternWinRate >= 65)    reasons.push(`patrón con ${patternWinRate}% win rate histórico`);
+    if (trade.strategy === "ENSEMBLE") reasons.push("consenso de múltiples estrategias");
+  } else {
+    const r = trade.reason || "";
+    if (r.includes("STOP"))      reasons.push("stop loss alcanzado");
+    else if (r.includes("TRAILING")) reasons.push(`trailing stop activado (+${trade.pnl?.toFixed(1)||0}% capturado)`);
+    else if (r.includes("MR"))   reasons.push("objetivo de mean reversion alcanzado");
+    else if (r.includes("BEAR")) reasons.push("mercado bajista, salida preventiva");
+    else                         reasons.push("señal de venta del modelo");
+  }
+
+  const explanation = `${action} <b>${sym}</b>: ${reasons.join(", ")}.`;
+  return explanation;
+}
+
+function notifyTradeWithExplanation(trade, regime, patternWinRate) {
+  if (!trade || trade.type !== "SELL") return; // solo notificar ventas cerradas
+  const pnl = trade.pnl || 0;
+  if (Math.abs(pnl) < 1) return; // solo trades significativos
+  const emoji = pnl >= 3 ? "💰" : pnl >= 0 ? "✅" : pnl >= -3 ? "⚠️" : "📉";
+  const explanation = explainTrade(trade, regime, patternWinRate);
+  send(
+    `${emoji} <b>${trade.symbol?.replace("USDT","")} ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</b>\n` +
+    `${explanation}\n` +
+    `Precio salida: $${trade.price} · ${trade.reason}`
+  );
+}
+
+module.exports.notifyTradeWithExplanation = notifyTradeWithExplanation;
+module.exports.explainTrade = explainTrade;
+module.exports.send = send;
+
+function notifyMomentumBoost(mult, pnlPct) {
+  send(`🚀 <b>MOMENTUM ACTIVADO</b>\nP&L hoy: <b>+${pnlPct.toFixed(1)}%</b>\nTamaño posiciones: <b>×${mult.toFixed(1)}</b>\nEl bot aumenta apuestas en días ganadores.`);
+}
+function notifyMomentumDefensive(pnlPct) {
+  send(`🛡 <b>MODO DEFENSIVO</b>\nP&L hoy: <b>${pnlPct.toFixed(1)}%</b>\nTamaño posiciones reducido a ×0.7`);
+}
+function notifyCryptoPanicAlert(pairs, global_) {
+  if (global_) send(`🚨 <b>CRYPTOPANIC — ALERTA GLOBAL</b>\nNoticias negativas detectadas. Posiciones reducidas al 30%.`);
+  else if (pairs.length) send(`⚠️ <b>CRYPTOPANIC — ${pairs.join(", ")}</b>\nNoticias negativas. Posiciones en estos pares reducidas al 50%.`);
+}
+module.exports.notifyMomentumBoost = notifyMomentumBoost;
+module.exports.notifyMomentumDefensive = notifyMomentumDefensive;
+module.exports.notifyCryptoPanicAlert = notifyCryptoPanicAlert;
+
+function notifyRiskLearningUpdate(changes) {
+  if (!changes?.length) return;
+  const lines = changes.map(c => `  <b>${c.rule}</b>: ${c.from}→${c.to} (${c.reason})`).join("\n");
+  send(`🧠 <b>RISK LEARNING — Parámetros ajustados</b>\n${lines}\n\nEl bot ha aprendido que sus reglas de riesgo necesitaban ajuste.`);
+}
+module.exports.notifyRiskLearningUpdate = notifyRiskLearningUpdate;

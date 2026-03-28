@@ -80,6 +80,11 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 .chart-crosshair{position:absolute;top:0;bottom:20px;width:1px;background:var(--border2);pointer-events:none;opacity:0;transition:opacity .1s}
 .chart-info{display:flex;justify-content:space-between;margin-top:4px;font-size:10px;color:var(--dim2)}
 
+.pair-selector{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px}
+.pair-btn{padding:2px 7px;border-radius:2px;font-size:9px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--dim);font-family:'DM Sans',sans-serif;transition:all .15s}
+.pair-btn.active{background:var(--gold);color:var(--bg);border-color:var(--gold)}
+
+
 /* ── SIGNALS TABLE ── */
 .sig-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .sig-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;transition:all .2s}
@@ -207,12 +212,17 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <div class="card">
       <div class="card-title">
         <span>Curva de capital</span>
-        <div class="period-selector">
-          <button class="ps-btn active" onclick="setPeriod('1H',this)">1H</button>
-          <button class="ps-btn" onclick="setPeriod('1D',this)">1D</button>
-          <button class="ps-btn" onclick="setPeriod('1W',this)">1S</button>
-          <button class="ps-btn" onclick="setPeriod('1M',this)">1M</button>
-          <button class="ps-btn" onclick="setPeriod('ALL',this)">Todo</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div class="period-selector" style="margin-bottom:0">
+            <button class="ps-btn active" onclick="setPeriod('1H',this)">1H</button>
+            <button class="ps-btn" onclick="setPeriod('1D',this)">1D</button>
+            <button class="ps-btn" onclick="setPeriod('1W',this)">1S</button>
+            <button class="ps-btn" onclick="setPeriod('1M',this)">1M</button>
+            <button class="ps-btn" onclick="setPeriod('ALL',this)">Todo</button>
+          </div>
+          <select id="pair-selector" onchange="setPairFilter(this.value)" style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
+            <option value="ALL">Todos los pares</option>
+          </select>
         </div>
       </div>
       <div class="chart-canvas-wrap">
@@ -344,7 +354,8 @@ ws.onmessage = e => {
     const msg = JSON.parse(e.data);
     if (msg.type==="tick"||msg.type==="state") {
       state = msg.data;
-      if (state.equity?.length) equityHistory = state.equity.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
+      if (state.equity?.length) equityHistory = state.equity
+      window._currentState = state;.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
       render();
     }
   } catch {}
@@ -396,11 +407,30 @@ function formatAxisTime(ts, period) {
   return d.toLocaleDateString("es-ES",{day:"2-digit",month:"2-digit"});
 }
 
+// Pair filter
+let _currentPair = "ALL";
+function setPairFilter(pair) {
+  _currentPair = pair;
+  drawChart();
+}
+function updatePairSelector(portfolio, trades) {
+  const sel = document.getElementById("pair-selector");
+  if (!sel) return;
+  const pairs = new Set(["ALL"]);
+  Object.keys(portfolio||{}).forEach(s=>pairs.add(s));
+  (trades||[]).forEach(t=>t.symbol&&pairs.add(t.symbol));
+  const current = sel.value;
+  sel.innerHTML = [...pairs].map(p=>`<option value="${p}"${p===current?" selected":""}>${p==="ALL"?"Todos":p.replace("USDT","")}</option>`).join("");
+}
+
 function drawChart() {
+  if (_activePair !== "ALL") { drawPairChart(); return; }
   const canvas = document.getElementById("chart-canvas");
   if (!canvas) return;
   const equity = filterByPeriod(equityHistory, currentPeriod);
   if (!equity.length) return;
+  // Filter by pair if selected (show only ticks when pair was open)
+  // For now show all equity but overlay pair-specific trades
 
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -479,9 +509,57 @@ function drawChart() {
   document.getElementById("chart-start").textContent = formatAxisTime(times[0], currentPeriod) + " · " + fU(vals[0]);
   document.getElementById("chart-end").textContent = fU(vals[vals.length-1]) + " · " + formatAxisTime(times[times.length-1], currentPeriod);
 
+  // Draw trade marks (BUY=green triangle up, SELL=red/green dot)
+  const trades = (window._currentState?.log||[]).filter(t=>{
+    if (_currentPair !== "ALL" && t.symbol !== _currentPair) return false;
+    const ts = t.ts ? new Date(t.ts).getTime() : null;
+    if (!ts || !equity.length) return false;
+    return ts >= equity[0].t && ts <= equity[equity.length-1].t;
+  });
+  trades.forEach(t => {
+    const ts = new Date(t.ts).getTime();
+    const frac = (ts - equity[0].t) / Math.max(1, equity[equity.length-1].t - equity[0].t);
+    const x = PAD_L + frac * chartW;
+    const isSell = t.type === "SELL";
+    const win = isSell && (t.pnl||0) > 0;
+    ctx.beginPath();
+    if (isSell) {
+      ctx.arc(x, PAD_T + chartH * 0.2, 4, 0, Math.PI*2);
+      ctx.fillStyle = win ? "rgba(0,217,126,0.9)" : "rgba(255,77,106,0.9)";
+      ctx.fill();
+    } else {
+      ctx.moveTo(x, PAD_T + chartH * 0.15);
+      ctx.lineTo(x-4, PAD_T + chartH * 0.3);
+      ctx.lineTo(x+4, PAD_T + chartH * 0.3);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(201,168,76,0.8)";
+      ctx.fill();
+    }
+  });
+
   // Store for hover
   canvas._equity = equity;
   canvas._chartBounds = {W, H, chartH, chartW, PAD_L, PAD_R, PAD_T, AXIS_H, minV, rangeV};
+  // ── Trade marks on chart ──────────────────────────────────────────────────
+  const trades = (state?.log||[]).filter(l=>l.type==="SELL"&&l.ts).slice(0,50);
+  for (const t of trades) {
+    const ts = new Date(t.ts).getTime();
+    const eq2 = canvas._equity;
+    if (!eq2?.length) break;
+    // find nearest point
+    const nearest = eq2.reduce((b,p)=>Math.abs(p.t-ts)<Math.abs(b.t-ts)?p:b, eq2[0]);
+    if (Math.abs(nearest.t - ts) > 3600000*6) continue; // skip if >6h off
+    const px = xOf(eq2.indexOf(nearest));
+    const py = yOf(nearest.v);
+    const win = t.pnl >= 0;
+    ctx.beginPath();
+    ctx.arc(px, py, 3.5, 0, Math.PI*2);
+    ctx.fillStyle = win ? "rgba(0,217,126,0.9)" : "rgba(255,77,106,0.85)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
 }
 
 // Hover/tooltip interaction
@@ -584,6 +662,7 @@ function render() {
   // Chart
   drawChart();
   if (!window._chartResizeAdded) { window._chartResizeAdded=true; window.addEventListener("resize",()=>requestAnimationFrame(drawChart)); }
+  updatePairSelector(s.portfolio, s.log);
 
   // Mercado
   const regime = s.marketRegime||"UNKNOWN";
@@ -739,6 +818,109 @@ async function resetBot() {
 }
 
 // Re-render signals on tab change
+
+let _activePair = "ALL";
+
+function setActivePair(pair, btn) {
+  _activePair = pair;
+  document.querySelectorAll(".pair-btn").forEach(b=>b.classList.remove("active"));
+  btn.classList.add("active");
+  drawChart();
+}
+
+// Override filterByPeriod to also filter by pair when active
+const _origFilterByPeriod = filterByPeriod;
+function filterByPeriod(equity, period) {
+  let filtered = _origFilterByPeriod(equity, period);
+  if (_activePair !== "ALL" && state?.portfolio) {
+    // For pair view: show price history of that pair overlaid on equity
+    // Actually show equity but annotate with pair's trade marks
+  }
+  return filtered;
+}
+
+// Draw pair price chart when a specific pair is selected
+function drawPairChart() {
+  if (_activePair === "ALL") return; // handled by drawChart
+  const canvas = document.getElementById("chart-canvas");
+  if (!canvas || !state) return;
+  const history = state.priceHistory?.[_activePair] || [];
+  if (!history.length) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = rect.width || 600, H = 140;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  canvas.style.width = W+"px"; canvas.style.height = H+"px";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const AXIS_H=20, PAD_L=8, PAD_R=8, PAD_T=8;
+  const chartH = H-AXIS_H-PAD_T, chartW = W-PAD_L-PAD_R;
+  const vals = history.slice(-200);
+  const minV=Math.min(...vals), maxV=Math.max(...vals), rangeV=maxV-minV||1;
+  const now = Date.now(), tickMs = (state.tick||0) > 0 ? 2000 : 10000;
+  const pts = vals.map((v,i)=>({v, t: now-(vals.length-1-i)*tickMs}));
+  
+  const xOf = i => PAD_L + (i/(vals.length-1||1))*chartW;
+  const yOf = v => PAD_T + chartH - ((v-minV)/rangeV)*chartH;
+  const trend = vals[vals.length-1]>=vals[0];
+  const color = trend?"#1a7a4a":"#c0392b";
+
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(vals[0]));
+  vals.forEach((v,i)=>ctx.lineTo(xOf(i),yOf(v)));
+  ctx.lineTo(xOf(vals.length-1), PAD_T+chartH);
+  ctx.lineTo(PAD_L, PAD_T+chartH);
+  ctx.closePath();
+  ctx.fillStyle = trend?"rgba(26,122,74,0.12)":"rgba(192,57,43,0.10)";
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(vals[0]));
+  vals.forEach((v,i)=>ctx.lineTo(xOf(i),yOf(v)));
+  ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.stroke();
+
+  // Price labels
+  ctx.fillStyle="rgba(138,130,120,0.8)"; ctx.font="9px DM Sans,sans-serif";
+  ctx.textAlign="right"; ctx.fillText("$"+maxV.toFixed(4), W-PAD_R, PAD_T+10);
+  ctx.textAlign="left";  ctx.fillText("$"+minV.toFixed(4), PAD_L, PAD_T+chartH-2);
+
+  // Mark trades for this pair
+  const pairTrades = (state.log||[]).filter(l=>l.symbol===_activePair&&l.type==="SELL"&&l.ts).slice(0,20);
+  for (const t of pairTrades) {
+    const ts = new Date(t.ts).getTime();
+    const idx = Math.max(0, pts.length-1 - Math.round((now-ts)/tickMs));
+    if (idx<0||idx>=vals.length) continue;
+    const px=xOf(idx), py=yOf(vals[idx]);
+    const win=t.pnl>=0;
+    ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2);
+    ctx.fillStyle=win?"rgba(0,217,126,0.9)":"rgba(255,77,106,0.9)"; ctx.fill();
+  }
+
+  // Current position marker
+  const pos = state.portfolio?.[_activePair];
+  if (pos) {
+    const entryIdx = vals.length-1;
+    ctx.beginPath(); ctx.arc(xOf(entryIdx), yOf(pos.entryPrice), 5, 0, Math.PI*2);
+    ctx.fillStyle="rgba(201,168,76,0.9)"; ctx.fill();
+    ctx.strokeStyle="#c9a84c"; ctx.lineWidth=1.5; ctx.stroke();
+    // Stop loss line
+    ctx.beginPath();
+    ctx.setLineDash([3,3]);
+    ctx.moveTo(PAD_L, yOf(pos.stopLoss));
+    ctx.lineTo(W-PAD_R, yOf(pos.stopLoss));
+    ctx.strokeStyle="#ff4d6a80"; ctx.lineWidth=1; ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  document.getElementById("chart-start").textContent = _activePair.replace("USDT","")+" · $"+vals[0].toFixed(4);
+  document.getElementById("chart-end").textContent = "$"+vals[vals.length-1].toFixed(4)+" · "+(trend?"▲":"▼")+" "+Math.abs(((vals[vals.length-1]-vals[0])/vals[0]*100)).toFixed(2)+"%";
+  
+  canvas._equity = pts;
+  canvas._chartBounds = {W,H,chartH,chartW,PAD_L,PAD_R,PAD_T,AXIS_H:20,minV,rangeV};
+}
+
 document.querySelectorAll(".nav-tab").forEach(btn=>{
   btn.addEventListener("click",()=>{ if(state) { renderSignals(state); renderRisk(state); } });
 });

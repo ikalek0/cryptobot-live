@@ -3,6 +3,7 @@
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } = require("./live_features_patch");
+const { RiskLearning } = require("./riskLearning");
 
 const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDT || "50000");
 const MIN_CASH_RESERVE = 0.15;
@@ -194,6 +195,7 @@ class CryptoBotFinal {
     this.autoBlacklist   = new AutoBlacklist(3, 24*3600*1000);
     this.partialClose    = new PartialCloseManager();
     this.confidence      = new ConfidenceScore();
+    this.riskLearning    = new RiskLearning();
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
       this.cash=saved.cash||INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
@@ -208,6 +210,7 @@ class CryptoBotFinal {
       if(saved.trailingHighs)this.trailing.highs=saved.trailingHighs;
       if(saved.blacklistData)this.autoBlacklist.loadJSON(saved.blacklistData);
       if(saved.confidenceData)this.confidence.loadJSON(saved.confidenceData);
+      if(saved.riskLearningData)this.riskLearning.loadJSON(saved.riskLearningData);
       console.log(`[ENGINE LIVE] Restaurado tick #${this.tick} | $${this.totalValue().toFixed(2)}`);
     }else{
       this.prices={};this.history={};this.portfolio={};
@@ -263,6 +266,10 @@ class CryptoBotFinal {
     }));
 
     const newTrades=[],fee=getFee(this.useBnb);
+    // RiskLearning: evaluar decisiones pasadas con precios actuales
+    this.riskLearning.evaluateDecisions(this.prices);
+    const rlResult = this.riskLearning.optimize();
+    if (rlResult) this._rlChanges = rlResult;
 
     // GESTIÓN POSICIONES — con cierre parcial
     for(const[symbol,pos]of Object.entries(this.portfolio)){
@@ -326,7 +333,15 @@ class CryptoBotFinal {
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping||s.isFalling)return false;
           // ── Blacklist automática ──────────────────────────────────────────
-          if(this.autoBlacklist.isBlacklisted(s.symbol))return false;
+          if(this.autoBlacklist.isBlacklisted(s.symbol)){
+            this.riskLearning.recordDecision("BLACKLIST_LOSSES", s.symbol, this.prices[s.symbol]||0, "block_entry");
+            return false;
+          }
+          // ── CryptoPanic: no entrar si noticia negativa activa en este par ──
+          if(this._cryptoPanicFn && this._cryptoPanicFn(s.symbol) < 0.6) {
+            this.riskLearning.recordDecision("CRYPTOPANIC_PAIR", s.symbol, this.prices[s.symbol]||0, "block_entry", {score:s.score});
+            return false;
+          }
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<REENTRY_COOLDOWN)return false;
           const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=2)return false;
           if(!checkCorrelation(this.portfolio,s.symbol,this.history))return false;
@@ -335,7 +350,7 @@ class CryptoBotFinal {
 
         for(const sig of buyable){
           const price=this.prices[sig.symbol];if(!price)continue;
-          const newsMultiplier=this._newsMultiplier||1.0;
+          const newsMultiplier = this._cryptoPanicFn ? this._cryptoPanicFn(sig.symbol) : (this._newsMultiplier||1.0);
           const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price;
@@ -402,7 +417,12 @@ class CryptoBotFinal {
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
+      priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
+      riskLearningStats:this.riskLearning.getStats(),
+      riskLearningParams:this.riskLearning.params,
       maxEquity:+this.maxEquity.toFixed(2),drawdownPct:+(dd*100).toFixed(2),
+      confidence: this.confidence.get(),
+      autoBlacklist: this.autoBlacklist.getStatus(),
     };
   }
 
