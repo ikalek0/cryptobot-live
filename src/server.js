@@ -482,4 +482,7 @@ function startLoop(){
   server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🔴 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
 }
 
-wss.on("connection",ws=>{if(bot)ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:bot.mode,syncHistory}}));});
+wss.on("connection",ws=>{
+  if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:bot.mode,syncHistory}}));
+  else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"LIVE",totalValue:0}}));
+});
