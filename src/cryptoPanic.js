@@ -53,8 +53,10 @@ class CryptoPanicDefense {
         let body = "";
         res.on("data", c => body += c);
         res.on("end", () => {
-          try { resolve(JSON.parse(body)); }
-          catch (e) { reject(new Error("JSON parse error")); }
+          try {
+            if (!body.startsWith("{")) throw new Error("Not JSON");
+            resolve(JSON.parse(body));
+          } catch (e) { reject(new Error("JSON parse error")); }
         });
       }).on("error", reject).on("timeout", () => reject(new Error("timeout")));
     });

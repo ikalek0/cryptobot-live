@@ -63,7 +63,7 @@ async function initBot() {
   console.log(`\n[LIVE] Modo: ${bot.mode} | Capital: $${CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
   tg.notifyStartup(bot.mode + " (instancia controlada)");
   tg.scheduleReports(() => ({ ...bot.getState(), instance:bot.mode }));
-  const tgControls = tg.startCommandListener(
+  tgControls = tg.startCommandListener(
   () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
   { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
 );
@@ -73,6 +73,7 @@ async function initBot() {
 
 // Historial de sincronizaciones recibidas del PAPER
 let syncHistory = [];
+let tgControls = null; // control remoto Telegram
 
 function sendEquityToBafir(value) {
   try {

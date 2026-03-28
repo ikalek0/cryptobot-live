@@ -356,9 +356,9 @@ ws.onmessage = e => {
       state = msg.data;
       window._currentState = state;
       if (state.equity?.length) equityHistory = state.equity.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
-      render();
+      try { render(); } catch(re) { console.warn('render error:', re.message); }
     }
-  } catch {}
+  } catch(e) { console.warn('ws parse error:', e.message); }
 };
 
 // HTTP fallback: muestra datos inmediatamente mientras el WS conecta
@@ -617,7 +617,7 @@ function drawChart() {
 
 // ── RENDER ────────────────────────────────────────────────────────────────────
 function render() {
-  if (!state) return;
+  if (!state || !document.getElementById('kpi-total')) return;
   const s = state;
 
   // Header
