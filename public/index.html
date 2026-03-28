@@ -345,26 +345,51 @@ let state = null;
 let currentPeriod = "1H";
 let equityHistory = [];
 
-// ── WS ────────────────────────────────────────────────────────────────────────
+// ── WS + HTTP FALLBACK ────────────────────────────────────────────────────────
+let _wsConnected = false;
+let _pollInterval = null;
+
+function applyState(data) {
+  if (!data || typeof data !== 'object') return;
+  state = data;
+  window._currentState = data;
+  if (data.equity?.length) {
+    equityHistory = data.equity.map(e =>
+      typeof e === 'object' && e.v !== undefined ? e :
+      {v: typeof e === 'object' ? e.value : e, t: Date.now()}
+    );
+  }
+  try { render(); } catch(re) { console.warn('render error:', re.message); }
+}
+
+function startHTTPPoll() {
+  if (_pollInterval) return;
+  _pollInterval = setInterval(() => {
+    fetch('/api/state').then(r => r.json()).then(d => {
+      if (d && d.totalValue !== undefined) applyState(d);
+    }).catch(() => {});
+  }, 2000);
+}
+
+function stopHTTPPoll() {
+  if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+}
+
+fetch('/api/state').then(r => r.json()).then(d => {
+  if (d && d.totalValue !== undefined) applyState(d);
+  else startHTTPPoll();
+}).catch(() => { startHTTPPoll(); });
+
 const ws = new WebSocket(`wss://${location.host}`);
-ws.onopen  = () => { setLive(true); };
-ws.onclose = () => { setLive(false); setTimeout(()=>location.reload(),5000); };
+ws.onopen = () => { _wsConnected = true; stopHTTPPoll(); setLive(true); };
+ws.onclose = () => { _wsConnected = false; setLive(false); startHTTPPoll(); setTimeout(() => location.reload(), 8000); };
+ws.onerror = () => { startHTTPPoll(); };
 ws.onmessage = e => {
   try {
     const msg = JSON.parse(e.data);
-    if (msg.type==="tick"||msg.type==="state") {
-      state = msg.data;
-      window._currentState = state;
-      if (state.equity?.length) equityHistory = state.equity.map(e=>typeof e==="object"&&e.v!==undefined ? e : {v:typeof e==="object"?e.value:e, t:Date.now()});
-      try { render(); } catch(re) { console.warn('render error:', re.message); }
-    }
-  } catch(e) { console.warn('ws parse error:', e.message); }
+    if (msg.type === 'tick' || msg.type === 'state') { stopHTTPPoll(); applyState(msg.data); }
+  } catch(err) { console.warn('ws parse error:', err.message); }
 };
-
-// HTTP fallback: muestra datos inmediatamente mientras el WS conecta
-fetch("/api/state").then(r=>r.json()).then(d=>{
-  if(!state && d?.totalValue) { state=d; window._currentState=d; if(d.equity?.length) equityHistory=d.equity.map(e=>typeof e==="object"&&e.v!==undefined?e:{v:typeof e==="object"?e.value:e,t:Date.now()}); render(); }
-}).catch(()=>{});
 
 function setLive(on) {
   document.getElementById("live-dot").className = "live-dot" + (on?" on":"");

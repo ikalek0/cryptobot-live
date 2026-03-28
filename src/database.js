@@ -42,7 +42,7 @@ async function saveState(state) {
     const client = await getClient();
     if (client) {
       await client.query(
-        `INSERT INTO bot_state (key, value, ts) VALUES ('main', $1, NOW())
+        `INSERT INTO bot_state (key, value, ts) VALUES ('live_main', $1, NOW())
          ON CONFLICT (key) DO UPDATE SET value = $1, ts = NOW()`,
         [json]
       );
@@ -61,7 +61,7 @@ async function loadState() {
   try {
     const client = await getClient();
     if (client) {
-      const res = await client.query(`SELECT value FROM bot_state WHERE key = 'main'`);
+      const res = await client.query(`SELECT value FROM bot_state WHERE key = 'live_main'`);
       if (res.rows.length > 0) {
         console.log("[DB] Estado cargado desde PostgreSQL ✓");
         return JSON.parse(res.rows[0].value);
@@ -84,7 +84,7 @@ async function loadState() {
 async function deleteState() {
   try {
     const client = await getClient();
-    if (client) await client.query(`DELETE FROM bot_state WHERE key = 'main'`);
+    if (client) await client.query(`DELETE FROM bot_state WHERE key = 'live_main'`);
   } catch(e) {}
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 }
