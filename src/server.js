@@ -84,6 +84,8 @@ function sendEquityToBafir(value) {
 
 const blacklist   = new Blacklist(3, 24);
 const marketGuard = new MarketGuard();
+const cryptoPanic = new CryptoPanicDefense();
+cryptoPanic.start();
 
 const app    = express();
 const server = http.createServer(app);
