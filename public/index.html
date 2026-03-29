@@ -451,16 +451,18 @@ function filterByPeriod(equity, period) {
   const now = Date.now();
   const cuts = { "1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"Todo":Infinity };
   const ms = cuts[period] ?? Infinity;
-  // Para períodos largos usar equityHistory (1 punto/min) si está disponible
+  // Para períodos largos usar equityHistory si está disponible y tiene más datos
   let src = equity;
-  if (period !== "1H" && window._equityHistory?.length > equity.length) {
+  if (period !== "1H" && window._equityHistory?.length > 10) {
     src = window._equityHistory;
   }
-  const withTs = src.map((e,i) => typeof e==="object" ? e : {v:e, t:now - (src.length-1-i)*10000});
+  const withTs = src.map((e,i) => typeof e==="object"&&e.v!==undefined ? e : {v:(typeof e==="object"?e.value:e)||0, t:e.t||(now-(src.length-1-i)*10000)});
   if (ms === Infinity) return withTs;
-  const filtered = withTs.filter(e => now - e.t <= ms);
-  // Si no hay suficientes puntos para el período, devolver lo que haya
-  return filtered.length >= 2 ? filtered : withTs;
+  const filtered = withTs.filter(e => e.t && (now - e.t) <= ms);
+  if (filtered.length >= 2) return filtered;
+  // No hay datos para este período — devolver vacío con flag
+  window._periodNoData = period;
+  return withTs.slice(-50); // mostrar lo que hay
 }
 
 function formatAxisTime(ts, period) {
@@ -491,8 +493,19 @@ function drawChart() {
   if (_activePair !== "ALL") { drawPairChart(); return; }
   const canvas = document.getElementById("chart-canvas");
   if (!canvas) return;
+  window._periodNoData = null;
   const equity = filterByPeriod(equityHistory, currentPeriod);
   if (!equity.length) return;
+  // Mostrar aviso si no hay datos suficientes para el período
+  const ctx0 = canvas.getContext("2d");
+  if (window._periodNoData && equity.length < 5) {
+    const W0 = canvas.offsetWidth || 600;
+    canvas.width = W0; canvas.height = 140;
+    ctx0.fillStyle = "rgba(107,99,88,0.5)";
+    ctx0.font = "12px DM Sans,sans-serif"; ctx0.textAlign = "center";
+    ctx0.fillText("Sin suficientes datos para " + currentPeriod + " — el bot lleva poco tiempo funcionando", W0/2, 70);
+    return;
+  }
   // Filter by pair if selected (show only ticks when pair was open)
   // For now show all equity but overlay pair-specific trades
 
@@ -736,7 +749,9 @@ function render() {
 
   const fg = s.fearGreed||50;
   const fgLabel = fg<25?"😱 Pánico":fg<45?"😟 Miedo":fg<55?"😐 Neutral":fg<75?"😊 Codicia":"🤑 Extrema codicia";
-  const fgDate = s.fearGreedPublished ? " · " + new Date(s.fearGreedPublished).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}) : "";
+  const fgTime = s.fearGreedPublished ? new Date(s.fearGreedPublished).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}) : null;
+  const fgSrc = s.fearGreedSource ? " ("+s.fearGreedSource+")" : "";
+  const fgDate = fgTime ? " · "+fgTime+fgSrc : fgSrc;
   document.getElementById("fg-val").textContent = fg+" — "+fgLabel+fgDate;
 
   document.getElementById("daily-ops").textContent = (s.dailyTrades?.count||0)+" operaciones";

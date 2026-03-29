@@ -6,7 +6,7 @@ const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } =
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
 
-const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDT || "50000");
+const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "50000");
 const MIN_CASH_RESERVE = 0.15;
 const PUMP_THRESHOLD   = 0.08;
 const REENTRY_COOLDOWN = 2 * 60 * 60 * 1000;

@@ -20,7 +20,7 @@ const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más c
 
 // En LIVE_MODE, el capital real se obtiene de Binance al arrancar
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
-let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDT || "500");
+let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "500");
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
 const LIVE_MODE          = BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "";
@@ -71,7 +71,7 @@ async function initBot() {
   () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
   { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
 );
-  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; });
+  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
   startLoop();
 }
 
