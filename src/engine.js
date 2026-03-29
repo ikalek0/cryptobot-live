@@ -114,19 +114,15 @@ function detectRegime(h) {
   const ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
   const trend20=(last-h[Math.max(0,h.length-20)])/h[Math.max(0,h.length-20)]*100;
   const trend5 =(last-h[Math.max(0,h.length-5)]) /h[Math.max(0,h.length-5)] *100;
+  const trend50=(last-h[Math.max(0,h.length-50)])/h[Math.max(0,h.length-50)]*100;
   const adx=calcADX(h, 14);
-  const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
 
-  // ADX fuerte + dirección clara = tendencia
-  if (adx > 25) {
-    if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
-    if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
-  }
-  // BTC caída rápida en 5 velas = BEAR aunque ADX no lo confirme aún
+  if (adx > 25 && last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
   if (trend5 < -3 && last < ma20) return "BEAR";
-  // Subida clara con MA alineadas = BULL
+  if (adx > 25 && last>ma20 && trend20>1.5 && trend5>0) return "BULL";
   if (last>ma20 && ma20>ma50 && trend20>3 && adx>18) return "BULL";
-  // Default: LATERAL (sin tendencia confirmada)
+  // Downtrend lento → tratar como BEAR para ser conservadores
+  if (last<ma20 && ma20<ma50 && trend20<-2 && trend50<-5) return "BEAR";
   return "LATERAL";
 }
 
