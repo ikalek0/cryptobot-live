@@ -60,7 +60,7 @@ function updateMultiTF(tfHistory, symbol, price, tick) {
 }
 
 function getDailyLimit(regime, wr) {
-  let base = regime==="BULL"?20:regime==="LATERAL"?8:regime==="BEAR"?4:8;
+  let base = regime==="BULL"?25:regime==="LATERAL"?15:regime==="BEAR"?5:10;
   if(wr!==null){if(wr>65)base=Math.round(base*1.3);else if(wr<45)base=Math.round(base*0.6);else if(wr<50)base=Math.round(base*0.8);}
   return Math.max(3,Math.min(25,base));
 }
@@ -118,7 +118,7 @@ function detectRegime(h) {
   const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
 
   // ADX fuerte + dirección clara = tendencia
-  if (adx > 22) {
+  if (adx > 25) {
     if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
     if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
   }
@@ -421,7 +421,7 @@ class CryptoBotFinal {
           // ── BTC momentum guard: no entrar alts en LATERAL si BTC cae ────────
           const btcHL=this.history["BTCUSDT"]||[];
           const btcM5L=btcHL.length>5?((btcHL[btcHL.length-1]-btcHL[btcHL.length-6])/btcHL[btcHL.length-6]*100):0;
-          if(btcM5L<-2 && s.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") return false;
+          if(btcM5L<-4 && s.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") return false;
           // ── MR más estricto: RSI<38 o BB<20% necesario ──────────────────────
           if(s.strategy==="MEAN_REVERSION" && s.rsiVal>42 && (s.bbPos||0.5)>0.25) return false;
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<REENTRY_COOLDOWN)return false;
