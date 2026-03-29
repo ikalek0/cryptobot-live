@@ -878,16 +878,7 @@ function setActivePair(pair, btn) {
   drawChart();
 }
 
-// Override filterByPeriod to also filter by pair when active
-const _origFilterByPeriod = filterByPeriod;
-function filterByPeriod(equity, period) {
-  let filtered = _origFilterByPeriod(equity, period);
-  if (_activePair !== "ALL" && state?.portfolio) {
-    // For pair view: show price history of that pair overlaid on equity
-    // Actually show equity but annotate with pair's trade marks
-  }
-  return filtered;
-}
+// filterByPeriod used as-is (pair filtering handled in drawPairChart)
 
 // Draw pair price chart when a specific pair is selected
 function drawPairChart() {

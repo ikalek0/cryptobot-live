@@ -248,7 +248,7 @@ class CryptoBotFinal {
     this.trailing=new TrailingStop();
     this.optimizer=new AutoOptimizer();
     // ── Módulos live ──────────────────────────────────────────────────────────
-    this.autoBlacklist   = new AutoBlacklist(3, 24*3600*1000);
+    this.autoBlacklist   = new AutoBlacklist(4, 4*3600*1000); // 4 pérdidas → 4h ban
     this.partialClose    = new PartialCloseManager();
     this.confidence      = new ConfidenceScore();
     this.riskLearning    = new RiskLearning();
