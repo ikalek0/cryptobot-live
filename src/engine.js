@@ -168,7 +168,9 @@ function signalMeanReversion(sym,history,params){
   const rsiVal=rsi(h),atrVal=atr(h),atrPct=(atrVal/last)*100;
   const bbRange=bb.upper-bb.lower||1,bbPos=(last-bb.lower)/bbRange;
   let score=50,signal="HOLD",reason="";
-  if(bbPos<0.2&&rsiVal<40){score=75+Math.round((0.2-bbPos)*100);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
+  if(bbPos<0.12&&rsiVal<35){score=82+Math.round((0.12-bbPos)*200);signal="BUY";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa extrema)`;}
+  else if(bbPos<0.20&&rsiVal<40){score=72+Math.round((0.20-bbPos)*100);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
+  else if(bbPos<0.30&&rsiVal<45){score=60+Math.round((0.30-bbPos)*60);signal="BUY";reason=`MEAN REV DÉBIL · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;}
   else if(bbPos>0.8&&rsiVal>60){score=25-Math.round((bbPos-0.8)*100);signal="SELL";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra)`;}
   else{score=50+Math.round((0.5-bbPos)*20);reason=`En rango · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;}
   score=Math.max(5,Math.min(95,score));
@@ -422,8 +424,7 @@ class CryptoBotFinal {
           const btcHL=this.history["BTCUSDT"]||[];
           const btcM5L=btcHL.length>5?((btcHL[btcHL.length-1]-btcHL[btcHL.length-6])/btcHL[btcHL.length-6]*100):0;
           if(btcM5L<-4 && s.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") return false;
-          // ── MR más estricto: RSI<38 o BB<20% necesario ──────────────────────
-          if(s.strategy==="MEAN_REVERSION" && s.rsiVal>42 && (s.bbPos||0.5)>0.25) return false;
+          // MR: solo bloquear sobrecompra clara (filtro extra quitado)
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<REENTRY_COOLDOWN)return false;
           const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=2)return false;
           if(!checkCorrelation(this.portfolio,s.symbol,this.history))return false;

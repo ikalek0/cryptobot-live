@@ -89,7 +89,7 @@ function sendEquityToBafir(value) {
   } catch(e){console.warn("[BAFIR]",e.message);}
 }
 
-const blacklist   = new Blacklist(3, 24);
+const blacklist   = new Blacklist(4, 4); // Live: 4 pérdidas → 4h ban (no perder oportunidades)
 const marketGuard = new MarketGuard();
 const cryptoPanic = new CryptoPanicDefense();
 cryptoPanic.start();
@@ -110,7 +110,7 @@ function broadcast(msg) {
 }
 
 // ── API REST ──────────────────────────────────────────────────────────────────
-app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
+app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory,dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:bot?.tick,uptime:process.uptime(),tv:bot?.totalValue()}));
 
 // Score de confianza — consumido por BAFIR dashboard
