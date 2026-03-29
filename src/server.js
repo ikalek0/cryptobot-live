@@ -18,7 +18,9 @@ const tg         = require("./telegram");
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
 
-const CAPITAL_USDT       = parseFloat(process.env.CAPITAL_USDT || "10000");
+// En LIVE_MODE, el capital real se obtiene de Binance al arrancar
+// CAPITAL_USDT es el fallback para modo PAPER-LIVE
+let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDT || "500");
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
 const LIVE_MODE          = BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "";
@@ -285,6 +287,10 @@ let wasDefensive=false,cbNotified=false,lastFearGreedCheck=0;
 const crypto2 = require("crypto");
 const https2   = require("https");
 
+// Sub-cuenta Binance (opcional): si BINANCE_SUBACCOUNT está configurado,
+// todas las órdenes se ejecutan en esa sub-cuenta
+const BINANCE_SUBACCOUNT = process.env.BINANCE_SUBACCOUNT || "";
+
 function binanceRequest(method, path, params={}) {
   if (!LIVE_MODE) return Promise.resolve(null);
   const ts  = Date.now();
@@ -329,12 +335,35 @@ async function placeLiveBuy(symbol, usdtAmount) {
   }
 }
 
+// Precision map for common pairs (Binance LOT_SIZE)
+const QTY_PRECISION = {
+  BTCUSDT:5, ETHUSDT:4, BNBUSDT:3, SOLUSDT:2, XRPUSDT:1,
+  ADAUSDT:1, DOTUSDT:2, LINKUSDT:2, LTCUSDT:3, AVAXUSDT:2,
+  MATICUSDT:1, UNIUSDT:2, AAVEUSDT:3, ATOMUSDT:2, NEARUSDT:1,
+  ARBUSDT:1, OPUSDT:1, APTUSDT:2,
+};
+
+async function getActualBinanceQty(symbol) {
+  try {
+    const balances = await getAccountBalance();
+    const asset = symbol.replace("USDT","");
+    const b = (balances||[]).find(b=>b.asset===asset);
+    return b ? parseFloat(b.free) : 0;
+  } catch(e) { return 0; }
+}
+
 async function placeLiveSell(symbol, quantity) {
   try {
     if (!LIVE_MODE) return null;
     if (quantity <= 0) return null;
+    // Usar cantidad real de Binance (evita errores de precisión)
+    const realQty = await getActualBinanceQty(symbol);
+    const sellQty = Math.min(quantity, realQty);
+    if (sellQty <= 0) { console.log(`[LIVE][SELL] ${symbol} sin balance real`); return null; }
+    const prec = QTY_PRECISION[symbol] || 4;
+    const qtyStr = sellQty.toFixed(prec);
     const order = await binanceRequest("POST", "order", {
-      symbol, side:"SELL", type:"MARKET", quantity: quantity.toFixed(6)
+      symbol, side:"SELL", type:"MARKET", quantity: qtyStr
     });
     if (order?.orderId) {
       console.log(`[LIVE][SELL] ✅ ${symbol} qty:${quantity} → orderId:${order.orderId}`);
@@ -361,14 +390,27 @@ async function getAccountBalance() {
 async function verifyLiveBalance() {
   if (!LIVE_MODE) return;
   try {
-    console.log("[LIVE] API Binance configurada — verificando balance...");
+    console.log("[LIVE] API Binance configurada — verificando balance real...");
     const balances = await getAccountBalance();
     if (!balances) { console.error("[LIVE] No se pudo verificar balance Binance"); return; }
     const usdt = balances.find(b=>b.asset==="USDT");
     const usdtBalance = parseFloat(usdt?.free||0);
-    console.log(`[LIVE] Balance USDT real: $${usdtBalance.toFixed(2)}`);
-    if (tg?.send) tg.send(`<b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>`);
-    if (bot && usdtBalance > 0) console.log(`[LIVE] Capital del bot: $${usdtBalance.toFixed(2)}`);
+    console.log(`[LIVE] ✅ Balance USDT real: $${usdtBalance.toFixed(2)}`);
+
+    // CRÍTICO: sincronizar bot.cash y CAPITAL_USDT con balance real de Binance
+    if (bot && usdtBalance > 0) {
+      bot.cash = usdtBalance;
+      CAPITAL_USDT = usdtBalance; // actualizar capital de referencia
+      console.log(`[LIVE] bot.cash sincronizado → $${usdtBalance.toFixed(2)}`);
+    }
+
+    // Loguear otras monedas que ya tenga en cartera
+    const others = balances.filter(b=>b.asset!=="USDT"&&b.asset!=="BNB");
+    if (others.length>0) {
+      console.log(`[LIVE] Posiciones existentes en Binance: ${others.map(b=>b.asset+":"+b.free).join(", ")}`);
+    }
+
+    if (tg?.send) tg.send(`🎯 <b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>\n${others.length>0?"Posiciones: "+others.map(b=>b.asset).join(", "):"Sin posiciones abiertas"}`);
   } catch(e) { console.warn("[LIVE] verifyLiveBalance error:", e.message); }
 }
 
