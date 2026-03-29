@@ -294,7 +294,7 @@ function connectBinance() {
   ws.on("error",   e=>console.error("[BINANCE]",e.message));
 }
 
-const SEEDS={BTCUSDT:67000,ETHUSDT:3500,SOLUSDT:180,BNBUSDT:580,AVAXUSDT:38,ADAUSDT:0.45,DOTUSDT:8.5,LINKUSDT:18,UNIUSDT:10,AAVEUSDT:95,XRPUSDT:0.52,LTCUSDT:82};
+const SEEDS={BTCUSDC:67000,ETHUSDC:3500,SOLUSDC:180,BNBUSDC:580,AVAXUSDC:38,ADAUSDC:0.45,DOTUSDC:8.5,LINKUSDC:18,UNIUSDC:10,AAVEUSDC:95,XRPUSDC:0.52,LTCUSDC:82};
 function simulatePrices(){
   if(!bot||Date.now()-lastPriceTs<10000) return;
   PAIRS.forEach(p=>{const last=bot.prices[p.symbol]||SEEDS[p.symbol]||100;bot.updatePrice(p.symbol,last*(1+0.007*(Math.random()+Math.random()-1)*1.2+0.00004));});
@@ -359,16 +359,16 @@ async function placeLiveBuy(symbol, usdtAmount) {
 
 // Precision map for common pairs (Binance LOT_SIZE)
 const QTY_PRECISION = {
-  BTCUSDT:5, ETHUSDT:4, BNBUSDT:3, SOLUSDT:2, XRPUSDT:1,
-  ADAUSDT:1, DOTUSDT:2, LINKUSDT:2, LTCUSDT:3, AVAXUSDT:2,
-  MATICUSDT:1, UNIUSDT:2, AAVEUSDT:3, ATOMUSDT:2, NEARUSDT:1,
-  ARBUSDT:1, OPUSDT:1, APTUSDT:2,
+  BTCUSDC:5, ETHUSDC:4, BNBUSDC:3, SOLUSDC:2, XRPUSDC:1,
+  ADAUSDC:1, DOTUSDC:2, LINKUSDC:2, LTCUSDC:3, AVAXUSDC:2,
+  POLUSDC:1, UNIUSDC:2, AAVEUSDC:3, ATOMUSDC:2, NEARUSDC:1,
+  ARBUSDC:1, OPUSDC:1, APTUSDC:2,
 };
 
 async function getActualBinanceQty(symbol) {
   try {
     const balances = await getAccountBalance();
-    const asset = symbol.replace("USDT","");
+    const asset = symbol.replace("USDC","").replace("USDT","");
     const b = (balances||[]).find(b=>b.asset===asset);
     return b ? parseFloat(b.free) : 0;
   } catch(e) { return 0; }
@@ -415,9 +415,10 @@ async function verifyLiveBalance() {
     console.log("[LIVE] API Binance configurada — verificando balance real...");
     const balances = await getAccountBalance();
     if (!balances) { console.error("[LIVE] No se pudo verificar balance Binance"); return; }
-    const usdt = balances.find(b=>b.asset==="USDT");
+    const usdt = balances.find(b=>b.asset==="USDC") || balances.find(b=>b.asset==="USDT");
     const usdtBalance = parseFloat(usdt?.free||0);
-    console.log(`[LIVE] ✅ Balance USDT real: $${usdtBalance.toFixed(2)}`);
+    const stableAsset = balances.find(b=>b.asset==="USDC") ? "USDC" : "USDT";
+    console.log(`[LIVE] ✅ Balance USDC real: $${usdtBalance.toFixed(2)}`);
 
     // CRÍTICO: sincronizar bot.cash y CAPITAL_USDT con balance real de Binance
     if (bot && usdtBalance > 0) {
@@ -443,12 +444,12 @@ function startLoop(){
     if(!bot) return;
     simulatePrices();
 
-    const marketState=marketGuard.update(bot.prices["BTCUSDT"]);
+    const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
     if(marketState?.defensive&&!wasDefensive){
       tg.notifyDefensiveMode(marketState.btcDrawdown);
       wasDefensive=true;
       // Record defensive mode decision for learning
-      if(bot) bot.riskLearning?.recordDecision("DEFENSIVE_MODE","BTCUSDT",bot.prices?.["BTCUSDT"]||0,"block_entry",{drawdown:marketState.btcDrawdown});
+      if(bot) bot.riskLearning?.recordDecision("DEFENSIVE_MODE","BTCUSDC",bot.prices?.["BTCUSDC"]||0,"block_entry",{drawdown:marketState.btcDrawdown});
     }
     if(!marketState?.defensive&&wasDefensive){tg.notifyDefensiveOff();wasDefensive=false;}
 

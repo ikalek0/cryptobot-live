@@ -484,7 +484,7 @@ function updatePairSelector(portfolio, trades) {
   Object.keys(portfolio||{}).forEach(s=>pairs.add(s));
   (trades||[]).forEach(t=>t.symbol&&pairs.add(t.symbol));
   const current = sel.value;
-  sel.innerHTML = [...pairs].map(p=>`<option value="${p}"${p===current?" selected":""}>${p==="ALL"?"Todos":p.replace("USDT","")}</option>`).join("");
+  sel.innerHTML = [...pairs].map(p=>`<option value="${p}"${p===current?" selected":""}>${p==="ALL"?"Todos":p.replace("USDC","").replace("USDT","")}</option>`).join("");
 }
 
 function drawChart() {
@@ -791,7 +791,7 @@ function renderPortfolio(id, portfolio, prices, mini) {
     const trailingPct = pos.trailingHigh>0 ? ((cp-pos.stopLoss)/(pos.trailingHigh-pos.stopLoss||1))*100 : 50;
     return `<div class="pos-item">
       <div>
-        <div class="pos-sym">${sym.replace("USDT","")}</div>
+        <div class="pos-sym">${sym.replace("USDC","").replace("USDT","")}</div>
         <div class="pos-meta">Entrada ${fU(pos.entryPrice)} · Stop ${fU(pos.stopLoss)} · ${pos.strategy||"MOMENTUM"}</div>
         ${!mini?`<div class="trailing-bar"><div class="trailing-fill" style="width:${Math.min(100,trailingPct)}%"></div></div>`:""}
       </div>
@@ -815,7 +815,7 @@ function renderLog(id, log, max) {
       <div style="display:flex;align-items:center;flex:1">
         <span class="log-badge log-sell">SELL</span>
         <div>
-          <div class="log-sym">${t.symbol?.replace("USDT","")}</div>
+          <div class="log-sym">${t.symbol?.replace("USDC","").replace("USDT","")}</div>
           <div class="log-reason">${t.reason||""} · ${t.strategy||""}</div>
         </div>
       </div>
@@ -834,7 +834,7 @@ function renderSignals(s) {
     const badgeClass = sig.signal==="BUY"?"sig-buy":sig.signal==="SELL"?"sig-sell":"sig-hold";
     return `<div class="sig-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-        <div class="sig-sym">${sig.symbol?.replace("USDT","")}</div>
+        <div class="sig-sym">${sig.symbol?.replace("USDC","").replace("USDT","")}</div>
         <span class="sig-badge ${badgeClass}">${sig.signal}</span>
       </div>
       <div class="sig-price">${fU(sig.price)}</div>
@@ -861,7 +861,7 @@ function renderRisk(s) {
     .sort((a,b)=>b[1].score-a[1].score)
     .map(([sym,sc])=>`
       <div class="risk-row">
-        <span class="risk-label">${sym.replace("USDT","")}</span>
+        <span class="risk-label">${sym.replace("USDC","").replace("USDT","")}</span>
         <div style="display:flex;align-items:center;gap:10px">
           <div class="risk-bar-wrap"><div class="risk-bar-fill" style="width:${sc.score}%;background:${sc.score>60?"var(--green)":sc.score<40?"var(--red)":"var(--gold)"}"></div></div>
           <span class="risk-value" style="color:${sc.score>60?"var(--green)":sc.score<40?"var(--red)":"var(--gold)"}">${sc.score}</span>
@@ -970,7 +970,7 @@ function drawPairChart() {
     ctx.setLineDash([]);
   }
 
-  document.getElementById("chart-start").textContent = _activePair.replace("USDT","")+" · $"+vals[0].toFixed(4);
+  document.getElementById("chart-start").textContent = _activePair.replace("USDC","").replace("USDT","")+" · $"+vals[0].toFixed(4);
   document.getElementById("chart-end").textContent = "$"+vals[vals.length-1].toFixed(4)+" · "+(trend?"▲":"▼")+" "+Math.abs(((vals[vals.length-1]-vals[0])/vals[0]*100)).toFixed(2)+"%";
   
   canvas._equity = pts;
