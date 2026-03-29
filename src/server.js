@@ -69,7 +69,7 @@ async function initBot() {
   () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
   { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
 );
-  fetchFearGreed().then(fg => { bot.fearGreed = fg.value; });
+  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; });
   startLoop();
 }
 
@@ -112,6 +112,15 @@ function broadcast(msg) {
 // ── API REST ──────────────────────────────────────────────────────────────────
 app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory,dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:bot?.tick,uptime:process.uptime(),tv:bot?.totalValue()}));
+
+// Endpoint temporal para obtener IP pública de salida del servidor
+app.get("/api/myip", (_,res)=>{
+  const https2=require("https");
+  https2.get("https://api.ipify.org?format=json", r=>{
+    let d=""; r.on("data",c=>d+=c);
+    r.on("end",()=>{ try{ res.json(JSON.parse(d)); }catch{ res.json({ip:"error"}); } });
+  }).on("error",()=>res.json({ip:"error"}));
+});
 
 // Score de confianza — consumido por BAFIR dashboard
 app.get("/api/confidence", (_,res) => {

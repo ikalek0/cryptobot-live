@@ -736,7 +736,8 @@ function render() {
 
   const fg = s.fearGreed||50;
   const fgLabel = fg<25?"😱 Pánico":fg<45?"😟 Miedo":fg<55?"😐 Neutral":fg<75?"😊 Codicia":"🤑 Extrema codicia";
-  document.getElementById("fg-val").textContent = fg+" — "+fgLabel;
+  const fgDate = s.fearGreedPublished ? " · " + new Date(s.fearGreedPublished).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}) : "";
+  document.getElementById("fg-val").textContent = fg+" — "+fgLabel+fgDate;
 
   document.getElementById("daily-ops").textContent = (s.dailyTrades?.count||0)+" operaciones";
   document.getElementById("daily-limit").textContent = "máx. "+(s.dailyLimit||10)+" hoy";
