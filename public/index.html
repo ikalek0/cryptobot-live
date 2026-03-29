@@ -590,8 +590,8 @@ function drawChart() {
   canvas._equity = equity;
   canvas._chartBounds = {W, H, chartH, chartW, PAD_L, PAD_R, PAD_T, AXIS_H, minV, rangeV};
   // ── Trade marks on chart ──────────────────────────────────────────────────
-  const trades = (state?.log||[]).filter(l=>l.type==="SELL"&&l.ts).slice(0,50);
-  for (const t of trades) {
+  const trades2 = (state?.log||[]).filter(l=>l.type==="SELL"&&l.ts).slice(0,50);
+  for (const t of trades2) {
     const ts = new Date(t.ts).getTime();
     const eq2 = canvas._equity;
     if (!eq2?.length) break;
