@@ -98,6 +98,9 @@ const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server });
 
+// Servir index.html SIN cache para que siempre cargue la última versión
+app.get("/", (req,res) => res.sendFile(path.join(__dirname,"../public/index.html"), {headers:{"Cache-Control":"no-store"}}));
+app.get("/index.html", (req,res) => res.sendFile(path.join(__dirname,"../public/index.html"), {headers:{"Cache-Control":"no-store"}}));
 app.use(express.static(path.join(__dirname,"../public")));
 app.use(express.json());
 
