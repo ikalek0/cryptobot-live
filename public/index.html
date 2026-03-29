@@ -143,6 +143,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 .panel.active{animation:fadeIn .2s ease}
 </style>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
 </head>
 <body>
 
@@ -156,7 +157,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
       <div class="live-dot" id="live-dot"></div>
       <span class="live-text" id="live-text">Conectando…</span>
     </div>
-    <div class="mode-badge live">LIVE</div>
+    <div class="mode-badge live" id="mode-badge">LIVE</div>
   </div>
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="showPanel('dashboard',this)">Dashboard</button>
