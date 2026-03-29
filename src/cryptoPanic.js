@@ -49,16 +49,21 @@ class CryptoPanicDefense {
       const token = this.apiKey ? `auth_token=${this.apiKey}&` : "";
       const url = `https://cryptopanic.com/api/v1/posts/?${token}currencies=${currencies}&filter=important&kind=news&public=true`;
       
-      https.get(url, { timeout: 8000 }, res => {
+      const req = https.get(url, { timeout: 10000, headers: {"User-Agent":"Mozilla/5.0"} }, res => {
+        if (res.statusCode === 429) { reject(new Error("rate limited")); return; }
+        if (res.statusCode >= 300 && res.statusCode < 400) { reject(new Error("redirect")); return; }
         let body = "";
         res.on("data", c => body += c);
         res.on("end", () => {
           try {
-            if (!body.startsWith("{")) throw new Error("Not JSON");
-            resolve(JSON.parse(body));
+            const trimmed = body.trim();
+            if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) { reject(new Error("not JSON")); return; }
+            resolve(JSON.parse(trimmed));
           } catch (e) { reject(new Error("JSON parse error")); }
         });
-      }).on("error", reject).on("timeout", () => reject(new Error("timeout")));
+      });
+      req.on("error", reject);
+      req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
     });
   }
 
