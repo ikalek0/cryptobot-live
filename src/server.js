@@ -234,6 +234,28 @@ app.post("/api/sync/daily", (req,res) => {
   res.json({ adopted:true, reason:`Día positivo — WR:${winRate}% avgPnl:${avgPnl}%` });
 });
 
+// ── Capital operativo desde Bafir ─────────────────────────────────────────────
+// Bafir envía el capital que el gestor ha declarado → live opera SOLO con eso
+app.post("/api/set-capital", (req,res) => {
+  const { secret, capitalUSD } = req.body;
+  if (secret !== (process.env.BOT_SECRET||"bafir_bot_secret"))
+    return res.status(401).json({error:"No autorizado"});
+  if (!capitalUSD || capitalUSD <= 0)
+    return res.status(400).json({error:"Capital inválido"});
+
+  // Actualizar capital operativo
+  CAPITAL_USDT = capitalUSD;
+  if (bot) {
+    // Respetar reserva mínima del 15%
+    const reserve = capitalUSD * 0.15;
+    const maxOperable = capitalUSD - reserve;
+    // Si el bot tiene más cash del capital declarado, limitar
+    if (bot.cash > capitalUSD) bot.cash = capitalUSD;
+    console.log(`[LIVE] Capital operativo actualizado: $${capitalUSD.toFixed(2)} (reserva: $${reserve.toFixed(2)}, máx operable: $${maxOperable.toFixed(2)})`);
+  }
+  res.json({ok:true, capitalUSD, reserve:+(capitalUSD*0.15).toFixed(2), maxOperable:+(capitalUSD*0.85).toFixed(2)});
+});
+
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
 app.get("/api/sync/history", (_,res) => res.json({
   syncHistory,
