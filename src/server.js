@@ -170,6 +170,59 @@ app.post("/api/sync/params", (req,res) => {
   res.json({ adopted:result.adopted, reason:result.reason });
 });
 
+// ── Sync diario: recibe aprendizaje del paper ─────────────────────────────────
+app.post("/api/sync/daily", (req,res) => {
+  const sig  = req.headers["x-signature"];
+  const body = JSON.stringify(req.body);
+  if (!sig) return res.status(401).json({ error:"Firma requerida" });
+  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
+  try {
+    if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex")))
+      return res.status(401).json({ error:"Firma inválida" });
+  } catch(e) { return res.status(401).json({ error:"Firma inválida" }); }
+
+  const { dailyLearning, positive } = req.body;
+  if (!dailyLearning) return res.status(400).json({ error:"Datos incompletos" });
+
+  const { winRate, avgPnl, nTrades, regime, optimizerParams, topPairs } = dailyLearning;
+  console.log(`[SYNC-DAILY] Recibido del paper — WR:${winRate}% avgPnl:${avgPnl}% ops:${nTrades} positivo:${positive}`);
+
+  // Aplicar si: día positivo, O si hay estados Q útiles aprendidos
+  if (!positive && !req.body.hasLearning) {
+    console.log("[SYNC-DAILY] ⏸ Día negativo sin aprendizaje nuevo");
+    return res.json({ adopted:false, reason:"Día negativo sin nuevos patrones" });
+  }
+  // Si día negativo pero hay Q states → adoptar solo params del optimizer, no todo
+  const applyFull = positive;
+
+  if (!bot) return res.json({ adopted:false, reason:"Bot no listo" });
+
+  // Adoptar optimizer params con blending conservador (20% paper, 80% live)
+  if (optimizerParams && Object.keys(optimizerParams).length > 0) {
+    const current = bot.optimizer.getParams();
+    const blended = {};
+    for (const [k, v] of Object.entries(optimizerParams)) {
+      if (typeof v === "number" && typeof current[k] === "number") {
+        // Más agresivo si día positivo, conservador si solo hay Q states
+    const blend = applyFull ? 0.35 : 0.10;
+    blended[k] = +(current[k] * (1-blend) + v * blend).toFixed(4);
+      }
+    }
+    if (Object.keys(blended).length > 0) {
+      Object.assign(bot.optimizer.params, blended);
+      console.log(`[SYNC-DAILY] ✅ Params blended 20% paper — régimen:${regime}`);
+    }
+  }
+
+  // Registrar en syncHistory
+  syncHistory.push({ ts:new Date().toISOString(), type:"daily", winRate, avgPnl, nTrades, regime, positive });
+  while (syncHistory.length > 120) syncHistory.shift();
+  save().catch(()=>{});
+
+  tg.send && tg.send(`📊 <b>Sync diario recibido del paper</b>\nWR: ${winRate}% | avgPnl: ${avgPnl}% | ${nTrades} ops | Régimen: ${regime}\n✅ Params actualizados (blend 20%)`);
+  res.json({ adopted:true, reason:`Día positivo — WR:${winRate}% avgPnl:${avgPnl}%` });
+});
+
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
 app.get("/api/sync/history", (_,res) => res.json({
   syncHistory,

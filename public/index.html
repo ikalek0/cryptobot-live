@@ -354,13 +354,20 @@ function applyState(data) {
   if (!data || typeof data !== 'object') return;
   state = data;
   window._currentState = data;
+  // Real-time equity (últimos ~17min en paper, más en live)
   if (data.equity?.length) {
     equityHistory = data.equity.map(e =>
       typeof e === 'object' && e.v !== undefined ? e :
       {v: typeof e === 'object' ? e.value : e, t: Date.now()}
     );
   }
-  // Marcar conectado en cuanto lleguen datos válidos (HTTP poll o WS)
+  // Historial largo (cada 1min, hasta ~33h en paper)
+  if (data.equityHistory?.length) {
+    window._equityHistory = data.equityHistory.map(e =>
+      typeof e === 'object' && e.v !== undefined ? e :
+      {v: typeof e === 'object' ? e.value : e, t: Date.now()}
+    );
+  }
   if (data.totalValue !== undefined && !data.loading) setLive(true);
   try { render(); } catch(re) { console.warn('render error:', re.message); }
 }
@@ -442,11 +449,18 @@ function setPeriod(p, btn) {
 function filterByPeriod(equity, period) {
   if (!equity?.length) return [];
   const now = Date.now();
-  const cuts = { "1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"ALL":Infinity };
-  const ms = cuts[period] || Infinity;
-  // Support both {v,t} objects and plain numbers
-  const withTs = equity.map((e,i) => typeof e==="object" ? e : {v:e, t:now - (equity.length-1-i)*10000});
-  return ms === Infinity ? withTs : withTs.filter(e => now - e.t <= ms);
+  const cuts = { "1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"Todo":Infinity };
+  const ms = cuts[period] ?? Infinity;
+  // Para períodos largos usar equityHistory (1 punto/min) si está disponible
+  let src = equity;
+  if (period !== "1H" && window._equityHistory?.length > equity.length) {
+    src = window._equityHistory;
+  }
+  const withTs = src.map((e,i) => typeof e==="object" ? e : {v:e, t:now - (src.length-1-i)*10000});
+  if (ms === Infinity) return withTs;
+  const filtered = withTs.filter(e => now - e.t <= ms);
+  // Si no hay suficientes puntos para el período, devolver lo que haya
+  return filtered.length >= 2 ? filtered : withTs;
 }
 
 function formatAxisTime(ts, period) {

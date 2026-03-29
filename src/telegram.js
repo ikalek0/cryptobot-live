@@ -14,12 +14,12 @@ function send(text) {
 }
 
 // ── Eventos importantes únicamente ───────────────────────────────────────────
-function notifyCircuitBreaker(drawdown) { send(`⚡ <b>CIRCUIT BREAKER</b>\nPérdida diaria: <b>${(Math.abs(drawdown)*100).toFixed(2)}%</b>\nBot pausado hasta mañana.`); }
+function notifyCircuitBreaker(drawdown) { send(`🎯 ⚡ <b>[LIVE] CIRCUIT BREAKER</b>\nPérdida diaria: <b>${(Math.abs(drawdown)*100).toFixed(2)}%</b>\nBot pausado hasta mañana.`); }
 function notifyBigWin(trade)  { send(`💰 <b>GANANCIA IMPORTANTE</b>\n<b>${trade.symbol}</b>  +${trade.pnl}%\nPrecio: $${trade.price}  Comisión: $${trade.fee}`); }
 function notifyBigLoss(trade) { send(`📉 <b>PÉRDIDA IMPORTANTE</b>\n<b>${trade.symbol}</b>  ${trade.pnl}%\nRazón: ${trade.reason}`); }
 function notifyDefensiveMode(btcDrawdown) { send(`🛡️ <b>MODO DEFENSIVO</b>\nBTC cayó <b>${Math.abs(btcDrawdown)}%</b> desde el máximo de hoy. Sin nuevas posiciones.`); }
 function notifyDefensiveOff()  { send(`✅ <b>Modo defensivo desactivado</b> — Bot retoma operaciones.`); }
-function notifyBlacklist(sym)  { send(`🚫 <b>${sym} bloqueado 24h</b> — 3 pérdidas consecutivas.`); }
+function notifyBlacklist(sym)  { send(`🎯 🚫 <b>[LIVE] ${sym} bloqueado 4h</b> — 4 pérdidas consecutivas.`); }
 function notifyOptimizer(r)    { if(!r?.changes?.length)return; send(`🧠 <b>OPTIMIZADOR</b>\nWR: ${r.winRate}%  avgP&L: ${r.avgPnl}%\nCambios: ${r.changes.join(", ")}`); }
 function notifyNightlyReplay(b){ send(`🌙 <b>REPLAY NOCTURNO</b>\nMejor estrategia: EMA ${b.params.emaFast}/${b.params.emaSlow} · Score ${b.params.minScore}\nWR: ${b.winRate}%  avgP&L: ${b.avgPnl}%`); }
 function notifyNewsAlert(news) { send(`⚠️ <b>NOTICIA IMPORTANTE</b>\n${news.title}\nPares: ${news.currencies?.join(", ")||"—"}`); }
@@ -27,7 +27,7 @@ function notifyFearGreed(val,label) { const e=val<25?"😱":val>75?"🤑":"😐"
 function notifyDailyLimitChange(regime,limit,wr){ send(`📊 <b>Límite diario actualizado</b>\nRégimen: ${regime} | WR reciente: ${wr||"—"}%\nNuevo límite: <b>${limit} operaciones/día</b>`); }
 
 function notifyStartup(mode) {
-  send(`🚀 <b>CRYPTOBOT FINAL arrancado</b>\nModo: <b>${mode}</b>\n\n✅ Trailing Stop · Circuit Breaker · Modo Defensivo\n✅ Blacklist · Auto-Optimizer · Horarios óptimos\n✅ Fear & Greed · Alertas noticias · Replay nocturno\n✅ Contrafactual · Score por par · Régimen mercado\n✅ Límite diario dinámico · Comisiones BNB\n✅ PostgreSQL · BAFIR TRADING conectado\n\n/estado /semana /ayuda`);
+  send(`🎯 <b>🎯 LIVE BOT arrancado</b>\nModo: <b>${mode}</b>\n\n✅ Trailing Stop · Circuit Breaker · Modo Defensivo\n✅ Blacklist · Auto-Optimizer · Horarios óptimos\n✅ Fear & Greed · Alertas noticias · Replay nocturno\n✅ Contrafactual · Score por par · Régimen mercado\n✅ Límite diario dinámico · Comisiones BNB\n✅ PostgreSQL · BAFIR TRADING conectado\n\n/estado /semana /ayuda`);
 }
 
 // ── Resúmenes ─────────────────────────────────────────────────────────────────
