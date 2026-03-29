@@ -62,8 +62,10 @@ function fetchFearGreed() {
     req.on("error",reject); req.setTimeout(5000,()=>{req.destroy();reject(new Error("timeout"));});
   });
 
-  return tryCMC().catch(()=>tryCNN()).catch(()=>tryAltMe())
-    .catch(()=>({value:50,label:"😐 Neutral",publishedAt:null,source:"fallback"}));
+  return tryCMC()
+    .catch(e=>{ console.log(`[F&G] CMC falló: ${e.message} → probando CNN`); return tryCNN(); })
+    .catch(e=>{ console.log(`[F&G] CNN falló: ${e.message} → usando alternative.me`); return tryAltMe(); })
+    .catch(e=>{ console.log(`[F&G] Todos fallaron: ${e.message} → fallback 50`); return {value:50,label:"😐 Neutral",publishedAt:null,source:"fallback"}; });
 }
 
 // ── CryptoPanic news ──────────────────────────────────────────────────────────

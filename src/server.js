@@ -553,8 +553,8 @@ function startLoop(){
 
     for(const trade of newTrades){
       if(trade.type==="SELL"){
-        if(trade.pnl>=10)  tg.notifyBigWin(trade);
-        if(trade.pnl<=-8)  tg.notifyBigLoss(trade);
+        if(trade.pnl>=3)  tg.notifyBigWin(trade);
+        if(trade.pnl<=-3) tg.notifyBigLoss(trade);
         // Explicabilidad: notificar trades significativos con explicación
         if(Math.abs(trade.pnl||0)>=2) tg.notifyTradeWithExplanation(trade, bot.marketRegime, 50);
         if(trade.pnl<0){const wasBl=blacklist.isBlacklisted(trade.symbol);blacklist.recordLoss(trade.symbol);if(!wasBl&&blacklist.isBlacklisted(trade.symbol))tg.notifyBlacklist(trade.symbol);}
@@ -574,9 +574,9 @@ function startLoop(){
     if(!circuitBreaker?.triggered) cbNotified=false;
     if(optimizerResult?.changes?.length>0) tg.notifyOptimizer(optimizerResult);
 
-    if(Date.now()-lastFearGreedCheck>3600000){
+    if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
-      fetchFearGreed().then(fg=>{bot.fearGreed=fg.value;});
+      fetchFearGreed().then(fg=>{bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);});
     }
 
     if(ticks%120===0){ fetchNewsAlert().then(news=>{if(news?.negative)tg.notifyNewsAlert(news);}); }

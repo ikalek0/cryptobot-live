@@ -36,11 +36,11 @@ function buildDaily(state) {
   const today=new Date().toDateString();
   const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===today);
   const wins=ts.filter(l=>l.pnl>0).length,pnl=ts.reduce((s,l)=>s+(l.pnl||0),0),fees=ts.reduce((s,l)=>s+(l.fee||0),0);
-  return `${ret>=0?"📈":"📉"} <b>RESUMEN DIARIO</b> — ${new Date().toLocaleDateString("es-ES")}\n\n`+
+  return `🎯 ${ret>=0?"📈":"📉"} <b>[LIVE] RESUMEN DIARIO</b> — ${new Date().toLocaleDateString("es-ES")}\n\n`+
     `💼 Capital: <b>$${tv.toFixed(2)}</b>  (${ret>=0?"+":""}${ret.toFixed(2)}%)\n`+
     `📋 Hoy: ${ts.length} ops · ${wins}/${ts.length} ganadoras · P&L ${pnl>=0?"+":""}${pnl.toFixed(2)}%\n`+
     `💸 Comisiones: $${fees.toFixed(2)}  |  WR global: ${state.winRate||"—"}%\n`+
-    `🌡️ Fear & Greed: ${state.fearGreed||"—"}  |  Régimen: ${state.marketRegime||"—"}\n`+
+    `🌡️ Fear & Greed: ${state.fearGreed||"—"} (${state.fearGreedSource||"?"})  |  Régimen: ${state.marketRegime||"—"}\n`+
     `📊 Límite hoy: ${state.dailyTrades?.count||0}/${state.dailyLimit||10} ops\n`+
     `⚙️ Score mín: ${state.optimizerParams?.minScore||65} | EMA ${state.optimizerParams?.emaFast}/${state.optimizerParams?.emaSlow}`;
 }
@@ -52,7 +52,7 @@ function buildWeekly(state) {
   const wr=ws.length?Math.round(wins/ws.length*100):0;
   const sorted=[...ws].sort((a,b)=>b.pnl-a.pnl),best=sorted[0],worst=sorted[sorted.length-1];
   const topPairs=Object.entries(state.pairScores||{}).sort((a,b)=>b[1].score-a[1].score).slice(0,3).map(([s,p])=>`${s}(${p.score})`).join(", ");
-  return `${ret>=0?"🏆":"📉"} <b>RESUMEN SEMANAL</b>\n\n`+
+  return `🎯 ${ret>=0?"🏆":"📉"} <b>[LIVE] RESUMEN SEMANAL</b>\n\n`+
     `💼 Capital: <b>$${tv.toFixed(2)}</b>  (${ret>=0?"+":""}${ret.toFixed(2)}%)\n`+
     `📋 ${ws.length} ops · WR ${wr}% · P&L ${pnl>=0?"+":""}${pnl.toFixed(2)}% · Fees $${fees.toFixed(2)}\n`+
     (best?`🥇 Mejor: <b>${best.symbol}</b> +${best.pnl}%\n`:"")+
