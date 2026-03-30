@@ -377,6 +377,18 @@ const TWAP_DELAY_MS  = 30000; // 30s entre partes
 async function sleep_ms(ms) { return new Promise(r=>setTimeout(r,ms)); }
 
 async function placeTWAPBuy(symbol, usdtAmount) {
+  // SAFETY: verificar que Binance tiene suficiente USDC antes de ordenar
+  // Protege contra usar dinero de otras operaciones del usuario
+  try {
+    const balances = await getAccountBalance();
+    const usdcBal = balances ? parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0) : 0;
+    if(usdcBal < usdtAmount * 0.95) {
+      console.error(`[TWAP] ❌ SAFETY: Binance tiene $${usdcBal.toFixed(2)} USDC libre pero necesitamos $${usdtAmount.toFixed(2)} — orden cancelada`);
+      tg.send && tg.send(`🎯 ⚠️ <b>[LIVE] ORDEN CANCELADA</b>\nBalance USDC insuficiente: $${usdcBal.toFixed(2)} libre\nNecesario: $${usdtAmount.toFixed(2)}`);
+      return [];
+    }
+  } catch(e) { console.warn("[TWAP] No se pudo verificar balance:", e.message); }
+
   const isIlliquid = ILLIQUID_PAIRS.includes(symbol);
   const parts = isIlliquid ? TWAP_PARTS.illiquid : TWAP_PARTS.liquid;
   const partSize = +(usdtAmount / parts).toFixed(2);
@@ -407,8 +419,19 @@ async function placeLiveBuy(symbol, usdtAmount) {
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
     const orders = await placeTWAPBuy(symbol, safe);
     if(orders?.length) {
-      const totalSpent = orders.length * (safe/orders.length);
-      tg.send && tg.send(`🟢 <b>[LIVE] BUY ${symbol}</b>\n$${safe.toFixed(2)} en ${orders.length} parte(s)\nÓrdenes: ${orders.map(o=>o.orderId).join(", ")}`);
+      // Registrar precio real de ejecución para ajustar cash virtual
+      const fills = orders.flatMap(o=>o.fills||[]);
+      const realSpent = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0) || safe;
+      const realQty = fills.reduce((s,f)=>s+parseFloat(f.qty),0);
+      const avgPrice = realQty>0 ? realSpent/realQty : safe;
+      console.log(`[LIVE][BUY] Real: gastado $${realSpent.toFixed(2)} @ avg $${avgPrice.toFixed(2)}`);
+      // Ajustar bot.cash con el precio real (no el estimado)
+      if(bot && Math.abs(realSpent - safe) > 0.01) {
+        const drift = realSpent - safe;
+        bot.cash += drift; // corregir por slippage real
+        console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
+      }
+      tg.send && tg.send(`🟢 <b>[LIVE] BUY ${symbol}</b>\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
     }
     return orders?.[0]||null;
   } catch(e) {
@@ -480,20 +503,35 @@ async function verifyLiveBalance() {
     const stableAsset = balances.find(b=>b.asset==="USDC") ? "USDC" : "USDT";
     console.log(`[LIVE] ✅ Balance USDC real: $${usdtBalance.toFixed(2)}`);
 
-    // CRÍTICO: sincronizar bot.cash y CAPITAL_USDT con balance real de Binance
-    if (bot && usdtBalance > 0) {
-      bot.cash = usdtBalance;
-      CAPITAL_USDT = usdtBalance; // actualizar capital de referencia
-      console.log(`[LIVE] bot.cash sincronizado → $${usdtBalance.toFixed(2)}`);
+    // VIRTUAL CAPITAL LEDGER:
+    // El bot maneja su propia cuenta de $CAPITAL_USDT (100 USD)
+    // NO usa el balance total de Binance (puede tener más dinero de otras ops)
+    // Solo verifica que Binance tiene suficiente para ejecutar cada orden
+    const virtualCapital = CAPITAL_USDT; // 100 USD declarados en Railway
+    
+    if (bot) {
+      // Si es el primer arranque (bot.cash == capital inicial), usar virtualCapital
+      // Si ya tiene estado guardado (bot.cash < virtualCapital), respetar el estado
+      if (bot.cash >= virtualCapital * 0.99 || bot.cash <= 0) {
+        bot.cash = virtualCapital;
+        console.log(`[LIVE] 💼 Capital virtual asignado: $${virtualCapital.toFixed(2)} USDC`);
+      } else {
+        console.log(`[LIVE] 💼 Capital virtual restaurado: $${bot.cash.toFixed(2)} USDC (de $${virtualCapital.toFixed(2)} inicial)`);
+      }
     }
 
-    // Loguear otras monedas que ya tenga en cartera
-    const others = balances.filter(b=>b.asset!=="USDT"&&b.asset!=="BNB");
-    if (others.length>0) {
-      console.log(`[LIVE] Posiciones existentes en Binance: ${others.map(b=>b.asset+":"+b.free).join(", ")}`);
+    // Sanity check: Binance debe tener AL MENOS el cash libre del bot
+    if (bot && usdtBalance < bot.cash * 0.90) {
+      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${bot.cash.toFixed(2)} — posible discrepancia`);
     }
 
-    if (tg?.send) tg.send(`🎯 <b>BINANCE REAL ACTIVADO</b>\nBalance USDT: <b>$${usdtBalance.toFixed(2)}</b>\n${others.length>0?"Posiciones: "+others.map(b=>b.asset).join(", "):"Sin posiciones abiertas"}`);
+    // Mostrar balance total de Binance (informativo, no lo usamos para operar)
+    console.log(`[LIVE] ✅ Balance USDC total en Binance: $${usdtBalance.toFixed(2)} (bot opera solo con $${virtualCapital.toFixed(2)})`);
+    const others = balances.filter(b=>b.asset!=="USDC"&&b.asset!=="USDT"&&b.asset!=="BNB"&&parseFloat(b.free)>0.001);
+    if (others.length>0) console.log(`[LIVE] Otros activos en Binance: ${others.map(b=>b.asset+":"+parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados por el bot)`);
+    
+    if (tg?.send) tg.send(`🎯 <b>[LIVE] BINANCE ACTIVADO</b>\n💼 Capital bot: <b>$${bot?.cash?.toFixed(2)||virtualCapital}</b> USDC\n📊 Balance total Binance: $${usdtBalance.toFixed(2)} USDC\n${others.length>0?"(+otros activos no gestionados)":"Sin otras posiciones"}`);
+
   } catch(e) { console.warn("[LIVE] verifyLiveBalance error:", e.message); }
 }
 
@@ -644,6 +682,22 @@ function startLoop(){
 
     // Enviar equity a BAFIR
     if(ticks%60===0) sendEquityToBafir(bot.totalValue());
+    // Reconciliación periódica cada 30 ticks: comparar cash virtual vs Binance real
+    if(LIVE_MODE && ticks%180===0) {
+      getAccountBalance().then(balances => {
+        if(!balances||!bot) return;
+        const realUSDC = parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0);
+        const virtualFree = bot.cash; // cash sin posiciones abiertas
+        const drift = realUSDC - virtualFree;
+        if(Math.abs(drift) > 2) { // más de $2 de diferencia → avisar
+          console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
+          // Pequeñas correcciones automáticas (comisiones BNB, redondeos)
+          if(Math.abs(drift) < 10) {
+            bot.cash += drift * 0.1; // ajuste suave del 10%
+          }
+        }
+      }).catch(()=>{});
+    }
 
     // Guardar
     if(ticks%6===0) save().catch(e=>console.error("[SAVE]",e));
