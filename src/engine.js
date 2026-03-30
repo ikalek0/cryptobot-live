@@ -184,6 +184,28 @@ function signalBear(sym,history,params){
   return{signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:0,strategy:"BEAR"};
 }
 
+function signalScalp(sym, history, params) {
+  const h = history[sym]||[];
+  if (h.length < 10) return {signal:"HOLD",score:30,strategy:"SCALP"};
+  const last = h[h.length-1];
+  const rsiVal = rsi(h);
+  const bb = bollingerBands(h, 10, 1.8);
+  const bbPos = (last - bb.lower) / (bb.upper - bb.lower || 1);
+  const atrVal = atr(h, 5);
+  const atrPct = (atrVal / last) * 100;
+  const mom3 = h.length>3 ? ((last-h[h.length-4])/h[h.length-4]*100) : 0;
+  const mom1 = h.length>1 ? ((last-h[h.length-2])/h[h.length-2]*100) : 0;
+  let score = 30, signal = "HOLD", reason = "";
+  if (bbPos < 0.15 && rsiVal < 38 && mom1 >= 0) {
+    score = 62 + Math.round((0.15-bbPos)*150); signal = "BUY";
+    reason = `SCALP · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;
+  } else if (bbPos < 0.25 && rsiVal < 32 && mom3 < -1.5 && mom1 >= 0) {
+    score = 58; signal = "BUY";
+    reason = `SCALP REBOTE · RSI ${rsiVal.toFixed(0)}`;
+  }
+  return {signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:+mom3.toFixed(2),bbPos:+bbPos.toFixed(2),strategy:"SCALP"};
+}
+
 function computeSignal(sym,history,params,regime="UNKNOWN"){
   switch(regime){
     case"BULL":return signalMomentum(sym,history,params);
@@ -191,6 +213,15 @@ function computeSignal(sym,history,params,regime="UNKNOWN"){
     case"BEAR":return signalBear(sym,history,params);
     default:return signalMomentum(sym,history,params);
   }
+}
+
+function computeSignalWithScalp(sym, history, params, regime) {
+  const main = computeSignal(sym, history, params, regime);
+  if (regime === "BEAR" || regime === "LATERAL") {
+    const scalp = signalScalp(sym, history, params);
+    if (scalp.signal === "BUY" && scalp.score > main.score) return scalp;
+  }
+  return main;
 }
 
 function isPumping(h,w=6){if(!h||h.length<w)return false;return(h[h.length-1]-h[h.length-w])/h[h.length-w]>PUMP_THRESHOLD;}
@@ -321,7 +352,7 @@ class CryptoBotFinal {
 
     const signals=PAIRS.map(p=>({
       ...p,price:this.prices[p.symbol]||0,
-      ...computeSignal(p.symbol,this.history,params,this.marketRegime),
+      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime),
       isPumping:isPumping(this.history[p.symbol]),isFalling:isFallingFast(this.history[p.symbol]),
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
@@ -375,7 +406,7 @@ class CryptoBotFinal {
       if(cp<=pos.stopLoss||ts.hit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
         const proceeds=pos.qty*cp*(1-fee),pnl=((cp-pos.entryPrice)/pos.entryPrice)*100-fee*100*2;
         this.cash+=proceeds;
-        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
+        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":scalpExit?"SCALP TARGET":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
         // Actualizar blacklist automática
         this.autoBlacklist.recordResult(symbol, pnl>0);
         delete this.portfolio[symbol];this.trailing.remove(symbol);
