@@ -11,6 +11,8 @@ const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
+const { PaperShadow } = require("./paperShadow");
+const shadow = new PaperShadow();
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const tg         = require("./telegram");
@@ -236,6 +238,37 @@ app.post("/api/sync/daily", (req,res) => {
 
 // ── Capital operativo desde Bafir ─────────────────────────────────────────────
 // Bafir envía el capital que el gestor ha declarado → live opera SOLO con eso
+// ── Paper Shadow sync ──────────────────────────────────────────────────────────
+// Paper notifica a live cuando abre/cierra una posición
+app.post("/api/shadow/entry", (req,res) => {
+  const {secret, symbol, entryPrice, strategy, regime, stateKey} = req.body;
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"Unauthorized"});
+  shadow.shadowEntry(symbol, entryPrice, strategy, regime, stateKey);
+  res.json({ok:true, adopted: shadow.shouldExecute(strategy, regime), confidence: shadow.getConfidence(strategy, regime)});
+});
+
+app.post("/api/shadow/exit", (req,res) => {
+  const {secret, symbol, exitPrice, pnl} = req.body;
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"Unauthorized"});
+  shadow.shadowExit(symbol, exitPrice, pnl);
+  res.json({ok:true, stats: shadow.getStats()});
+});
+
+app.get("/api/shadow/status", (req,res) => {
+  res.json(shadow.getStats());
+});
+
+// ── Alert config from Bafir ────────────────────────────────────────────────────
+app.post("/api/set-alert-config", (req,res) => {
+  const {secret, alertConfig} = req.body;
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"No autorizado"});
+  if(alertConfig) {
+    global._alertConfig = alertConfig;
+    console.log(`[ALERT-CFG] Win: ${alertConfig.winPct}% Loss: ${alertConfig.lossPct}%`);
+  }
+  res.json({ok:true});
+});
+
 app.post("/api/set-capital", (req,res) => {
   const { secret, capitalUSD } = req.body;
   if (secret !== (process.env.BOT_SECRET||"bafir_bot_secret"))
@@ -334,23 +367,50 @@ function binanceRequest(method, path, params={}) {
   });
 }
 
+// ── TWAP: divide orden en partes para reducir slippage ───────────────────────
+// Pares ilíquidos (ARB, OP, NEAR, APT) → 3 partes con 30s entre ellas
+// Pares principales (BTC, ETH, SOL, BNB) → 1 sola orden (alta liquidez)
+const ILLIQUID_PAIRS = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC","POLUSDC"];
+const TWAP_PARTS     = { illiquid: 3, liquid: 1 };
+const TWAP_DELAY_MS  = 30000; // 30s entre partes
+
+async function sleep_ms(ms) { return new Promise(r=>setTimeout(r,ms)); }
+
+async function placeTWAPBuy(symbol, usdtAmount) {
+  const isIlliquid = ILLIQUID_PAIRS.includes(symbol);
+  const parts = isIlliquid ? TWAP_PARTS.illiquid : TWAP_PARTS.liquid;
+  const partSize = +(usdtAmount / parts).toFixed(2);
+  const orders = [];
+
+  for(let i=0; i<parts; i++) {
+    try {
+      const order = await binanceRequest("POST", "order", {
+        symbol, side:"BUY", type:"MARKET", quoteOrderQty: partSize.toFixed(2)
+      });
+      if(order?.orderId) {
+        orders.push(order);
+        const avgPrice = order.fills?.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0) /
+                         order.fills?.reduce((s,f)=>s+parseFloat(f.qty),0) || 0;
+        console.log(`[TWAP][BUY] ${i+1}/${parts} ${symbol} $${partSize} @ ~$${avgPrice.toFixed(2)} → ${order.orderId}`);
+      }
+      if(i < parts-1) await sleep_ms(TWAP_DELAY_MS);
+    } catch(e) { console.error(`[TWAP][BUY] Part ${i+1} error:`, e.message); }
+  }
+  return orders;
+}
+
 async function placeLiveBuy(symbol, usdtAmount) {
   try {
     if (!LIVE_MODE) return null;
-    // Safety: nunca invertir más del 40% del capital en una sola orden
     const maxSafe = (bot?.totalValue()||500) * 0.40;
     const safe = Math.min(usdtAmount, maxSafe);
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
-    const order = await binanceRequest("POST", "order", {
-      symbol, side:"BUY", type:"MARKET", quoteOrderQty: safe.toFixed(2)
-    });
-    if (order?.orderId) {
-      console.log(`[LIVE][BUY] ✅ ${symbol} $${safe.toFixed(2)} → orderId:${order.orderId}`);
-      tg.send && tg.send(`🟢 <b>ORDEN REAL EJECUTADA</b>\nBUY ${symbol} — $${safe.toFixed(2)}\nOrden: ${order.orderId}`);
-    } else {
-      console.error(`[LIVE][BUY] ❌ ${symbol}`, JSON.stringify(order));
+    const orders = await placeTWAPBuy(symbol, safe);
+    if(orders?.length) {
+      const totalSpent = orders.length * (safe/orders.length);
+      tg.send && tg.send(`🟢 <b>[LIVE] BUY ${symbol}</b>\n$${safe.toFixed(2)} en ${orders.length} parte(s)\nÓrdenes: ${orders.map(o=>o.orderId).join(", ")}`);
     }
-    return order;
+    return orders?.[0]||null;
   } catch(e) {
     console.error(`[LIVE][BUY] Error ${symbol}:`, e.message);
     return null;
@@ -553,8 +613,9 @@ function startLoop(){
 
     for(const trade of newTrades){
       if(trade.type==="SELL"){
-        if(trade.pnl>=3)  tg.notifyBigWin(trade);
-        if(trade.pnl<=-3) tg.notifyBigLoss(trade);
+        const liveCfg=global._alertConfig||{winPct:3,lossPct:3};
+        if(trade.pnl>=liveCfg.winPct)  tg.notifyBigWin(trade);
+        if(trade.pnl<=-liveCfg.lossPct) tg.notifyBigLoss(trade);
         // Explicabilidad: notificar trades significativos con explicación
         if(Math.abs(trade.pnl||0)>=2) tg.notifyTradeWithExplanation(trade, bot.marketRegime, 50);
         if(trade.pnl<0){const wasBl=blacklist.isBlacklisted(trade.symbol);blacklist.recordLoss(trade.symbol);if(!wasBl&&blacklist.isBlacklisted(trade.symbol))tg.notifyBlacklist(trade.symbol);}

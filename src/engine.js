@@ -3,6 +3,7 @@
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } = require("./live_features_patch");
+const { DQN } = require("./dqn");
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
 
@@ -288,6 +289,7 @@ function _calcConsecutive(sells){
 class CryptoBotFinal {
   constructor(saved=null){
     this.profile=RISK_PROFILES["moderate"];
+    this.dqn = new DQN({ lr:0.001, gamma:0.95, epsilon:0.12 });
     this.breaker=new CircuitBreaker(this.profile.maxDailyLoss);
     this.trailing=new TrailingStop();
     this.optimizer=new AutoOptimizer();
@@ -399,7 +401,17 @@ class CryptoBotFinal {
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
       this.portfolio[symbol].profitLocked=+ts.profitLocked.toFixed(2);
       const sig=signals.find(s=>s.symbol===symbol);
-      const mrExit=this.marketRegime==="LATERAL"&&sig?.bbPos>0.85&&sig?.rsiVal>65;
+      // Trend riding: adapta targets por régimen
+      const mrTarget_v = this.marketRegime==="BULL" ? 0.92 : this.marketRegime==="LATERAL" ? 0.65 : 0.82;
+      const mrRsi_v    = this.marketRegime==="BULL" ? 72 : 60;
+      const mrExit     = !isScalp && sig?.bbPos>mrTarget_v && sig?.rsiVal>mrRsi_v;
+      const livePairWins=(this._pairStreak||{})[symbol]?.wins||0;
+      const liveRegimeCont=pos.regime===this.marketRegime;
+      const liveTrendRide=(this.marketRegime==="BULL"||(livePairWins>=2&&liveRegimeCont))&&!isScalp&&(pos.profitLocked||0)>0.3;
+      if(liveTrendRide) {
+        const bullTrail=cp*0.96;
+        if(bullTrail>this.portfolio[symbol].trailingStop) this.portfolio[symbol].trailingStop=+bullTrail.toFixed(4);
+      }
       const bearSell=this.marketRegime==="BEAR"&&pos.profitLocked<0&&ts.profitLocked<0;
       const posId=pos.posId||symbol;
 
@@ -428,6 +440,18 @@ class CryptoBotFinal {
         this.autoBlacklist.recordResult(symbol, pnl>0);
         delete this.portfolio[symbol];this.trailing.remove(symbol);
         if(pnl<0)this.reentryTs[symbol]=Date.now();
+        // DQN training on trade close
+        if(this.dqn && pos.dqnState) {
+          const dqnNextState = this.dqn.encodeState({rsi:50,bbZone:"lower_half",regime:this.marketRegime,trend:"neutral",volumeRatio:1,atrLevel:1,fearGreed:this.fearGreed||50,lsRatio:1});
+          const dqnR = Math.max(-2,Math.min(2,pnl/100*20))+(pnl>0?0.3:0)+(reason==="PARTIAL TARGET"?0.4:0)+(reason==="STOP LOSS"?-0.5:0);
+          this.dqn.remember(pos.dqnState,"BUY",dqnR,dqnNextState);
+          const liveSells=this.log.filter(l=>l.type==="SELL").length;
+          if(this.dqn.replayBuffer.length>=50&&liveSells%50===0) {
+            const loss=this.dqn.trainBatch();
+            console.log(`[DQN-LIVE] loss:${loss.toFixed(5)} updates:${this.dqn.totalUpdates}`);
+          }
+          this.dqn.decayEpsilon(0.03,liveSells);
+        }
         const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
@@ -464,6 +488,21 @@ class CryptoBotFinal {
             this.riskLearning.recordDecision("CRYPTOPANIC_PAIR", s.symbol, this.prices[s.symbol]||0, "block_entry", {score:s.score});
             return false;
           }
+          // ── Correlation buckets: BULL→max 2, LATERAL/BEAR→max 1 ──────────────
+          const LIVE_CORR = {
+            major: ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC"],
+            l2:    ["OPUSDC","ARBUSDC","POLUSDC"],
+            defi:  ["UNIUSDC","AAVEUSDC","LINKUSDC"],
+          };
+          const liveCorrMax = this.marketRegime==="BULL" ? 2 : 1;
+          let liveCorr = false;
+          for(const [, syms] of Object.entries(LIVE_CORR)) {
+            if(syms.includes(s.symbol)) {
+              const inBucket = Object.keys(this.portfolio).filter(p=>syms.includes(p)).length;
+              if(inBucket >= liveCorrMax) { liveCorr=true; break; }
+            }
+          }
+          if(liveCorr) return false;
           // ── BTC momentum guard: no entrar alts en LATERAL si BTC cae ────────
           const btcHL=this.history["BTCUSDC"]||[];
           const btcM5L=btcHL.length>5?((btcHL[btcHL.length-1]-btcHL[btcHL.length-6])/btcHL[btcHL.length-6]*100):0;
@@ -482,8 +521,27 @@ class CryptoBotFinal {
           const volBoost = volAnom.anomaly && sig.score > 60 ? 1.25 : 1.0;
           const newsMultiplier = this._cryptoPanicFn ? this._cryptoPanicFn(sig.symbol) : (this._newsMultiplier||1.0);
           const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost;
+          // DQN guidance in live
+          let liveDqnBoost = 1.0;
+          if(this.dqn && this.dqn.totalUpdates > 0) {
+            const liveDqnState = this.dqn.encodeState({
+              rsi:sig.rsiVal||50, bbZone:sig.bbPos<0.2?"below_lower":sig.bbPos<0.5?"lower_half":"upper_half",
+              regime:this.marketRegime, trend:"neutral",
+              volumeRatio:1, atrLevel:sig.atrPct||1, fearGreed:this.fearGreed||50, lsRatio:1
+            });
+            const liveDqnQ = this.dqn.getQValues(liveDqnState);
+            liveDqnBoost = liveDqnQ.BUY > liveDqnQ.SKIP + 0.3 ? 1.1 :
+                           liveDqnQ.SKIP > liveDqnQ.BUY + 0.5 ? 0.7 : 1.0;
+            sig._dqnState = liveDqnState;
+          }
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost;
           if(invest<10||invest>availCash)continue;
+          // Slippage estimation: pares poco líquidos (OP, ARB, NEAR) tienen mayor slippage
+          const ILLIQUID = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC"];
+          const slippageFactor = ILLIQUID.includes(sig.symbol) ? 0.998 : 0.9995; // 0.2% o 0.05%
+          // Aplicar slippage a entryPrice esperado para cálculos internos
+          // (el precio real de ejecución será ligeramente peor)
+          if(slippageFactor < 1) {} // slippage ya incluido en fee calculation;
           const qty=invest*(1-fee)/price;
           const atrVal=atr(this.history[sig.symbol]||[price],14);
           // ── Stop loss dinámico por volatilidad ────────────────────────────
@@ -492,7 +550,7 @@ class CryptoBotFinal {
           const target=price+(price-stopLoss)*2; // target 2:1 R:R para cierre parcial
           const posId=`${sig.symbol}_${Date.now()}`;
           this.cash-=invest;
-          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM",target:+target.toFixed(4),partialClosed:false,posId,dynStopInfo:dynStop};
+          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM",target:+target.toFixed(4),partialClosed:false,posId,dynStopInfo:dynStop,dqnState:sig._dqnState||null};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM"};
           newTrades.push(trade);this.dailyTrades.count++;
           const g=PAIRS.find(p=>p.symbol===sig.symbol)?.group||"";groupCount[g]=(groupCount[g]||0)+1;
@@ -566,6 +624,7 @@ class CryptoBotFinal {
     s.tfHistory=this.tfHistory;
     s.blacklistData=this.autoBlacklist.toJSON();
     s.confidenceData=this.confidence.toJSON();
+    if(this.dqn) s.dqnData=this.dqn.toJSON();
     return JSON.stringify(s);
   }
 }

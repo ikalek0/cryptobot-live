@@ -2,9 +2,10 @@
 "use strict";
 
 const RISK_PROFILES = {
-  conservative: { maxDailyLoss:0.03, maxPositionSize:0.25, maxOpenPositions:2, atrMultiplier:1.5, trailingPct:0.04, minScore:70 },
-  moderate:     { maxDailyLoss:0.05, maxPositionSize:0.35, maxOpenPositions:3, atrMultiplier:3.5, trailingPct:0.06, minScore:62 },
-  aggressive:   { maxDailyLoss:0.10, maxPositionSize:0.45, maxOpenPositions:5, atrMultiplier:2.5, trailingPct:0.08, minScore:50 },
+  conservative: { maxDailyLoss:0.03, maxPositionSize:0.25, maxOpenPositions:2,  atrMultiplier:1.5, trailingPct:0.04, minScore:70 },
+  moderate:     { maxDailyLoss:0.05, maxPositionSize:0.35, maxOpenPositions:3,  atrMultiplier:3.5, trailingPct:0.06, minScore:55 },
+  aggressive:   { maxDailyLoss:0.10, maxPositionSize:0.45, maxOpenPositions:5,  atrMultiplier:2.5, trailingPct:0.08, minScore:50 },
+  paper:        { maxDailyLoss:1.00, maxPositionSize:0.20, maxOpenPositions:18, atrMultiplier:3.0, trailingPct:0.05, minScore:30 },
 };
 
 class CircuitBreaker {
@@ -37,17 +38,36 @@ class TrailingStop {
   remove(symbol){delete this.highs[symbol];}
 }
 
-function calcPositionSize(availableCash,score,atrPct,profile,nOpen){
-  const base=availableCash*profile.maxPositionSize;
-  const scoreFactor=0.6+((score-50)/50)*0.8;
-  const atrFactor=atrPct>5?0.5:atrPct>3?0.75:1.0;
-  const openFactor=Math.max(0.4,1-nOpen*0.15);
-  return Math.min(base,availableCash*0.5)*scoreFactor*atrFactor*openFactor;
+function calcKellyFraction(winRate, avgWinPct, avgLossPct) {
+  // Kelly Criterion: f* = WR/|avgLoss| - (1-WR)/avgWin
+  // Acotado entre 0 y maxPositionSize para seguridad
+  if(!winRate||!avgWinPct||!avgLossPct||avgLossPct===0) return 0.20; // default conservador
+  const wr = Math.min(0.80, Math.max(0.10, winRate));
+  const ratio = Math.abs(avgWinPct) / Math.abs(avgLossPct);
+  const kelly = wr - (1-wr)/ratio;
+  // Half-Kelly para ser conservadores (estrategia estándar en fondos)
+  const halfKelly = kelly * 0.5;
+  return Math.max(0.05, Math.min(0.40, halfKelly)); // entre 5% y 40%
+}
+
+function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyData=null) {
+  // Base: Kelly Criterion si tenemos suficientes datos, sino usar max% fijo
+  let base;
+  if(kellyData && kellyData.trades>=20) {
+    const kellyFrac = calcKellyFraction(kellyData.winRate/100, kellyData.avgWin, kellyData.avgLoss);
+    base = availableCash * kellyFrac;
+  } else {
+    base = availableCash * profile.maxPositionSize;
+  }
+  const scoreFactor = 0.6 + ((score-50)/50)*0.8;
+  const atrFactor   = atrPct>5 ? 0.5 : atrPct>3 ? 0.75 : 1.0;
+  const openFactor  = Math.max(0.4, 1 - nOpen*0.15);
+  return Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
 }
 
 class AutoOptimizer {
   constructor(){
-    this.params={emaFast:9,emaSlow:21,rsiOversold:30,rsiOverbought:70,minScore:62,atrMult:3.5};
+    this.params={emaFast:9,emaSlow:21,rsiOversold:30,rsiOverbought:70,minScore:55,atrMult:3.5};
     this.history=[];this.lastOptimize=null;
     this.cooldownMs=30*60*1000; // optimizar cada 30 min en paper (más frecuente)
   }
@@ -71,7 +91,7 @@ class AutoOptimizer {
     return result;
   }
   getParams(){return this.params;}
-  applyParams(p){Object.assign(this.params,p);console.log("[Optimizer-LIVE] Params aplicados desde sync diario:",this.params);}
+  applyParams(p){Object.assign(this.params,p);console.log("[Optimizer] Params aplicados desde sync:",this.params);}
 }
 
 module.exports={RISK_PROFILES,CircuitBreaker,TrailingStop,calcPositionSize,AutoOptimizer};
