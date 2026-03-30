@@ -215,11 +215,28 @@ function computeSignal(sym,history,params,regime="UNKNOWN"){
   }
 }
 
-function computeSignalWithScalp(sym, history, params, regime) {
+function getMultiTFBias(tfData) {
+  if (!tfData) return { bias: 0, label: "neutral" };
+  const { tf5=[], tf15=[], tf60=[] } = tfData;
+  let bullPoints = 0, bearPoints = 0;
+  if (tf5.length >= 3) { const t5=(tf5[tf5.length-1]-tf5[tf5.length-3])/tf5[tf5.length-3]*100; if(t5>0.3)bullPoints+=2;else if(t5<-0.3)bearPoints+=2; }
+  if (tf15.length >= 3) { const t15=(tf15[tf15.length-1]-tf15[tf15.length-3])/tf15[tf15.length-3]*100; if(t15>0.5)bullPoints+=3;else if(t15<-0.5)bearPoints+=3; }
+  if (tf60.length >= 2) { const t60=(tf60[tf60.length-1]-tf60[tf60.length-2])/tf60[tf60.length-2]*100; if(t60>0.3)bullPoints+=4;else if(t60<-0.3)bearPoints+=4; }
+  const bias=bullPoints-bearPoints;
+  const label=bias>=4?"strong_bull":bias>=2?"bull":bias<=-4?"strong_bear":bias<=-2?"bear":"neutral";
+  return { bias, label };
+}
+
+function computeSignalWithScalp(sym, history, params, regime, tfHistory={}) {
   const main = computeSignal(sym, history, params, regime);
+  const mtf = getMultiTFBias(tfHistory[sym]);
+  if (mtf.label === "strong_bear" && main.signal === "BUY" && main.score < 70)
+    return { ...main, signal:"HOLD", score:main.score-15, reason:main.reason+" [MTF BEAR]" };
+  if ((mtf.label==="bull"||mtf.label==="strong_bull") && main.signal==="BUY")
+    return { ...main, score:Math.min(95,main.score+8), reason:main.reason+" [MTF BULL]" };
   if (regime === "BEAR" || regime === "LATERAL") {
     const scalp = signalScalp(sym, history, params);
-    if (scalp.signal === "BUY" && scalp.score > main.score) return scalp;
+    if (scalp.signal === "BUY" && scalp.score > main.score && mtf.label !== "strong_bear") return scalp;
   }
   return main;
 }
@@ -352,7 +369,7 @@ class CryptoBotFinal {
 
     const signals=PAIRS.map(p=>({
       ...p,price:this.prices[p.symbol]||0,
-      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime),
+      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime,this.tfHistory||{}),
       isPumping:isPumping(this.history[p.symbol]),isFalling:isFallingFast(this.history[p.symbol]),
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
