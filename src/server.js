@@ -138,14 +138,7 @@ app.get("/api/confidence", (_,res) => {
     drawdown: bot.getState().drawdownPct,
   });
 });
-app.post("/api/reset", async(_,res)=>{
-  bot=new CryptoBotFinal(); bot.mode=LIVE_MODE?"LIVE":"PAPER";
-  await verifyLiveBalance();
-  blacklist.restore({}); syncHistory=[];
-  await deleteState();
-  broadcast({type:"state",data:bot.getState()});
-  res.json({ok:true});
-});
+// Reset endpoint eliminado por seguridad — no exponer esta funcionalidad
 
 // ── ENDPOINT: recibir parámetros del PAPER ────────────────────────────────────
 app.post("/api/sync/params", (req,res) => {
@@ -532,7 +525,13 @@ async function verifyLiveBalance() {
     
     if (tg?.send) tg.send(`🎯 <b>[LIVE] BINANCE ACTIVADO</b>\n💼 Capital bot: <b>$${bot?.cash?.toFixed(2)||virtualCapital}</b> USDC\n📊 Balance total Binance: $${usdtBalance.toFixed(2)} USDC\n${others.length>0?"(+otros activos no gestionados)":"Sin otras posiciones"}`);
 
-  } catch(e) { console.warn("[LIVE] verifyLiveBalance error:", e.message); }
+  } catch(e) {
+    console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);
+    // CRITICAL: no podemos verificar balance real → pausar bot por seguridad
+    if(bot) bot._pausedByTelegram = true;
+    tg.send && tg.send("🎯 ⚠️ <b>[LIVE] BOT PAUSADO</b>\nNo se pudo verificar balance Binance al arrancar.\nUsa /reanudar cuando confirmes que todo está bien.");
+    console.warn("[LIVE] Bot pausado hasta verificación manual. Usa /reanudar en Telegram.");
+  }
 }
 
 function startLoop(){

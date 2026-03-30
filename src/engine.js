@@ -301,7 +301,7 @@ class CryptoBotFinal {
     this.corrManager    = new CorrelationManager();
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
-      this.cash=saved.cash||INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
+      this.cash=saved.cash!=null ? saved.cash : INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
       this.tick=saved.tick||0;this.mode=saved.mode||"PAPER";this.optLog=saved.optLog||[];
       this.pairScores=saved.pairScores||{};this.reentryTs=saved.reentryTs||{};
       this.dailyTrades=saved.dailyTrades||{date:"",count:0};this.useBnb=saved.useBnb!==undefined?saved.useBnb:true;
