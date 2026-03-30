@@ -586,7 +586,7 @@ function drawChart() {
   document.getElementById("chart-start").textContent = formatAxisTime(times[0], currentPeriod) + " · " + fU(vals[0]);
   document.getElementById("chart-end").textContent = fU(vals[vals.length-1]) + " · " + formatAxisTime(times[times.length-1], currentPeriod);
 
-  // Draw trade marks (BUY=green triangle up, SELL=red/green dot)
+ // Trade marks at actual equity price level
   const trades = (window._currentState?.log||[]).filter(t=>{
     if (_currentPair !== "ALL" && t.symbol !== _currentPair) return false;
     const ts = t.ts ? new Date(t.ts).getTime() : null;
@@ -595,48 +595,44 @@ function drawChart() {
   });
   trades.forEach(t => {
     const ts = new Date(t.ts).getTime();
-    const frac = (ts - equity[0].t) / Math.max(1, equity[equity.length-1].t - equity[0].t);
-    const x = PAD_L + frac * chartW;
+    const nearestIdx = equity.reduce((bi,_,i)=>Math.abs(equity[i].t-ts)<Math.abs(equity[bi].t-ts)?i:bi, 0);
+    const x = xOf(nearestIdx);
+    const y = yOf(equity[nearestIdx].v);
     const isSell = t.type === "SELL";
     const win = isSell && (t.pnl||0) > 0;
     ctx.beginPath();
+    ctx.shadowBlur = 4;
     if (isSell) {
-      ctx.arc(x, PAD_T + chartH * 0.2, 4, 0, Math.PI*2);
-      ctx.fillStyle = win ? "rgba(0,217,126,0.9)" : "rgba(255,77,106,0.9)";
+      ctx.arc(x, y, 5, 0, Math.PI*2);
+      ctx.fillStyle = win ? "rgba(0,217,126,0.95)" : "rgba(255,77,106,0.95)";
+      ctx.shadowColor = win ? "#00d97e" : "#ff4d6a";
       ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      if (Math.abs(t.pnl||0) >= 0.5) {
+        ctx.shadowBlur = 0;
+        ctx.font = "bold 8px DM Sans,sans-serif";
+        ctx.fillStyle = win ? "#00d97e" : "#ff4d6a";
+        ctx.textAlign = "center";
+        ctx.fillText((t.pnl>=0?"+":"")+t.pnl.toFixed(1)+"%", x, y - 8);
+      }
     } else {
-      ctx.moveTo(x, PAD_T + chartH * 0.15);
-      ctx.lineTo(x-4, PAD_T + chartH * 0.3);
-      ctx.lineTo(x+4, PAD_T + chartH * 0.3);
+      const sz = 5;
+      ctx.moveTo(x, y - sz);
+      ctx.lineTo(x - sz, y + sz*0.6);
+      ctx.lineTo(x + sz, y + sz*0.6);
       ctx.closePath();
-      ctx.fillStyle = "rgba(201,168,76,0.8)";
+      ctx.fillStyle = "rgba(201,168,76,0.9)";
+      ctx.shadowColor = "#c9a84c";
       ctx.fill();
     }
+    ctx.shadowBlur = 0;
   });
-
-  // Store for hover
+    // Store for hover
   canvas._equity = equity;
   canvas._chartBounds = {W, H, chartH, chartW, PAD_L, PAD_R, PAD_T, AXIS_H, minV, rangeV};
-  // ── Trade marks on chart ──────────────────────────────────────────────────
-  const trades2 = (state?.log||[]).filter(l=>l.type==="SELL"&&l.ts).slice(0,50);
-  for (const t of trades2) {
-    const ts = new Date(t.ts).getTime();
-    const eq2 = canvas._equity;
-    if (!eq2?.length) break;
-    // find nearest point
-    const nearest = eq2.reduce((b,p)=>Math.abs(p.t-ts)<Math.abs(b.t-ts)?p:b, eq2[0]);
-    if (Math.abs(nearest.t - ts) > 3600000*6) continue; // skip if >6h off
-    const px = xOf(eq2.indexOf(nearest));
-    const py = yOf(nearest.v);
-    const win = t.pnl >= 0;
-    ctx.beginPath();
-    ctx.arc(px, py, 3.5, 0, Math.PI*2);
-    ctx.fillStyle = win ? "rgba(0,217,126,0.9)" : "rgba(255,77,106,0.85)";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.3)";
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
-  }
+  // (trade marks handled above)
 }
 
 // Hover/tooltip interaction
