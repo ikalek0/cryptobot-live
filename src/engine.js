@@ -401,6 +401,7 @@ class CryptoBotFinal {
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
       this.portfolio[symbol].profitLocked=+ts.profitLocked.toFixed(2);
       const sig=signals.find(s=>s.symbol===symbol);
+      const isScalp = pos.strategy==="SCALP"; // necesario para mrExit y trendRide
       // Trend riding: adapta targets por régimen
       const mrTarget_v = this.marketRegime==="BULL" ? 0.92 : this.marketRegime==="LATERAL" ? 0.65 : 0.82;
       const mrRsi_v    = this.marketRegime==="BULL" ? 72 : 60;
