@@ -467,7 +467,7 @@ class CryptoBotFinal {
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
-        const reserve=this.totalValue()*MIN_CASH_RESERVE,availCash=Math.max(0,this.cash-reserve);
+        const reserve=this.totalValue()*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
         const regimeMin=this.marketRegime==="BULL"?params.minScore-3:this.marketRegime==="BEAR"?85:params.minScore;
         const fearAdj=this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0;
         // Ajuste por confianza: baja confianza → posiciones más pequeñas

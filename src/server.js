@@ -519,19 +519,36 @@ async function verifyLiveBalance() {
     const virtualCapital = CAPITAL_USDT; // 100 USD declarados en Railway
     
     if (bot) {
-      // Si es el primer arranque (bot.cash == capital inicial), usar virtualCapital
-      // Si ya tiene estado guardado (bot.cash < virtualCapital), respetar el estado
-      if (bot.cash >= virtualCapital * 0.99 || bot.cash <= 0) {
+      // En LIVE real: siempre usar virtualCapital como referencia de cash libre
+      // El cash de la DB puede ser incorrecto si el capital declarado cambió
+      // Solo respetamos el estado guardado si es menor (el bot ha perdido dinero)
+      if (bot.cash > virtualCapital * 1.05) {
+        // Cash guardado es mayor que el capital declarado → resetear al declarado
+        console.log(`[LIVE] 💼 Cash DB ($${bot.cash.toFixed(2)}) > capital declarado ($${virtualCapital.toFixed(2)}) → ajustando`);
         bot.cash = virtualCapital;
-        console.log(`[LIVE] 💼 Capital virtual asignado: $${virtualCapital.toFixed(2)} USDC`);
+      } else if (bot.cash <= 0) {
+        bot.cash = virtualCapital;
+        console.log(`[LIVE] 💼 Cash cero → asignando capital: $${virtualCapital.toFixed(2)} USDC`);
       } else {
-        console.log(`[LIVE] 💼 Capital virtual restaurado: $${bot.cash.toFixed(2)} USDC (de $${virtualCapital.toFixed(2)} inicial)`);
+        console.log(`[LIVE] 💼 Capital restaurado: $${bot.cash.toFixed(2)} USDC (declarado: $${virtualCapital.toFixed(2)})`);
       }
     }
 
     // Sanity check: Binance debe tener AL MENOS el cash libre del bot
     if (bot && usdtBalance < bot.cash * 0.90) {
-      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${bot.cash.toFixed(2)} — posible discrepancia`);
+      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${bot.cash.toFixed(2)}`);
+    }
+
+    // Si totalValue() supera el capital declarado por mucho → limpiar posiciones huérfanas
+    if (bot) {
+      const tv = bot.totalValue();
+      if (tv > virtualCapital * 1.5) {
+        console.warn(`[LIVE] ⚠️ totalValue $${tv.toFixed(2)} >> capital declarado $${virtualCapital.toFixed(2)} → limpiando portfolio huérfano`);
+        bot.portfolio = {};
+        bot.cash = virtualCapital;
+        console.log(`[LIVE] Portfolio limpiado. Cash = $${virtualCapital.toFixed(2)}`);
+        tg.send && tg.send(`⚠️ <b>[LIVE]</b> Portfolio huérfano detectado y limpiado.\nCapital reiniciado a $${virtualCapital.toFixed(2)} USDC`);
+      }
     }
 
     // Mostrar balance total de Binance (informativo, no lo usamos para operar)
