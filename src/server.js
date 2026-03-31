@@ -22,7 +22,7 @@ const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más c
 
 // En LIVE_MODE, el capital real se obtiene de Binance al arrancar
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
-let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "500");
+let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
 const LIVE_MODE          = BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "";
@@ -68,6 +68,7 @@ async function initBot() {
 
   console.log(`\n[LIVE] Modo: ${bot.mode} | Capital: $${CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
   tg.notifyStartup(bot.mode + " (instancia controlada)");
+  tg.testTelegram && tg.testTelegram();
   tg.scheduleReports(() => ({ ...bot.getState(), instance:bot.mode }));
   tgControls = tg.startCommandListener(
   () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
@@ -307,6 +308,21 @@ async function save() {
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
 process.on("SIGINT", async()=>{await save();process.exit(0);});
 
+// ── Capturar errores no manejados para evitar crashes silenciosos ─────────────
+process.on("uncaughtException", (err) => {
+  console.error("[CRASH] uncaughtException:", err.message);
+  console.error(err.stack);
+  // Guardar estado antes de reiniciar
+  save().catch(()=>{}).finally(()=>{
+    // No salimos - Railway reiniciará si el proceso muere
+    // pero intentamos seguir corriendo
+  });
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[CRASH] unhandledRejection:", reason?.message||reason);
+  // No salimos - solo logueamos
+});
+
 // ── Binance WebSocket ─────────────────────────────────────────────────────────
 const symbols   = PAIRS.map(p=>p.symbol.toLowerCase());
 const streamUrl = `wss://stream.binance.com:9443/stream?streams=${symbols.map(s=>`${s}@miniTicker`).join("/")}`;
@@ -407,7 +423,7 @@ async function placeTWAPBuy(symbol, usdtAmount) {
 async function placeLiveBuy(symbol, usdtAmount) {
   try {
     if (!LIVE_MODE) return null;
-    const maxSafe = (bot?.totalValue()||500) * 0.40;
+    const maxSafe = (bot?.totalValue()||CAPITAL_USDT) * 0.40;
     const safe = Math.min(usdtAmount, maxSafe);
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
     const orders = await placeTWAPBuy(symbol, safe);
@@ -536,9 +552,12 @@ async function verifyLiveBalance() {
 
 function startLoop(){
   connectBinance();
-
+  let _tickRunning = false;
   setInterval(async()=>{
     if(!bot) return;
+    if(_tickRunning){ console.warn("[LIVE] Tick overlap - saltando"); return; }
+    _tickRunning = true;
+    try {
     simulatePrices();
 
     const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
@@ -645,7 +664,15 @@ function startLoop(){
     }
 
     if(tgControls?.isPaused()) bot._pausedByTelegram=true; else bot._pausedByTelegram=false;
-    const{signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=bot.evaluate();
+    let signals=[],newTrades=[],circuitBreaker=null,optimizerResult=null,drawdownAlert=null,dailyLimit=50,dailyUsed=0;
+    try {
+      ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=bot.evaluate());
+    } catch(evalErr) {
+      console.error("[LIVE] bot.evaluate() error:", evalErr.message);
+      console.error(evalErr.stack?.split("\n").slice(0,3).join("\n"));
+      ticks++;
+      return; // skip this tick, don't crash
+    }
     ticks++;
 
     for(const trade of newTrades){
@@ -658,11 +685,12 @@ function startLoop(){
         if(trade.pnl<0){const wasBl=blacklist.isBlacklisted(trade.symbol);blacklist.recordLoss(trade.symbol);if(!wasBl&&blacklist.isBlacklisted(trade.symbol))tg.notifyBlacklist(trade.symbol);}
         else blacklist.recordWin(trade.symbol);
       }
-      // Descomentar para LIVE real:
-      // ── ÓRDENES REALES BINANCE (activo cuando LIVE_MODE=true) ──────────────
+      // ── ÓRDENES REALES BINANCE ─────────────────────────────────────────────
       if(LIVE_MODE){
-        if(trade.type==="BUY")  await placeLiveBuy(trade.symbol, trade.qty*trade.price);
-        if(trade.type==="SELL") await placeLiveSell(trade.symbol, trade.qty);
+        // No usamos await aquí — las órdenes se procesan en background
+        // para no bloquear el tick loop (TWAP puede tardar 60s)
+        if(trade.type==="BUY")  placeLiveBuy(trade.symbol, trade.qty*trade.price).catch(e=>console.error("[ORDER] BUY error:",e.message));
+        if(trade.type==="SELL") placeLiveSell(trade.symbol, trade.qty).catch(e=>console.error("[ORDER] SELL error:",e.message));
       }
     }
 
@@ -721,6 +749,11 @@ function startLoop(){
       }
     });
 
+    } catch(loopErr) {
+      console.error("[LIVE] Loop error:", loopErr.message);
+    } finally {
+      _tickRunning = false;
+    }
   },TICK_MS);
 
 }

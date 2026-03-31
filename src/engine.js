@@ -7,7 +7,7 @@ const { DQN } = require("./dqn");
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
 
-const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "50000");
+const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const MIN_CASH_RESERVE = 0.15;
 const PUMP_THRESHOLD   = 0.08;
 const REENTRY_COOLDOWN = 2 * 60 * 60 * 1000;
@@ -552,7 +552,9 @@ class CryptoBotFinal {
           const stopLoss=dynStop.stop;
           const target=price+(price-stopLoss)*2; // target 2:1 R:R para cierre parcial
           const posId=`${sig.symbol}_${Date.now()}`;
-          this.cash-=invest;
+          this.cash = Math.max(0, this.cash - invest); // nunca permitir cash negativo
+          // Recalcular availCash para el siguiente trade en este tick
+          availCash = Math.max(0, this.cash - this.totalValue()*MIN_CASH_RESERVE);
           this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM",target:+target.toFixed(4),partialClosed:false,posId,dynStopInfo:dynStop,dqnState:sig._dqnState||null};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM"};
           newTrades.push(trade);this.dailyTrades.count++;
@@ -598,7 +600,7 @@ class CryptoBotFinal {
     return{
       prices:this.prices,history:this.history,portfolio:this.portfolio,
       cash:this.cash,log:this.log,equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
-      mode:this.mode,totalValue:tv,returnPct:ret,
+      mode:this.mode,totalValue:tv,returnPct:ret,fxRate:parseFloat(process.env.FX_RATE||"1.08"),
       winRate:sells?+((wins/sells)*100).toFixed(0):null,
       pairs:PAIRS,categories:CATEGORIES,
       circuitBreaker:this.breaker.check(tv),

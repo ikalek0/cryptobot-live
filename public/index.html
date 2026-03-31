@@ -352,6 +352,12 @@ let _pollInterval = null;
 
 function applyState(data) {
   if (!data || typeof data !== 'object') return;
+  // Si el servidor envía loading:true (arranque/reconexión), NO borrar datos anteriores
+  // Solo actualizar el indicador de conexión
+  if (data.loading) {
+    setLive(false);
+    return; // mantener el último estado válido en pantalla
+  }
   state = data;
   window._currentState = data;
   // Real-time equity (últimos ~17min en paper, más en live)

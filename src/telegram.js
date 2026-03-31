@@ -15,7 +15,10 @@ function send(text) {
 
 // ── Eventos importantes únicamente ───────────────────────────────────────────
 function notifyCircuitBreaker(drawdown) { send(`🎯 ⚡ <b>[LIVE] CIRCUIT BREAKER</b>\nPérdida diaria: <b>${(Math.abs(drawdown)*100).toFixed(2)}%</b>\nBot pausado hasta mañana.`); }
-function notifyBigWin(trade)  { send(`🎯 💰 <b>[LIVE] GANANCIA IMPORTANTE</b>\n<b>${trade.symbol}</b>  +${trade.pnl}%\nPrecio: $${trade.price}  Comisión: $${trade.fee}`); }
+function notifyBigWin(trade)  {
+  const absStr = trade.pnlAbs!=null ? ` (+$${Math.abs(trade.pnlAbs).toFixed(2)})` : "";
+  send(`🎯 💰 <b>[LIVE] GANANCIA</b>\n<b>${trade.symbol?.replace("USDC","")}</b>  +${trade.pnl}%${absStr}\nEntró $${(trade.qty*trade.price/(1+trade.pnl/100)).toFixed(2)} → Salió $${(trade.qty*trade.price).toFixed(2)}\nRazón: ${trade.reason||"—"}`);
+}
 function notifyBigLoss(trade) { send(`🎯 📉 <b>[LIVE] PÉRDIDA IMPORTANTE</b>\n<b>${trade.symbol}</b>  ${trade.pnl}%\nRazón: ${trade.reason}`); }
 function notifyDefensiveMode(btcDrawdown) { send(`🎯 🛡️ <b>[LIVE] MODO DEFENSIVO</b>\nBTC cayó <b>${Math.abs(btcDrawdown)}%</b> desde el máximo de hoy. Sin nuevas posiciones.`); }
 function notifyDefensiveOff()  { send(`🎯 ✅ <b>[LIVE] Modo defensivo desactivado</b> — Bot retoma operaciones.`); }
@@ -26,23 +29,42 @@ function notifyNewsAlert(news) { send(`🎯 ⚠️ <b>[LIVE] NOTICIA IMPORTANTE<
 function notifyFearGreed(val,label) { const e=val<25?"😱":val>75?"🤑":"😐"; send(`${e} <b>Fear & Greed: ${val} — ${label}</b>\n${val<30?"Posible oportunidad de compra":val>75?"Mercado sobrecomprado, precaución":""}`); }
 function notifyDailyLimitChange(regime,limit,wr){ send(`🎯 📊 <b>[LIVE] Límite diario actualizado</b>\nRégimen: ${regime} | WR reciente: ${wr||"—"}%\nNuevo límite: <b>${limit} operaciones/día</b>`); }
 
+function testTelegram() {
+  if(!TOKEN||!CHAT_ID) {
+    console.warn("[TG] ⚠️  TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no configurados — notificaciones desactivadas");
+    return;
+  }
+  send("🎯 [LIVE] Bot arrancado y Telegram conectado ✅");
+  console.log("[TG] Test enviado a chat_id:", CHAT_ID.slice(0,4)+"***");
+}
+
 function notifyStartup(mode) {
   send(`🎯 <b>🎯 LIVE BOT arrancado</b>\nModo: <b>${mode}</b>\n\n✅ Trailing Stop · Circuit Breaker · Modo Defensivo\n✅ Blacklist · Auto-Optimizer · Horarios óptimos\n✅ Fear & Greed · Alertas noticias · Replay nocturno\n✅ Contrafactual · Score por par · Régimen mercado\n✅ Límite diario dinámico · Comisiones BNB\n✅ PostgreSQL · BAFIR TRADING conectado\n\n/estado /semana /ayuda`);
 }
 
 // ── Resúmenes ─────────────────────────────────────────────────────────────────
 function buildDaily(state) {
-  const tv=state.totalValue||10000,ret=state.returnPct||0;
+  const tv=state.totalValue||100, ret=state.returnPct||0;
+  const fx=state.fxRate||1.08;
+  const tvEur=(tv/fx).toFixed(2);
   const today=new Date().toDateString();
   const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===today);
-  const wins=ts.filter(l=>l.pnl>0).length,pnl=ts.reduce((s,l)=>s+(l.pnl||0),0),fees=ts.reduce((s,l)=>s+(l.fee||0),0);
+  const wins=ts.filter(l=>l.pnl>0).length;
+  const fees=ts.reduce((s,l)=>s+(l.fee||0),0);
+  // P&L del día en $ absoluto
+  const pnlAbsDay=ts.reduce((s,l)=>s+(l.pnlAbs||0),0);
+  const pnlEurDay=(pnlAbsDay/fx).toFixed(2);
+  // P&L total desde inicio
+  const INITIAL=parseFloat(process.env.CAPITAL_USDC||process.env.CAPITAL_USDT||"100");
+  const pnlAbsTotal=+(tv-INITIAL).toFixed(2);
+  const pnlEurTotal=(pnlAbsTotal/fx).toFixed(2);
   return `🎯 ${ret>=0?"📈":"📉"} <b>[LIVE] RESUMEN DIARIO</b> — ${new Date().toLocaleDateString("es-ES")}\n\n`+
-    `💼 Capital: <b>$${tv.toFixed(2)}</b>  (${ret>=0?"+":""}${ret.toFixed(2)}%)\n`+
-    `📋 Hoy: ${ts.length} ops · ${wins}/${ts.length} ganadoras · P&L ${pnl>=0?"+":""}${pnl.toFixed(2)}%\n`+
+    `💼 Capital: <b>$${tv.toFixed(2)}</b> / <b>€${tvEur}</b>  (${ret>=0?"+":""}${ret.toFixed(2)}%)\n`+
+    `📈 Total desde inicio: ${pnlAbsTotal>=0?"+":""}$${pnlAbsTotal} / ${pnlEurTotal>=0?"+":""}€${pnlEurTotal}\n\n`+
+    `📋 Hoy: ${ts.length} ops · ${wins}/${ts.length} ganadoras\n`+
+    `💰 P&L hoy: ${pnlAbsDay>=0?"+":""}$${pnlAbsDay.toFixed(2)} / ${pnlEurDay>=0?"+":""}€${pnlEurDay}\n`+
     `💸 Comisiones: $${fees.toFixed(2)}  |  WR global: ${state.winRate||"—"}%\n`+
-    `🌡️ Fear & Greed: ${state.fearGreed||"—"} (${state.fearGreedSource||"?"})  |  Régimen: ${state.marketRegime||"—"}\n`+
-    `📊 Límite hoy: ${state.dailyTrades?.count||0}/${state.dailyLimit||10} ops\n`+
-    `⚙️ Score mín: ${state.optimizerParams?.minScore||65} | EMA ${state.optimizerParams?.emaFast}/${state.optimizerParams?.emaSlow}`;
+    `🌡️ F&G: ${state.fearGreed||"—"} (${state.fearGreedSource||"?"})  |  Régimen: ${state.marketRegime||"—"}`;
 }
 function buildWeekly(state) {
   const tv=state.totalValue||10000,ret=state.returnPct||0;
@@ -78,24 +100,43 @@ function startCommandListener(getState, botControls={}) {
 
   function buildPositions(state) {
     const entries = Object.entries(state.portfolio||{});
-    if (!entries.length) return "📭 <b>Sin posiciones abiertas</b>";
+    if (!entries.length) return "📭 <b>[LIVE] Sin posiciones abiertas</b>";
+    const fx = state.fxRate||1.08;
     const lines = entries.map(([sym,pos]) => {
       const cp=(state.prices||{})[sym]||pos.entryPrice;
       const pnl=((cp-pos.entryPrice)/pos.entryPrice*100).toFixed(2);
+      const pnlAbs=+(pos.qty*(cp-pos.entryPrice)).toFixed(2);
+      const pnlEur=+(pnlAbs/fx).toFixed(2);
+      const invested=+(pos.qty*pos.entryPrice).toFixed(2);
+      const current=+(pos.qty*cp).toFixed(2);
+      const coin=sym.replace("USDC","").replace("USDT","");
       const e=pnl>=2?"🟢":pnl>=0?"🟡":pnl>=-2?"🟠":"🔴";
-      return e+" <b>"+sym.replace("USDT","")+"</b> "+(pnl>=0?"+":"")+pnl+"% · Stop $"+pos.stopLoss+" · "+pos.strategy;
+      return e+" <b>"+coin+"</b> "+(pnl>=0?"+":"")+pnl+"%"
+        +" ("+(pnlAbs>=0?"+":"")+pnlAbs+"$ / "+(pnlEur>=0?"+":"")+pnlEur+"€)"
+        +"\n   Entró $"+invested+" → Ahora $"+current
+        +" · "+pos.qty.toFixed(4)+" "+coin
+        +"\n   Stop $"+pos.stopLoss+" · "+pos.strategy;
     });
-    return "📊 <b>Posiciones abiertas ("+entries.length+")</b>\n"+lines.join("\n");
+    return "📊 <b>[LIVE] Posiciones abiertas ("+entries.length+")</b>\n\n"+lines.join("\n\n");
   }
 
   function buildLog10(state) {
     const sells=(state.log||[]).filter(l=>l.type==="SELL").slice(0,10);
-    if(!sells.length) return "📭 Sin operaciones aún";
-    return "📋 <b>Últimas ops</b>\n"+sells.map(t=>{
-      const p=(t.pnl||0).toFixed(2),e=t.pnl>=2?"💰":t.pnl>=0?"✅":"❌";
+    if(!sells.length) return "📭 <b>[LIVE]</b> Sin operaciones aún";
+    const fx = state.fxRate||1.08;
+    return "📋 <b>[LIVE] Últimas 10 operaciones</b>\n\n"+sells.map(t=>{
+      const pnl=t.pnl||0, p=pnl.toFixed(2);
+      const e=pnl>=2?"💰":pnl>=0?"✅":"❌";
       const h=t.ts?new Date(t.ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}):"";
-      return e+" "+t.symbol.replace("USDT","")+" "+(t.pnl>=0?"+":"")+p+"% · "+t.reason+" "+h;
-    }).join("\n");
+      const exitVal=+(t.qty*t.price).toFixed(2);
+      const entryVal=pnl!==0?+(exitVal/(1+pnl/100)).toFixed(2):exitVal;
+      const pnlAbs=t.pnlAbs!=null?t.pnlAbs:+(exitVal-entryVal).toFixed(2);
+      const pnlEur=+(pnlAbs/fx).toFixed(2);
+      const coin=(t.symbol||"").replace("USDC","").replace("USDT","");
+      return e+" <b>"+coin+"</b> "+(pnl>=0?"+":"")+p+"%"
+        +" ("+(pnlAbs>=0?"+":"")+pnlAbs+"$ / "+(pnlEur>=0?"+":"")+pnlEur+"€)"
+        +"\n   $"+entryVal+" → $"+exitVal+" · "+t.reason+" "+h;
+    }).join("\n\n");
   }
 
   function buildMomentum(state) {
@@ -270,3 +311,5 @@ function notifyRiskLearningUpdate(changes) {
   send(`🧠 <b>RISK LEARNING — Parámetros ajustados</b>\n${lines}\n\nEl bot ha aprendido que sus reglas de riesgo necesitaban ajuste.`);
 }
 module.exports.notifyRiskLearningUpdate = notifyRiskLearningUpdate;
+module.exports.testTelegram = testTelegram;
+module.exports.send = send;
