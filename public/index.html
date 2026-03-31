@@ -799,16 +799,25 @@ function renderPortfolio(id, portfolio, prices, mini) {
   el.innerHTML = entries.map(([sym,pos])=>{
     const cp = prices[sym]||pos.entryPrice;
     const pnl = ((cp-pos.entryPrice)/pos.entryPrice)*100;
+    const pnlAbs = +(pos.qty * (cp - pos.entryPrice)).toFixed(2);
+    const invested = +(pos.qty * pos.entryPrice).toFixed(2);
+    const currentVal = +(pos.qty * cp).toFixed(2);
+    const coin = sym.replace("USDC","").replace("USDT","");
     const trailingPct = pos.trailingHigh>0 ? ((cp-pos.stopLoss)/(pos.trailingHigh-pos.stopLoss||1))*100 : 50;
     return `<div class="pos-item">
       <div>
-        <div class="pos-sym">${sym.replace("USDC","").replace("USDT","")}</div>
+        <div class="pos-sym">${coin}</div>
         <div class="pos-meta">Entrada ${fU(pos.entryPrice)} · Stop ${fU(pos.stopLoss)} · ${pos.strategy||"MOMENTUM"}</div>
+        <div style="font-size:10px;color:var(--dim2);margin-top:2px">
+          Invertido: <b>$${invested.toFixed(2)}</b> · Ahora: <b style="color:${clr(pnl)}">$${currentVal.toFixed(2)}</b>
+          · ${pos.qty.toFixed?pos.qty.toFixed(6):pos.qty} ${coin}
+        </div>
         ${!mini?`<div class="trailing-bar"><div class="trailing-fill" style="width:${Math.min(100,trailingPct)}%"></div></div>`:""}
       </div>
       <div class="pos-pnl">
         <div class="pos-pnl-val" style="color:${clr(pnl)}">${fP(pnl)}</div>
-        <div class="pos-stop" style="color:${clr(pnl)}">${fU(cp)}</div>
+        <div style="font-size:11px;color:${clr(pnl)};margin-top:2px">${pnlAbs>=0?"+":""}$${pnlAbs.toFixed(2)}</div>
+        <div class="pos-stop" style="color:var(--dim2)">${fU(cp)}</div>
       </div>
     </div>`;
   }).join("");
@@ -821,20 +830,31 @@ function renderLog(id, log, max) {
     el.innerHTML=`<div style="text-align:center;padding:16px;color:var(--dim);font-size:12px;font-style:italic">Sin operaciones aún</div>`;
     return;
   }
-  el.innerHTML = sells.map(t=>`
-    <div class="log-item">
+  el.innerHTML = sells.map(t=>{
+    const pnl = t.pnl||0;
+    const exitVal  = +(t.qty * t.price).toFixed(2);
+    const entryVal = pnl !== 0 ? +(exitVal / (1 + pnl/100)).toFixed(2) : exitVal;
+    const pnlAbs   = t.pnlAbs != null ? t.pnlAbs : +(exitVal - entryVal).toFixed(2);
+    const coin = (t.symbol||"").replace("USDC","").replace("USDT","");
+    return `<div class="log-item">
       <div style="display:flex;align-items:center;flex:1">
         <span class="log-badge log-sell">SELL</span>
         <div>
-          <div class="log-sym">${t.symbol?.replace("USDC","").replace("USDT","")}</div>
+          <div class="log-sym">${coin}</div>
           <div class="log-reason">${t.reason||""} · ${t.strategy||""}</div>
+          <div style="font-size:10px;color:var(--dim2);margin-top:2px">
+            Entró $${entryVal.toFixed(2)} → Salió <span style="color:${clr(pnl)}">$${exitVal.toFixed(2)}</span>
+            · ${t.qty?.toFixed?t.qty.toFixed(5):t.qty} ${coin}
+          </div>
         </div>
       </div>
       <div style="text-align:right">
-        <div class="log-pnl" style="color:${clr(t.pnl||0)}">${fP(t.pnl||0)}</div>
+        <div class="log-pnl" style="color:${clr(pnl)}">${fP(pnl)}</div>
+        <div style="font-size:11px;color:${clr(pnl)};font-weight:600;margin-top:1px">${pnlAbs>=0?"+":""}$${Math.abs(pnlAbs).toFixed(2)}</div>
         <div class="log-time">${fT(t.ts)}</div>
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");;
 }
 
 function renderSignals(s) {

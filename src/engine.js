@@ -427,7 +427,8 @@ class CryptoBotFinal {
         this.portfolio[symbol].partialClosed=true;
         // Trail stop a breakeven tras cierre parcial
         this.portfolio[symbol].stopLoss=Math.max(pos.stopLoss,pos.entryPrice);
-        const partialTrade={type:"SELL",symbol,name:pos.name,qty:+closeQty.toFixed(6),price:+cp.toFixed(4),pnl:+partialPnl.toFixed(2),reason:"PARTIAL TARGET",mode:this.mode,fee:+(closeQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
+        const partialPnlAbs = +(closeQty * cp * (partialPnl/100)).toFixed(2);
+        const partialTrade={type:"SELL",symbol,name:pos.name,qty:+closeQty.toFixed(6),price:+cp.toFixed(4),pnl:+partialPnl.toFixed(2),pnlAbs:partialPnlAbs,reason:"PARTIAL TARGET",mode:this.mode,fee:+(closeQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(partialTrade);
         console.log(`[LIVE][PARTIAL] ${symbol} 50% cerrado en target ${cp.toFixed(4)} P&L:${partialPnl.toFixed(2)}%`);
         continue;
@@ -453,7 +454,8 @@ class CryptoBotFinal {
           }
           this.dqn.decayEpsilon(0.03,liveSells);
         }
-        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
+        const pnlAbs = +(pos.qty * cp * (pnl/100)).toFixed(2);
+        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),pnlAbs,reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
         console.log(`[${this.mode}][${this.marketRegime}][SELL] ${symbol} ${reason} P&L:${pnl.toFixed(2)}% | ${this.dailyTrades.count}/${dailyLimit}`);
