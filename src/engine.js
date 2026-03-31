@@ -434,7 +434,8 @@ class CryptoBotFinal {
         continue;
       }
 
-      if(cp<=pos.stopLoss||ts.hit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
+      const scalpExit = pos.strategy==="SCALP" && pos.target && cp>=pos.target;
+      if(cp<=pos.stopLoss||ts.hit||scalpExit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
         const proceeds=pos.qty*cp*(1-fee),pnl=((cp-pos.entryPrice)/pos.entryPrice)*100-fee*100*2;
         this.cash+=proceeds;
         const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":scalpExit?"SCALP TARGET":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";

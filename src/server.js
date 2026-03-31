@@ -731,14 +731,16 @@ function startLoop(){
       getAccountBalance().then(balances => {
         if(!balances||!bot) return;
         const realUSDC = parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0);
-        const virtualFree = bot.cash; // cash sin posiciones abiertas
+        const virtualFree = bot.cash;
         const drift = realUSDC - virtualFree;
-        if(Math.abs(drift) > 2) { // más de $2 de diferencia → avisar
+        // Solo alertar si drift > $2 Y el cash virtual es razonable (< capital*2)
+        if(Math.abs(drift) > 2 && virtualFree < CAPITAL_USDT * 2) {
           console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
-          // Pequeñas correcciones automáticas (comisiones BNB, redondeos)
-          if(Math.abs(drift) < 10) {
-            bot.cash += drift * 0.1; // ajuste suave del 10%
-          }
+          if(Math.abs(drift) < 10) bot.cash += drift * 0.1;
+        } else if(virtualFree > CAPITAL_USDT * 2) {
+          // cash virtual demasiado alto → resetear al capital declarado
+          console.warn(`[RECONCILE] cash virtual $${virtualFree.toFixed(2)} >> capital $${CAPITAL_USDT} → corrigiendo`);
+          bot.cash = Math.min(virtualFree, CAPITAL_USDT);
         }
       }).catch(()=>{});
     }
