@@ -547,10 +547,13 @@ function setPairFilter(pair) {
   _currentPair = pair;
   drawChart();
 }
+
+const KNOWN_PAIRS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","XRPUSDC","ADAUSDC","AVAXUSDC","DOTUSDC","LINKUSDC","UNIUSDC","AAVEUSDC","LTCUSDC","MATICUSDC","OPUSDC","ARBUSDC","ATOMUSDC","NEARUSDC","APTUSDC"];
 function updatePairSelector(portfolio, trades) {
   const sel = document.getElementById("pair-selector");
   if (!sel) return;
   const pairs = new Set(["ALL"]);
+  KNOWN_PAIRS.forEach(p=>pairs.add(p));
   Object.keys(portfolio||{}).forEach(s=>pairs.add(s));
   (trades||[]).forEach(t=>t.symbol&&pairs.add(t.symbol));
   const current = sel.value;
@@ -802,8 +805,8 @@ function render() {
   // KPIs
   const tv = s.totalValue||0;
   if(s.fxRate) _fxRate = s.fxRate;
-  const firstEquity = s.equity?.[0];
-  const initialCapital = (typeof firstEquity==="object" ? firstEquity?.v : firstEquity) || tv;
+  const _firstEq = s.equity?.[0];
+  const initialCapital = (typeof _firstEq==="object" ? _firstEq?.v : _firstEq) || tv;
   const ret = ((tv - initialCapital) / initialCapital) * 100;
   const invested = tv - (s.cash||0);
   const cashPct = tv>0 ? (s.cash/tv*100) : 100;
@@ -823,7 +826,7 @@ function render() {
   // Absolute gain (capital total - initial capital aportado)
   const gainEl = document.getElementById("kpi-gain-abs");
   if(gainEl) {
-    const absGain = tv - (typeof firstEquity==="object"?firstEquity?.v:firstEquity||tv);
+    const absGain = tv - (typeof initialCapital==="object"?initialCapital?.v:initialCapital||tv);
     gainEl.textContent = (absGain>=0?"+":"-")+fCur(Math.abs(absGain))+" ganancia total";
     gainEl.style.color = clr(absGain);
   }
