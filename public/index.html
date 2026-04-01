@@ -199,6 +199,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <div class="kpi">
       <div class="kpi-label">Win rate</div>
       <div class="kpi-value" id="kpi-wr">—</div>
+      <div class="kpi-sub" id="kpi-wr-sub" style="font-size:9px">—</div>
       <div class="kpi-sub" id="kpi-ops">—</div>
       <div class="kpi-accent"></div>
     </div>
@@ -267,11 +268,11 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
         </div>
         <div class="separator"></div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Circuit breaker</span>
+          <span style="font-size:11px;color:var(--dim2)">Pérdida acumulada</span>
           <span style="font-size:11px;font-weight:500" id="cb-status">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Drawdown máx.</span>
+          <span style="font-size:11px;color:var(--dim2)">Caída máxima</span>
           <span style="font-size:11px;font-weight:500" id="kpi-drawdown">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
@@ -828,6 +829,11 @@ function render() {
 
   document.getElementById("kpi-wr").textContent = periodWR!=null ? periodWR+"%" : "—";
   document.getElementById("kpi-wr").style.color = periodWR!=null ? clr(periodWR-50) : "var(--text)";
+  // WR sub label: show threshold context
+  const wrSubEl = document.getElementById("kpi-wr-sub");
+  if(wrSubEl) wrSubEl.textContent = periodWR!=null
+    ? (periodWR>=50 ? "✅ Por encima del umbral" : "🔴 Por debajo del 50%")
+    : "Sin datos";
   const sells = allSells.length;
   document.getElementById("kpi-ops").textContent = periodSells.length+"/"+sells+" op"+(sells!==1?"s":"");
 
@@ -836,19 +842,19 @@ function render() {
   todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
   todayEl.style.color = clr(periodRet);
   const _periodAbsPnl = tv - periodStartVal;
-  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"")+"$"+Math.abs(_periodAbsPnl).toFixed(2);
+  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"-")+"$"+Math.abs(_periodAbsPnl).toFixed(2);
   document.getElementById("kpi-today-sub").style.color = clr(periodRet);
   const _accEl = document.getElementById("kpi-today-accent");
   if(_accEl) _accEl.className = "kpi-accent " + (periodRet>=0?"green":"red");
   const acc = document.getElementById("kpi-today-accent");
   acc.className = "kpi-accent " + (todayPnl>=0?"green":"red");
   // Drawdown KPI if exists
-  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":"var(--dim2)"; } }
+  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":periodMaxDD>1?"var(--gold)":"var(--green)"; } }
 
-  // Chart
-  drawChart();
+  // Chart (wrapped in try/catch so Estado del mercado always updates)
+  try { drawChart(); } catch(chartErr) { console.warn("[chart]", chartErr.message); }
   if (!window._chartResizeAdded) { window._chartResizeAdded=true; window.addEventListener("resize",()=>requestAnimationFrame(drawChart)); }
-  updatePairSelector(s.portfolio, s.log);
+  try { updatePairSelector(s.portfolio, s.log); } catch(e) {}
 
   // Mercado
   const regime = s.marketRegime||"UNKNOWN";
@@ -866,7 +872,11 @@ function render() {
   // Period-filtered operations count (using already-defined periodMs + periodSells)
   const periodOpsCount = currentPeriod==="ALL" ? (s.log||[]).filter(l=>l.type==="SELL").length : periodSells.length;
   document.getElementById("daily-ops").textContent = periodSells.length+" operaciones";
-  document.getElementById("daily-limit").textContent = "máx. "+(s.dailyLimit||10)+" "+(currentPeriod==="1D"||currentPeriod==="1H"?"hoy":periodLabel);
+  const limitVal = s.dailyLimit||9;
+  const limitTxt = currentPeriod==="1D"||currentPeriod==="1H"
+    ? "máx. "+limitVal+" hoy"
+    : "máx. "+limitVal+"/día";
+  document.getElementById("daily-limit").textContent = limitTxt;
 
   const cb = s.circuitBreaker;
   const cbEl = document.getElementById("cb-status");
@@ -895,6 +905,7 @@ function render() {
     const dp = s.dailyPnlPct ?? s._dailyPnlPct ?? 0;
     const mult = dp<0?0.7:dp<3?1.0:dp<7?1.3:dp<12?1.6:2.0;
     const label = dp<0?"🛡 Defensivo":dp<3?"— Normal":dp<7?"🚀 +30% tamaño":dp<12?"🚀🚀 +60% tamaño":"🔥🔥 ×2 tamaño";
+    // momentum sub always shows today's P&L (multiplier is daily by design)
     const color = dp<0?"var(--red)":dp<3?"var(--dim)":dp<7?"var(--gold)":"var(--green)";
     mEl.textContent = label + (dp!==0?" ("+fP(dp)+" hoy)":"");
     mEl.style.color = color;
