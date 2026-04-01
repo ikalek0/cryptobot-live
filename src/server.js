@@ -76,6 +76,19 @@ async function initBot() {
   { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
 );
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
+
+  // CRÍTICO: limpiar estado huérfano ANTES de empezar el loop
+  // Esto evita que el circuit breaker se dispare por estados corruptos de DB
+  if(LIVE_MODE) {
+    await verifyLiveBalance();
+    // Resetear el circuit breaker después de limpiar el estado
+    // (el CB puede haberse disparado por el estado corrupto)
+    if(bot.breaker) {
+      bot.breaker.reset && bot.breaker.reset();
+      bot._cbResetOnStart = true;
+      console.log("[LIVE] Circuit breaker reseteado tras verificación de balance");
+    }
+  }
   startLoop();
 }
 
@@ -474,7 +487,15 @@ async function placeLiveSell(symbol, quantity) {
     // Usar cantidad real de Binance (evita errores de precisión)
     const realQty = await getActualBinanceQty(symbol);
     const sellQty = Math.min(quantity, realQty);
-    if (sellQty <= 0) { console.log(`[LIVE][SELL] ${symbol} sin balance real`); return null; }
+    if (sellQty <= 0) {
+      console.log(`[LIVE][SELL] ${symbol} sin balance real → cerrando posición virtual`);
+      // Si no hay balance real, la posición es huérfana — cerrarla virtualmente
+      if(bot?.portfolio?.[symbol]) {
+        delete bot.portfolio[symbol];
+        console.log(`[LIVE] Posición huérfana ${symbol} eliminada del portfolio virtual`);
+      }
+      return null;
+    }
     const prec = QTY_PRECISION[symbol] || 4;
     const qtyStr = sellQty.toFixed(prec);
     const order = await binanceRequest("POST", "order", {
@@ -540,15 +561,20 @@ async function verifyLiveBalance() {
       console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${bot.cash.toFixed(2)}`);
     }
 
-    // Si totalValue() supera el capital declarado por mucho → limpiar posiciones huérfanas
-    if (bot) {
+    // Limpiar portfolio huérfano SIEMPRE en modo LIVE al arrancar
+    // Un portfolio huérfano tiene posiciones que no existen en Binance real
+    if (bot && LIVE_MODE) {
       const tv = bot.totalValue();
-      if (tv > virtualCapital * 1.5) {
-        console.warn(`[LIVE] ⚠️ totalValue $${tv.toFixed(2)} >> capital declarado $${virtualCapital.toFixed(2)} → limpiando portfolio huérfano`);
+      const posCount = Object.keys(bot.portfolio||{}).length;
+      if (tv > virtualCapital * 1.1 && posCount > 0) {
+        console.warn(`[LIVE] ⚠️ Estado huérfano: totalValue $${tv.toFixed(2)} con ${posCount} posiciones >> capital $${virtualCapital.toFixed(2)} → limpiando`);
         bot.portfolio = {};
         bot.cash = virtualCapital;
-        console.log(`[LIVE] Portfolio limpiado. Cash = $${virtualCapital.toFixed(2)}`);
-        tg.send && tg.send(`⚠️ <b>[LIVE]</b> Portfolio huérfano detectado y limpiado.\nCapital reiniciado a $${virtualCapital.toFixed(2)} USDC`);
+        // Resetear equity para evitar drawdown falso
+        bot.maxEquity = virtualCapital;
+        bot.drawdownAlerted = false;
+        console.log(`[LIVE] ✅ Portfolio limpiado. Cash = $${virtualCapital.toFixed(2)}`);
+        tg.send && tg.send(`🔧 <b>[LIVE]</b> Estado huérfano limpiado al arrancar.\nCapital: <b>$${virtualCapital.toFixed(2)}</b> USDC\nPosiciones anteriores eliminadas (no existían en Binance real)`);
       }
     }
 
@@ -755,15 +781,27 @@ function startLoop(){
         if(!balances||!bot) return;
         const realUSDC = parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0);
         const virtualFree = bot.cash;
-        const drift = realUSDC - virtualFree;
-        // Solo alertar si drift > $2 Y el cash virtual es razonable (< capital*2)
-        if(Math.abs(drift) > 2 && virtualFree < CAPITAL_USDT * 2) {
-          console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
-          if(Math.abs(drift) < 10) bot.cash += drift * 0.1;
-        } else if(virtualFree > CAPITAL_USDT * 2) {
-          // cash virtual demasiado alto → resetear al capital declarado
+        const openPositions = Object.keys(bot.portfolio||{}).length;
+
+        if(virtualFree > CAPITAL_USDT * 2) {
+          // cash virtual corrupto → corregir
           console.warn(`[RECONCILE] cash virtual $${virtualFree.toFixed(2)} >> capital $${CAPITAL_USDT} → corrigiendo`);
-          bot.cash = Math.min(virtualFree, CAPITAL_USDT);
+          bot.cash = CAPITAL_USDT;
+          bot.portfolio = {};
+          bot.maxEquity = CAPITAL_USDT;
+          bot.breaker?.reset && bot.breaker.reset(CAPITAL_USDT);
+        } else if(realUSDC < 1 && openPositions === 0 && virtualFree > 10) {
+          // No hay USDC real pero sí cash virtual y sin posiciones
+          // → Binance no tiene fondos o hubo un error grave
+          console.warn(`[RECONCILE] ⚠️ Binance USDC=$0 pero virtual=$${virtualFree.toFixed(2)} sin posiciones → pausando bot`);
+          bot._pausedByTelegram = true;
+          tg.send && tg.send(`⚠️ <b>[LIVE] BOT PAUSADO</b>\nBinance tiene $0 USDC libre pero el bot espera $${virtualFree.toFixed(2)}.\nVerifica que tienes USDC en Binance Spot.\nUsa /reanudar cuando lo hayas confirmado.`);
+        } else {
+          const drift = realUSDC - virtualFree;
+          if(Math.abs(drift) > 2 && Math.abs(drift) < 15) {
+            console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
+            bot.cash += drift * 0.1; // corrección suave 10%
+          }
         }
       }).catch(()=>{});
     }

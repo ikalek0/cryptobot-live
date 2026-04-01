@@ -13,6 +13,13 @@ class CircuitBreaker {
     this.maxDailyLoss=maxDailyLoss; this.startOfDayVal=null;
     this.triggered=false; this.triggeredAt=null; this.lastResetDay=null;
   }
+  reset(newValue) {
+    // Hard reset: used after orphan portfolio cleanup
+    this.triggered = false;
+    this.triggeredAt = null;
+    if(newValue) this.startOfDayVal = newValue;
+    console.log("[CB] Circuit breaker reseteado manualmente");
+  }
   check(currentValue) {
     const today=new Date().toDateString();
     if(this.lastResetDay!==today){this.startOfDayVal=currentValue;this.triggered=false;this.lastResetDay=today;}
