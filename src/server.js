@@ -12,6 +12,7 @@ const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
+const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
@@ -720,12 +721,34 @@ function startLoop(){
     if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
       fetchFearGreed().then(fg=>{bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);});
+      // Market data for Telegram /mercado command
+      fetchLongShortRatio("BTCUSDT").then(ls=>{bot.longShortRatio=ls;}).catch(()=>{});
+      fetchFundingRate("BTCUSDT").then(fr=>{bot.fundingRate=fr;}).catch(()=>{});
+      fetchOpenInterest("BTCUSDT").then(oi=>{bot.openInterest=oi;}).catch(()=>{});
+      if(Date.now()-(bot._lastRedditFetch||0)>7200000){
+        bot._lastRedditFetch=Date.now();
+        fetchRedditSentiment().then(rs=>{bot.redditSentiment=rs;}).catch(()=>{});
+      }
     }
 
     if(ticks%120===0){ fetchNewsAlert().then(news=>{if(news?.negative)tg.notifyNewsAlert(news);}); }
 
     // Enviar equity a BAFIR
     if(ticks%60===0) sendEquityToBafir(bot.totalValue());
+    // WF intradía cada 30min en live (sin API, usa historial en RAM)
+    if(ticks%180===0 && ticks>0) {
+      try {
+        const wf = runIntradayWalkForward(bot);
+        if(wf) {
+          bot._intradayWF = wf;
+          if(wf.verdict==="SOBREAJUSTE") {
+            console.warn(`[WF-LIVE] ⚠️ Ratio ${wf.avgRatio} — posible sobreajuste intradía`);
+          } else {
+            console.log(`[WF-LIVE] Ratio ${wf.avgRatio} — ${wf.verdict}`);
+          }
+        }
+      } catch(e) {}
+    }
     // Reconciliación periódica cada 30 ticks: comparar cash virtual vs Binance real
     if(LIVE_MODE && ticks%180===0) {
       getAccountBalance().then(balances => {

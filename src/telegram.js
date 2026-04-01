@@ -16,10 +16,30 @@ function send(text) {
 // ── Eventos importantes únicamente ───────────────────────────────────────────
 function notifyCircuitBreaker(drawdown) { send(`🎯 ⚡ <b>[LIVE] CIRCUIT BREAKER</b>\nPérdida diaria: <b>${(Math.abs(drawdown)*100).toFixed(2)}%</b>\nBot pausado hasta mañana.`); }
 function notifyBigWin(trade)  {
-  const absStr = trade.pnlAbs!=null ? ` (+$${Math.abs(trade.pnlAbs).toFixed(2)})` : "";
-  send(`🎯 💰 <b>[LIVE] GANANCIA</b>\n<b>${trade.symbol?.replace("USDC","")}</b>  +${trade.pnl}%${absStr}\nEntró $${(trade.qty*trade.price/(1+trade.pnl/100)).toFixed(2)} → Salió $${(trade.qty*trade.price).toFixed(2)}\nRazón: ${trade.reason||"—"}`);
+  const fx=1.08;
+  const pnlAbs=trade.pnlAbs||0;
+  const pnlEur=(pnlAbs/fx).toFixed(2);
+  const exitVal=(trade.qty*trade.price).toFixed(2);
+  const entryVal=(trade.qty*trade.price/(1+trade.pnl/100)).toFixed(2);
+  const coin=(trade.symbol||"").replace("USDC","");
+  send(`💰 <b>[LIVE] GANANCIA — ${coin}</b>\n\n`+
+    `+${trade.pnl.toFixed(2)}% (+$${pnlAbs.toFixed(2)} / +€${pnlEur})\n`+
+    `Entró $${entryVal} → Salió $${exitVal}\n`+
+    `Razón: ${trade.reason||"—"} · Estrategia: ${trade.strategy||"—"}\n`+
+    `Qty: ${(trade.qty||0).toFixed(5)} ${coin}`);
 }
-function notifyBigLoss(trade) { send(`🎯 📉 <b>[LIVE] PÉRDIDA IMPORTANTE</b>\n<b>${trade.symbol}</b>  ${trade.pnl}%\nRazón: ${trade.reason}`); }
+function notifyBigLoss(trade) {
+  const fx=1.08;
+  const pnlAbs=trade.pnlAbs||0;
+  const pnlEur=(pnlAbs/fx).toFixed(2);
+  const exitVal=(trade.qty*trade.price).toFixed(2);
+  const entryVal=(trade.qty*trade.price/(1+(trade.pnl||0)/100)).toFixed(2);
+  const coin=(trade.symbol||"").replace("USDC","");
+  send(`📉 <b>[LIVE] PÉRDIDA — ${coin}</b>\n\n`+
+    `${trade.pnl.toFixed(2)}% ($${pnlAbs.toFixed(2)} / €${pnlEur})\n`+
+    `Entró $${entryVal} → Salió $${exitVal}\n`+
+    `Razón: ${trade.reason||"—"} · El bot ha aprendido de esta operación`);
+}
 function notifyDefensiveMode(btcDrawdown) { send(`🎯 🛡️ <b>[LIVE] MODO DEFENSIVO</b>\nBTC cayó <b>${Math.abs(btcDrawdown)}%</b> desde el máximo de hoy. Sin nuevas posiciones.`); }
 function notifyDefensiveOff()  { send(`🎯 ✅ <b>[LIVE] Modo defensivo desactivado</b> — Bot retoma operaciones.`); }
 function notifyBlacklist(sym)  { send(`🎯 🚫 <b>[LIVE] ${sym} bloqueado 4h</b> — 4 pérdidas consecutivas.`); }
@@ -51,20 +71,33 @@ function buildDaily(state) {
   const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===today);
   const wins=ts.filter(l=>l.pnl>0).length;
   const fees=ts.reduce((s,l)=>s+(l.fee||0),0);
-  // P&L del día en $ absoluto
   const pnlAbsDay=ts.reduce((s,l)=>s+(l.pnlAbs||0),0);
   const pnlEurDay=(pnlAbsDay/fx).toFixed(2);
-  // P&L total desde inicio
   const INITIAL=parseFloat(process.env.CAPITAL_USDC||process.env.CAPITAL_USDT||"100");
   const pnlAbsTotal=+(tv-INITIAL).toFixed(2);
   const pnlEurTotal=(pnlAbsTotal/fx).toFixed(2);
-  return `🎯 ${ret>=0?"📈":"📉"} <b>[LIVE] RESUMEN DIARIO</b> — ${new Date().toLocaleDateString("es-ES")}\n\n`+
-    `💼 Capital: <b>$${tv.toFixed(2)}</b> / <b>€${tvEur}</b>  (${ret>=0?"+":""}${ret.toFixed(2)}%)\n`+
-    `📈 Total desde inicio: ${pnlAbsTotal>=0?"+":""}$${pnlAbsTotal} / ${pnlEurTotal>=0?"+":""}€${pnlEurTotal}\n\n`+
-    `📋 Hoy: ${ts.length} ops · ${wins}/${ts.length} ganadoras\n`+
-    `💰 P&L hoy: ${pnlAbsDay>=0?"+":""}$${pnlAbsDay.toFixed(2)} / ${pnlEurDay>=0?"+":""}€${pnlEurDay}\n`+
-    `💸 Comisiones: $${fees.toFixed(2)}  |  WR global: ${state.winRate||"—"}%\n`+
-    `🌡️ F&G: ${state.fearGreed||"—"} (${state.fearGreedSource||"?"})  |  Régimen: ${state.marketRegime||"—"}`;
+  const fg=state.fearGreed||50;
+  const fgLabel=fg<15?"😱 PÁNICO EXTREMO":fg<25?"😨 Miedo extremo":fg<40?"😟 Miedo":fg<55?"😐 Neutral":fg<70?"🙂 Codicia":fg<85?"😏 Codicia alta":"🤑 EUFORIA";
+  const regimeLabel=state.marketRegime==="BULL"?"📈 Alcista":state.marketRegime==="BEAR"?"📉 Bajista":"➡️ Lateral";
+  const bestToday=ts.filter(l=>l.pnl>0).sort((a,b)=>b.pnl-a.pnl)[0];
+  const worstToday=ts.filter(l=>l.pnl<0).sort((a,b)=>a.pnl-b.pnl)[0];
+  const wr=ts.length?Math.round(wins/ts.length*100):0;
+  const openPos=Object.keys(state.portfolio||{}).length;
+  return `🎯 ${ret>=0?"📈":"📉"} <b>[LIVE] Resumen del ${new Date().toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"})}</b>\n\n`+
+    `💼 <b>Capital: $${tv.toFixed(2)} / €${tvEur}</b>\n`+
+    `${pnlAbsTotal>=0?"📈":"📉"} Desde inicio: ${pnlAbsTotal>=0?"+":""}$${pnlAbsTotal} / ${pnlEurTotal>=0?"+":""}€${pnlEurTotal} (${ret>=0?"+":""}${ret.toFixed(2)}%)\n\n`+
+    `<b>HOY:</b>\n`+
+    `• ${ts.length} operaciones · ${wins} ganadoras · WR ${wr}%\n`+
+    `• P&L: ${pnlAbsDay>=0?"+":""}$${pnlAbsDay.toFixed(2)} / ${pnlEurDay>=0?"+":""}€${pnlEurDay}\n`+
+    (bestToday?`• Mejor: ${bestToday.symbol?.replace("USDC","")} +${bestToday.pnl.toFixed(2)}%\n`:"")+
+    (worstToday?`• Peor: ${worstToday.symbol?.replace("USDC","")} ${worstToday.pnl.toFixed(2)}%\n`:"")+
+    `• Comisiones: $${fees.toFixed(2)}\n`+
+    (openPos>0?`• ${openPos} posición(es) abiertas ahora\n`:"")+
+    `\n<b>MERCADO:</b>\n`+
+    `• ${fgLabel} (${fg}/100)\n`+
+    `• ${regimeLabel}\n`+
+    `• Long/Short: ${state.longShortRatio?.ratio||"—"} (${state.longShortRatio?.signal||"—"})\n`+
+    `• Funding BTC: ${state.fundingRate?.rate||"—"}%`;
 }
 function buildWeekly(state) {
   const tv=state.totalValue||10000,ret=state.returnPct||0;
@@ -93,7 +126,7 @@ function startCommandListener(getState, botControls={}) {
   
   function buildHelp(mode) {
     return "📖 <b>Comandos BAFIR " + mode + "</b>\n\n" +
-      "<b>Info:</b>\n/estado /semana /posiciones /log\n/noticias /momentum /aprendizaje /riesgo\n\n" +
+      "<b>Info:</b>\n/estado /mercado /posiciones /log\n/semana /noticias /momentum /aprendizaje /riesgo\n\n" +
       "<b>Control:</b>\n/pausa — pausar nuevas entradas\n/reanudar — reanudar\n/modo — configuración actual\n" +
       (mode.includes("LIVE") ? "/balance — balance Binance real" : "");
   }
@@ -139,7 +172,40 @@ function startCommandListener(getState, botControls={}) {
     }).join("\n\n");
   }
 
-  function buildMomentum(state) {
+  function buildMercado(state) {
+  const fg=state.fearGreed||50;
+  const fgLabel=fg<15?"😱 PÁNICO EXTREMO":fg<25?"😨 Miedo extremo":fg<40?"😟 Miedo":fg<55?"😐 Neutral":fg<70?"🙂 Codicia":fg<85?"😏 Codicia alta":"🤑 EUFORIA";
+  const regime=state.marketRegime||"LATERAL";
+  const regimeExp=regime==="BULL"?"El mercado está en tendencia alcista. El bot opera con posiciones más grandes y deja correr las ganancias.":
+    regime==="BEAR"?"El mercado está bajando. El bot es muy selectivo y solo entra en rebotes extremos.":
+    "Mercado sin dirección clara. El bot opera con mean reversion: compra mínimos y vende en la banda media.";
+  const ls=state.longShortRatio||{ratio:"—",signal:"NEUTRAL"};
+  const lsExp=ls.ratio>1.8?"Hay muchos traders apostando al alza (apalancados). Si el precio cae, habrá liquidaciones en cadena.":
+    ls.ratio<0.8?"Mayoría apostando a la baja. Posible short squeeze si sube el precio.":
+    "Balance razonable entre largos y cortos.";
+  const fr=state.fundingRate||{rate:"—",signal:"NEUTRAL"};
+  const frExp=parseFloat(fr.rate)>0.05?"Funding positivo alto: los largos pagan a los cortos. Mercado sobrecomprado en futuros.":
+    parseFloat(fr.rate)<-0.02?"Funding negativo: cortos pagan a largos. Posible oportunidad de rebote.":
+    "Funding neutral.";
+  const oi=state.openInterest||{change:0,trend:"STABLE"};
+  const oiExp=oi.trend==="GROWING"?"El Open Interest crece: dinero nuevo entrando al mercado. Señal de tendencia fuerte.":
+    oi.trend==="DECLINING"?"OI cayendo: posiciones cerrándose, posible fin de tendencia.":
+    "Open Interest estable.";
+  const reddit=state.redditSentiment||{score:50,signal:"NEUTRAL",postCount:0};
+  const rdtExp=reddit.signal==="BULLISH"?"Sentimiento positivo en redes sociales. La comunidad crypto está optimista.":
+    reddit.signal==="BEARISH"?"Sentimiento negativo en redes. Miedo generalizado en la comunidad.":
+    "Sentimiento neutral en redes sociales.";
+  return `🌍 <b>[LIVE] Estado del mercado</b> — ${new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}\n\n`+
+    `<b>Fear &amp; Greed: ${fg}/100 — ${fgLabel}</b>\n`+
+    `<i>Cuando está por debajo de 20, históricamente es buen momento de compra a largo plazo.</i>\n\n`+
+    `<b>Régimen: ${regime}</b>\n<i>${regimeExp}</i>\n\n`+
+    `<b>Long/Short ratio: ${ls.ratio}</b>\n<i>${lsExp}</i>\n\n`+
+    `<b>Funding rate BTC: ${fr.rate}%</b>\n<i>${frExp}</i>\n\n`+
+    `<b>Open Interest: ${oi.change>0?"+":""}${oi.change}% (${oi.trend})</b>\n<i>${oiExp}</i>\n\n`+
+    `<b>Reddit sentiment: ${reddit.score}/100 — ${reddit.signal}</b>\n<i>${rdtExp}</i>`;
+}
+
+function buildMomentum(state) {
     const dp=state.dailyPnlPct||0, m=state.momentumMult||1;
     const lvl=dp<0?"🛡 Defensivo":dp<3?"— Normal":dp<7?"🚀 Boosted ×"+m.toFixed(1):dp<12?"🚀🚀 Fuerte ×"+m.toFixed(1):"🔥🔥 Máximo ×"+m.toFixed(1);
     const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===new Date().toDateString());
@@ -173,6 +239,14 @@ function startCommandListener(getState, botControls={}) {
             const state=getState();
             const mode=state.instance||state.mode||"BOT";
             if(text==="/estado")       send(buildDaily(state));
+            else if(text==="/walkforward") {
+              const wf = state.walkForwardIntra;
+              if(!wf) { send("⏳ WF intradía aún no calculado. Espera ~30 min."); }
+              else {
+                const lines = Object.entries(wf.symbols||{}).slice(0,6).map(([s,r])=>`${r.robust?"✅":"⚠️"} ${s.replace("USDC","")}: train ${r.trainWR}% → test ${r.testWR}% (ratio ${r.ratio})`).join("\n");
+                send(`📊 <b>[LIVE] Walk-Forward intradía</b>\n\n${lines}\n\n<b>Global: ${wf.verdict}</b>\nRatio medio: ${wf.avgRatio}\n${wf.robustCount}/${wf.totalSymbols} pares robustos`);
+              }
+            }
             else if(text==="/semana")  send(buildWeekly(state));
             else if(text==="/posiciones") send(buildPositions(state));
             else if(text==="/log")     send(buildLog10(state));

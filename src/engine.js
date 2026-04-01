@@ -299,6 +299,10 @@ class CryptoBotFinal {
     this.confidence      = new ConfidenceScore();
     this.riskLearning    = new RiskLearning();
     this.corrManager    = new CorrelationManager();
+    this.longShortRatio = null;
+    this.fundingRate    = null;
+    this.openInterest   = null;
+    this.redditSentiment= null;
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
       this.cash=saved.cash!=null ? saved.cash : INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
@@ -602,6 +606,8 @@ class CryptoBotFinal {
       prices:this.prices,history:this.history,portfolio:this.portfolio,
       cash:this.cash,log:this.log,equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
       mode:this.mode,totalValue:tv,returnPct:ret,fxRate:parseFloat(process.env.FX_RATE||"1.08"),
+      longShortRatio:this.longShortRatio||null,fundingRate:this.fundingRate||null,
+      openInterest:this.openInterest||null,redditSentiment:this.redditSentiment||null,
       winRate:sells?+((wins/sells)*100).toFixed(0):null,
       pairs:PAIRS,categories:CATEGORIES,
       circuitBreaker:this.breaker.check(tv),
