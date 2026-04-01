@@ -1,7 +1,27 @@
 // backtest.js — Backtesting completo usando la lógica real del engine
 // Corre offline con klines de Binance y devuelve métricas completas
 
-const { fetchAllKlinesForPeriod } = require("./historicalSimulation");
+// Fetch klines directly (no historicalSimulation dependency in live)
+const https = require("https");
+async function fetchAllKlinesForPeriod(symbol, interval, startTime, endTime) {
+  const all = [];
+  let cursor = startTime;
+  const intervalMs = {"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000}[interval]||3600000;
+  while(cursor < endTime) {
+    const params = new URLSearchParams({symbol,interval,startTime:cursor,endTime,limit:500}).toString();
+    const data = await new Promise((resolve,reject)=>{
+      https.get(`https://api.binance.com/api/v3/klines?${params}`,{timeout:10000},res=>{
+        let b=""; res.on("data",c=>b+=c);
+        res.on("end",()=>{try{resolve(JSON.parse(b));}catch(e){reject(e);}});
+      }).on("error",reject).on("timeout",()=>reject(new Error("timeout")));
+    });
+    if(!Array.isArray(data)||!data.length) break;
+    all.push(...data.map(k=>({openTime:k[0],open:parseFloat(k[1]),high:parseFloat(k[2]),low:parseFloat(k[3]),close:parseFloat(k[4]),volume:parseFloat(k[5]),closeTime:k[6]})));
+    cursor = data[data.length-1][6] + 1;
+    await new Promise(r=>setTimeout(r,100));
+  }
+  return all;
+}
 
 async function runBacktest(symbols, startTime, endTime, initialCapital=50000) {
   const BNB_FEE = 0.00075;
