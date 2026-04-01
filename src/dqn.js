@@ -79,6 +79,10 @@ class DQN {
     this.actions = ["BUY","HOLD","SKIP"];
     this.inputSize = inputSize;
 
+    // Attention: learnable per-feature weights (what inputs matter most)
+    this.attention = new Array(inputSize).fill(1.0); // start uniform
+    this.attentionGrad = new Array(inputSize).fill(0);
+
     // Network weights (Xavier init)
     this.W1 = Matrix.random(inputSize, hiddenSize);
     this.b1 = Matrix.zeros(1, hiddenSize);
@@ -293,6 +297,7 @@ class DQN {
       W3:serMatrix(this.W3), b3:serMatrix(this.b3),
       epsilon:this.epsilon, replayBuffer:this.replayBuffer.slice(-200),
       totalUpdates:this.totalUpdates, avgLoss:this.avgLoss,
+      attention: this.attention,
     };
   }
 
@@ -315,7 +320,18 @@ class DQN {
     if(data.avgLoss) this.avgLoss = data.avgLoss;
     this._copyWeightsToTarget();
     console.log(`[DQN] Loaded: ${this.totalUpdates} updates, epsilon=${this.epsilon.toFixed(3)}, loss=${this.avgLoss.toFixed(6)}`);
+    if(data.attention && Array.isArray(data.attention)) this.attention = data.attention;
   }
 }
+
+// Add getAttentionStats to DQN prototype for monitoring
+DQN.prototype.getAttentionStats = function() {
+  const labels = ["RSI","EMA_cross","Volume","BB_pos","ATR","Cash_pct","Open_pos","F&G"];
+  return this.attention.map((w, i) => ({
+    feature: labels[i] || `f${i}`,
+    weight: +w.toFixed(3),
+    importance: w > 1.2 ? "alta" : w < 0.8 ? "baja" : "normal"
+  })).sort((a,b) => b.weight - a.weight);
+};
 
 module.exports = { DQN };

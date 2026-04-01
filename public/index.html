@@ -877,7 +877,8 @@ function render() {
     ? (periodWR>=50 ? "✅ Por encima del umbral" : "🔴 Por debajo del 50%")
     : "Sin datos";
   const sells = allSells.length;
-  document.getElementById("kpi-ops").textContent = periodSells.length+"/"+sells+" op"+(sells!==1?"s":"");
+  const periodWins2 = periodSells.filter(l=>l.pnl>0).length;
+  document.getElementById("kpi-ops").textContent = periodWins2+" ganadoras / "+periodSells.length+" ops";
 
   // Rendimiento PERÍODO — se ajusta al período seleccionado
   const todayEl = document.getElementById("kpi-today");

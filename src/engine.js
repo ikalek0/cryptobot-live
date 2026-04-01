@@ -291,6 +291,12 @@ class CryptoBotFinal {
   constructor(saved=null){
     this.profile=RISK_PROFILES["moderate"];
     this.dqn = new DQN({ lr:0.001, gamma:0.95, epsilon:0.12 });
+    this.multiAgent = new MultiAgentSystem({
+      BULL:    { lr:0.002, epsilon:0.08 },
+      LATERAL: { lr:0.001, epsilon:0.12 },
+      BEAR:    { lr:0.001, epsilon:0.06 },
+      UNKNOWN: { lr:0.001, epsilon:0.15 },
+    });
     this.breaker=new CircuitBreaker(this.profile.maxDailyLoss);
     this.trailing=new TrailingStop();
     this.optimizer=new AutoOptimizer();
@@ -558,7 +564,11 @@ class CryptoBotFinal {
             sig._dqnState = liveDqnState;
           }
           const _lKelly = calcAdaptiveKelly(1.0, this.portfolio, this.prices, this.history);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost*_lKelly;
+          // MultiAgent: régimen especializado boost
+          const _maBoost = this.multiAgent
+            ? this.multiAgent.getSignalBoost(sig.symbol, this.marketRegime, sig.score)
+            : 1.0;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost*_lKelly*_maBoost;
           if(invest<10||invest>availCash)continue;
           // Slippage estimation: pares poco líquidos (OP, ARB, NEAR) tienen mayor slippage
           const ILLIQUID = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC"];

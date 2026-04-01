@@ -175,7 +175,29 @@ app.get("/api/myip", (_,res)=>{
   }).on("error",()=>res.json({ip:"error"}));
 });
 
-// Score de confianza — consumido por BAFIR dashboard
+// Check EGRESS IP (what external services like Binance actually see)
+app.get("/api/myip-egress", (_,res)=>{
+  const https2=require("https");
+  // Use multiple services to cross-check
+  const check = (url, cb) => {
+    https2.get(url, r=>{
+      let d=""; r.on("data",c=>d+=c);
+      r.on("end",()=>{ try{ cb(JSON.parse(d)); }catch{ cb({error:"parse fail"}); } });
+    }).on("error",e=>cb({error:e.message}));
+  };
+  check("https://api.ipify.org?format=json", ipify => {
+    check("https://api64.ipify.org?format=json", ipify64 => {
+      res.json({
+        ipify_v4: ipify?.ip || ipify,
+        ipify_v64: ipify64?.ip || ipify64,
+        note: "These are the egress IPs Railway uses for outbound HTTPS requests",
+        binanceNote: "Add ALL of these to your Binance API whitelist"
+      });
+    });
+  });
+});
+
+// ScoreScore de confianza — consumido por BAFIR dashboard
 app.get("/api/confidence", (_,res) => {
   if(!bot) return res.status(503).json({error:"Bot no iniciado"});
   res.json({
@@ -479,6 +501,7 @@ async function save() {
   s.trailingHighs=bot.trailing.highs;
   s.reentryTs=bot.reentryTs;
   s.syncHistory=syncHistory;
+  if(bot.multiAgent)    s.multiAgentData = bot.multiAgent.serialize();
   if(bot.adaptiveStop)   s.adaptiveStop   = bot.adaptiveStop.serialize();
   if(bot.adaptiveHours)  s.adaptiveHours  = bot.adaptiveHours.serialize();
   if(bot.newsLearner)    s.newsLearner    = bot.newsLearner.serialize();
@@ -755,9 +778,10 @@ async function verifyLiveBalance() {
   } catch(e) {
     console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);
     // CRITICAL: no podemos verificar balance real → pausar bot por seguridad
-    if(bot) bot._pausedByTelegram = true;
-    tg.send && tg.send("🎯 ⚠️ <b>[LIVE] BOT PAUSADO</b>\nNo se pudo verificar balance Binance al arrancar.\nUsa /reanudar cuando confirmes que todo está bien.");
-    console.warn("[LIVE] Bot pausado hasta verificación manual. Usa /reanudar en Telegram.");
+    // No pausar automáticamente - la IP puede causar falsos negativos
+    // Solo alertar por Telegram
+    tg.send && tg.send("⚠️ <b>[LIVE] Advertencia balance</b>\nNo se pudo verificar balance Binance al arrancar.\nPuede ser IP issue. El bot continúa operando.\nVerifica con /balance");
+    console.warn("[LIVE] Advertencia: balance no verificado al arrancar (posible IP issue).");
   }
 }
 

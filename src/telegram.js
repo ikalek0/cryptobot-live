@@ -480,7 +480,15 @@ Ratio: ${wf.avgRatio}  ·  ${wf.robustCount}/${wf.totalSymbols} robustos`
               else if(text==="/pausa") {
                 paused = true;
                 if(botControls.setPaused) botControls.setPaused(true);
-                send(`⏸ <b>Bot pausado</b>\n${HR}\nNo se abrirán nuevas posiciones\nLos stops siguen activos`);
+                send(`⏸ <b>Bot pausado</b>\n${HR}\nNo se abrirán nuevas posiciones\nLos stops siguen activos\nAuto-reanuda en 6h`);
+                // Auto-resume after 6h
+                if(_pauseTimer) clearTimeout(_pauseTimer);
+                _pauseTimer = setTimeout(() => {
+                  paused = false;
+                  if(botControls.setPaused) botControls.setPaused(false);
+                  _pauseTimer = null;
+                  send("🔄 <b>[LIVE] Auto-reanudado</b>\nLa pausa de 6h expiró — bot operando de nuevo.");
+                }, 6 * 60 * 60 * 1000);
               }
               else if(text==="/reanudar") {
                 paused = false;
