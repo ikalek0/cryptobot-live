@@ -220,15 +220,13 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <div class="card">
       <div class="card-title">
         <span>Curva de capital</span>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div class="period-selector" style="margin-bottom:0">
-            <button class="ps-btn active" onclick="setPeriod('1H',this)">1H</button>
-            <button class="ps-btn" onclick="setPeriod('1D',this)">1D</button>
-            <button class="ps-btn" onclick="setPeriod('1W',this)">1S</button>
-            <button class="ps-btn" onclick="setPeriod('1M',this)">1M</button>
-            <button class="ps-btn" onclick="setPeriod('ALL',this)">Todo</button>
-          </div>
-          <select id="pair-selector" onchange="setPairFilter(this.value)" style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
+        <div style="display:flex;align-items:center;gap:8px;margin:8px 0 6px">
+          <button class="ps-btn active" onclick="setPeriod('1H',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1H</button>
+          <button class="ps-btn" onclick="setPeriod('1D',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1D</button>
+          <button class="ps-btn" onclick="setPeriod('1W',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1S</button>
+          <button class="ps-btn" onclick="setPeriod('1M',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1M</button>
+          <button class="ps-btn" onclick="setPeriod('ALL',this)" style="font-size:13px;padding:5px 14px;font-weight:600">Todo</button>
+          <select id="pair-selector" onchange="setPairFilter(this.value)" style="margin-left:auto;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
             <option value="ALL">Todos los pares</option>
           </select>
         </div>
@@ -343,6 +341,28 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
   <div class="card">
     <div class="card-title">Historial del optimizador</div>
     <div id="opt-log"></div>
+  </div>
+</div>
+
+<!-- APRENDIZAJE -->
+<div class="panel" id="panel-learning">
+  <div class="row row-2">
+    <div class="card">
+      <div class="card-title">🧠 Autoaprendizaje adaptativo</div>
+      <div id="adaptive-stats" style="display:flex;flex-direction:column;gap:10px">
+        <div style="text-align:center;padding:20px;color:var(--dim);font-size:12px">Cargando...</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🔄 Transfer Learning paper→live</div>
+      <div id="transfer-stats" style="display:flex;flex-direction:column;gap:10px">
+        <div style="text-align:center;padding:20px;color:var(--dim);font-size:12px">Sin datos aún</div>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="card-title">📊 Walk-Forward intradía</div>
+    <div id="wf-detail" style="padding:8px 0"></div>
   </div>
 </div>
 
@@ -761,6 +781,7 @@ function render() {
 
   // Rendimiento — no "pérdida", siempre con signo
   // Period-aware return
+  const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
   const periodStartVal = periodEquity.length ? periodEquity[0].v : (s.equity?.[0]?.v || tv);
   const periodRet = periodStartVal > 0 ? ((tv - periodStartVal) / periodStartVal * 100) : ret;
   const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
@@ -788,7 +809,7 @@ function render() {
   const periodPnlAbs = periodSells.reduce((s,l)=>s+(l.pnlAbs||0),0);
   const periodFees = periodSells.reduce((s,l)=>s+(l.fee||0),0);
   // Drawdown for period
-  const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
+  
   let periodMaxDD = 0;
   if(periodEquity.length>1) {
     let peak=periodEquity[0].v;
@@ -865,9 +886,90 @@ function render() {
   renderLog("log-mini", s.log, 5);
   renderLog("log-full", s.log, 50);
 
-  // Signals (si está activo)
+  // Signals / Risk / Learning (si está activo)
   if (document.getElementById("panel-signals").classList.contains("active")) renderSignals(s);
   if (document.getElementById("panel-risk").classList.contains("active")) renderRisk(s);
+  if (document.getElementById("panel-learning").classList.contains("active")) renderLearning(s);
+}
+
+function renderLearning(s) {
+  // ── Adaptive stats ──────────────────────────────────────────────────
+  const adStop  = s.adaptiveStopStats  || {};
+  const adHours = s.adaptiveHoursStats || {};
+  const regDet  = s.regimeDetectorStats|| {};
+  const sells   = (s.log||[]).filter(l=>l.type==="SELL");
+  const recentWR= sells.length>=10 ? Math.round(sells.slice(-20).filter(l=>l.pnl>0).length/Math.min(20,sells.length)*100) : null;
+
+  const adaptEl = document.getElementById("adaptive-stats");
+  if(adaptEl) adaptEl.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">Trades reales</span>
+      <strong>${sells.length}</strong>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">WR reciente (20 trades)</span>
+      <strong style="color:${recentWR>=50?'var(--green)':recentWR>=40?'var(--gold)':'var(--red)'}">${recentWR!=null?recentWR+'%':'—'}</strong>
+    </div>
+    <div class="separator"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">🎯 Stop calibrado (pares)</span>
+      <strong>${adStop.learnedPairs||0}</strong>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">Stop medio aprendido</span>
+      <span style="font-size:12px">${adStop.avgStop?((adStop.avgStop*100).toFixed(2)+'%'):'aprendiendo...'}</span>
+    </div>
+    ${adStop.mostTuned?.length ? adStop.mostTuned.map(t=>`
+    <div style="font-size:10px;color:var(--dim2);padding-left:8px">↳ ${t.key}: ${(t.stop*100).toFixed(2)}% (${t.samples} samples)</div>`).join(''):''}
+    <div class="separator"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">⏰ Horas observadas</span>
+      <strong>${adHours.totalObservations||0}</strong>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:11px;color:var(--dim2)">📐 HMM régimen obs.</span>
+      <strong>${regDet.observations||0} ${regDet.calibrated?'✅ calibrado':''}</strong>
+    </div>
+  `;
+
+  // ── Transfer learning ───────────────────────────────────────────────
+  const xferEl = document.getElementById("transfer-stats");
+  const xfers = (s.transferHistory||[]).slice(-5).reverse();
+  if(xferEl) {
+    if(!xfers.length) {
+      xferEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--dim);font-size:12px">Sin transferencias aún — se activa cada 6h si paper WR>30%</div>';
+    } else {
+      xferEl.innerHTML = xfers.map(x=>{
+        const improved = x.improved===true ? '✅ Mejoró' : x.improved===false ? '❌ Empeoró' : '⏳ Pendiente';
+        const delta = (x.liveWRafter!=null && x.liveWRbefore!=null) ? (x.liveWRafter-x.liveWRbefore) : null;
+        return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <strong>Paper WR: ${x.paperWR}% (${x.paperTrades} trades)</strong>
+            <span style="color:var(--dim2)">${new Date(x.ts).toLocaleString('es-ES',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
+          </div>
+          <div>Blend aplicado: ${x.blend?(x.blend*100).toFixed(0)+'%':'—'}</div>
+          <div>Live WR antes: ${x.liveWRbefore!=null?x.liveWRbefore+'%':'—'} → después: ${x.liveWRafter!=null?x.liveWRafter+'%':'pendiente'}</div>
+          <div style="font-weight:600;margin-top:4px">${improved}${delta!=null?' ('+( delta>=0?'+':'')+delta+'pp)':''}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // ── Walk-Forward ─────────────────────────────────────────────────────
+  const wf = s.walkForwardIntra;
+  const wfEl = document.getElementById("wf-detail");
+  if(wfEl && wf) {
+    wfEl.innerHTML = `
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div><span style="font-size:11px;color:var(--dim2)">Veredicto</span><div style="font-weight:700;margin-top:2px">${wf.verdict||'—'}</div></div>
+        <div><span style="font-size:11px;color:var(--dim2)">Ratio</span><div style="font-weight:700;margin-top:2px">${wf.ratio?.toFixed(2)||'—'}</div></div>
+        <div><span style="font-size:11px;color:var(--dim2)">Train WR</span><div style="margin-top:2px">${wf.trainWR!=null?(wf.trainWR.toFixed(0)+'%'):'—'}</div></div>
+        <div><span style="font-size:11px;color:var(--dim2)">Test WR</span><div style="margin-top:2px">${wf.testWR!=null?(wf.testWR.toFixed(0)+'%'):'—'}</div></div>
+        <div><span style="font-size:11px;color:var(--dim2)">Última actualización</span><div style="margin-top:2px;font-size:10px">${wf.ts?new Date(wf.ts).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'—'}</div></div>
+      </div>`;
+  } else if(wfEl) {
+    wfEl.innerHTML = '<div style="color:var(--dim);font-size:12px">Walk-Forward pendiente de calcular (~30 min tras arranque)</div>';
+  }
 }
 
 function renderPortfolio(id, portfolio, prices, mini) {

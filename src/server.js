@@ -12,6 +12,8 @@ const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
+const { ClientBotManager } = require("./clientManager");
+const clientManager = new ClientBotManager();
 const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
 const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment } = require("./feeds");
@@ -866,8 +868,18 @@ function startLoop(){
       if(LIVE_MODE){
         // No usamos await aquí — las órdenes se procesan en background
         // para no bloquear el tick loop (TWAP puede tardar 60s)
-        if(trade.type==="BUY")  placeLiveBuy(trade.symbol, trade.qty*trade.price).catch(e=>console.error("[ORDER] BUY error:",e.message));
-        if(trade.type==="SELL") placeLiveSell(trade.symbol, trade.qty).catch(e=>console.error("[ORDER] SELL error:",e.message));
+        if(trade.type==="BUY") {
+          placeLiveBuy(trade.symbol, trade.qty*trade.price).catch(e=>console.error("[ORDER] BUY error:",e.message));
+          // Copy trade to clients (proporcionalmente a su capital)
+          clientManager.copyBuy(trade.symbol, trade.qty*trade.price, bot.totalValue())
+            .catch(e=>console.warn("[CLIENT] copyBuy error:", e.message));
+        }
+        if(trade.type==="SELL") {
+          placeLiveSell(trade.symbol, trade.qty).catch(e=>console.error("[ORDER] SELL error:",e.message));
+          // Copy sell to clients
+          clientManager.copySell(trade.symbol, trade.qty)
+            .catch(e=>console.warn("[CLIENT] copySell error:", e.message));
+        }
       }
     }
 
@@ -979,6 +991,7 @@ function startLoop(){
         riskLearningStats:bot.riskLearning?.getStats()||{},
         syncHistory:syncHistory.slice(-7),
         syncThreshold:SYNC_THRESHOLD,
+        clientStatus:clientManager.getStatus(),
       }
     });
 
