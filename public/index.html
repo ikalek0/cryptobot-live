@@ -143,6 +143,19 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 .panel.active{animation:fadeIn .2s ease}
+
+/* ── Filter bar ───────────────────────────────────────────────────────── */
+.filter-bar{display:flex;align-items:center;gap:12px;padding:12px 0 8px;flex-wrap:wrap}
+.filter-group{display:flex;align-items:center;gap:4px}
+.filter-group-right{margin-left:auto}
+.filter-select{font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer;height:32px}
+.currency-btn{padding:5px 12px;border-radius:6px;border:1.5px solid var(--border);background:transparent;color:var(--dim2);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:'DM Sans',sans-serif}
+.currency-btn.active,.currency-btn:hover{background:var(--dark);color:#fff;border-color:var(--dark)}
+/* ── KPI row-4 ────────────────────────────────────────────────────────── */
+.row-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}
+.kpi-sub2{font-size:10px;color:var(--dim2);margin-top:2px}
+.kpi-value.gold{color:var(--gold)}
+@media(max-width:768px){.row-4{grid-template-columns:repeat(2,1fr)}.filter-bar{gap:8px}}
 </style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
 </head>
@@ -177,27 +190,45 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 
 <!-- DASHBOARD -->
 <div class="panel active" id="panel-dashboard">
-  <div class="row row-5">
+  <!-- ── FILTROS (fuera del gráfico) ──────────────────────────────────── -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <button class="ps-btn active" onclick="setPeriod('1H',this)">1H</button>
+      <button class="ps-btn" onclick="setPeriod('1D',this)">1D</button>
+      <button class="ps-btn" onclick="setPeriod('1W',this)">1S</button>
+      <button class="ps-btn" onclick="setPeriod('1M',this)">1M</button>
+      <button class="ps-btn" onclick="setPeriod('YTD',this)">YTD</button>
+      <button class="ps-btn" onclick="setPeriod('ALL',this)">Total</button>
+    </div>
+    <div class="filter-group">
+      <select id="pair-selector" onchange="setPairFilter(this.value)" class="filter-select">
+        <option value="ALL">Todos los pares</option>
+      </select>
+    </div>
+    <div class="filter-group filter-group-right">
+      <button class="currency-btn active" id="btn-usd" onclick="setCurrency('USD')">USD $</button>
+      <button class="currency-btn" id="btn-eur" onclick="setCurrency('EUR')">EUR €</button>
+    </div>
+  </div>
+
+  <!-- ── KPIs ──────────────────────────────────────────────────────────── -->
+  <div class="row row-4">
     <div class="kpi">
-      <div class="kpi-label">Capital total</div>
+      <div class="kpi-label">Capital actual</div>
       <div class="kpi-value blue" id="kpi-total">—</div>
       <div class="kpi-sub" id="kpi-return">—</div>
+      <div class="kpi-sub2" id="kpi-gain-abs">—</div>
       <div class="kpi-accent blue"></div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Efectivo disponible</div>
-      <div class="kpi-value" id="kpi-cash">—</div>
-      <div class="kpi-sub" id="kpi-cash-pct">—</div>
-      <div class="kpi-accent"></div>
-    </div>
-    <div class="kpi">
       <div class="kpi-label">En posiciones</div>
-      <div class="kpi-value" id="kpi-invested">—</div>
-      <div class="kpi-sub" id="kpi-positions">—</div>
+      <div class="kpi-value gold" id="kpi-invested">—</div>
+      <div class="kpi-sub" id="kpi-cash-info">—</div>
+      <div class="kpi-sub2" id="kpi-positions">—</div>
       <div class="kpi-accent gold"></div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Win rate</div>
+      <div class="kpi-label" title="Verde ≥50% · Rojo &lt;50%">Win Rate</div>
       <div class="kpi-value" id="kpi-wr">—</div>
       <div class="kpi-sub" id="kpi-wr-sub" style="font-size:9px">—</div>
       <div class="kpi-sub" id="kpi-ops">—</div>
@@ -209,29 +240,11 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
       <div class="kpi-sub" id="kpi-today-sub">—</div>
       <div class="kpi-accent" id="kpi-today-accent"></div>
     </div>
-    <div class="kpi">
-      <div class="kpi-label" id="label-drawdown-period">Drawdown</div>
-      <div class="kpi-value" id="kpi-drawdown" style="font-size:20px">—</div>
-      <div class="kpi-sub" id="kpi-dd-sub">máx caída</div>
-      <div class="kpi-accent red"></div>
-    </div>
   </div>
 
   <div class="row row-21">
     <div class="card">
-      <div class="card-title">
-        <span>Curva de capital</span>
-        <div style="display:flex;align-items:center;gap:8px;margin:8px 0 6px">
-          <button class="ps-btn active" onclick="setPeriod('1H',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1H</button>
-          <button class="ps-btn" onclick="setPeriod('1D',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1D</button>
-          <button class="ps-btn" onclick="setPeriod('1W',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1S</button>
-          <button class="ps-btn" onclick="setPeriod('1M',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1M</button>
-          <button class="ps-btn" onclick="setPeriod('ALL',this)" style="font-size:13px;padding:5px 14px;font-weight:600">Todo</button>
-          <select id="pair-selector" onchange="setPairFilter(this.value)" style="margin-left:auto;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
-            <option value="ALL">Todos los pares</option>
-          </select>
-        </div>
-      </div>
+      <div class="card-title"><span>Curva de capital</span></div>
       <div class="chart-canvas-wrap">
         <canvas id="chart-canvas"></canvas>
         <div class="chart-crosshair" id="chart-crosshair"></div>
@@ -373,6 +386,23 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 let state = null;
 let currentPeriod = "1H";
 let equityHistory = [];
+
+// ── Currency toggle ─────────────────────────────────────────────────────────
+let _currency = "USD";
+let _fxRate = 1.08; // updated from state
+
+function setCurrency(cur) {
+  _currency = cur;
+  document.getElementById("btn-usd").classList.toggle("active", cur==="USD");
+  document.getElementById("btn-eur").classList.toggle("active", cur==="EUR");
+  try { render(); } catch(e) {}
+}
+
+function fCur(usdVal) {
+  if(_currency === "EUR") return "€" + (_fxRate>0 ? usdVal/_fxRate : usdVal).toLocaleString("es-ES",{minimumFractionDigits:2,maximumFractionDigits:2});
+  return "$" + Number(usdVal||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
 
 // ── WS + HTTP FALLBACK ────────────────────────────────────────────────────────
 let _wsConnected = false;
@@ -771,13 +801,14 @@ function render() {
 
   // KPIs
   const tv = s.totalValue||0;
+  if(s.fxRate) _fxRate = s.fxRate;
   const firstEquity = s.equity?.[0];
   const initialCapital = (typeof firstEquity==="object" ? firstEquity?.v : firstEquity) || tv;
   const ret = ((tv - initialCapital) / initialCapital) * 100;
   const invested = tv - (s.cash||0);
   const cashPct = tv>0 ? (s.cash/tv*100) : 100;
 
-  document.getElementById("kpi-total").textContent = fU(tv);
+  document.getElementById("kpi-total").textContent = fCur(tv);
   document.getElementById("kpi-total").style.color = "var(--blue)";
 
   // Rendimiento — no "pérdida", siempre con signo
@@ -785,10 +816,17 @@ function render() {
   const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
   const periodStartVal = periodEquity.length ? periodEquity[0].v : (s.equity?.[0]?.v || tv);
   const periodRet = periodStartVal > 0 ? ((tv - periodStartVal) / periodStartVal * 100) : ret;
-  const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
+  const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","YTD":"este año","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
   const retEl = document.getElementById("kpi-return");
-  retEl.textContent = fP(periodRet) + " " + periodLabel;
+  retEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"% "+periodLabel;
   retEl.style.color = clr(periodRet);
+  // Absolute gain (capital total - initial capital aportado)
+  const gainEl = document.getElementById("kpi-gain-abs");
+  if(gainEl) {
+    const absGain = tv - (typeof firstEquity==="object"?firstEquity?.v:firstEquity||tv);
+    gainEl.textContent = (absGain>=0?"+":"-")+fCur(Math.abs(absGain))+" ganancia total";
+    gainEl.style.color = clr(absGain);
+  }
 
   // Update all labels to reflect selected period
   const lbl = document.getElementById("label-kpi-today");
@@ -800,15 +838,16 @@ function render() {
   const lblMom = document.getElementById("label-momentum");
   if(lblMom) lblMom.textContent = "Momentum "+periodLabel;
 
-  document.getElementById("kpi-cash").textContent = fU(s.cash||0);
-  document.getElementById("kpi-cash-pct").textContent = cashPct.toFixed(0)+"% disponible";
+  // kpi-cash moved to kpi-cash-info subtitle
 
-  document.getElementById("kpi-invested").textContent = fU(invested);
+  document.getElementById("kpi-invested").textContent = fCur(invested);
   const nPos = Object.keys(s.portfolio||{}).length;
+  const cashInfoEl = document.getElementById("kpi-cash-info");
+  if(cashInfoEl) { cashInfoEl.textContent = "efectivo: "+fCur(s.cash||0)+" ("+cashPct.toFixed(0)+"%)"; }
   document.getElementById("kpi-positions").textContent = nPos+" posición"+(nPos!==1?"es":"")+" abierta"+(nPos!==1?"s":"");
 
   // Period-aware WR and stats
-  const periodMs = {"1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"ALL":Infinity,"Todo":Infinity}[currentPeriod]||Infinity;
+  const periodMs = (()=>{const now2=new Date();const ytdMs=now2-new Date(now2.getFullYear(),0,1);return{"1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"YTD":ytdMs,"ALL":Infinity,"Todo":Infinity};})()[currentPeriod]||Infinity;
   const now = Date.now();
   const allSells = (s.log||[]).filter(l=>l.type==="SELL");
   const periodSells = periodMs===Infinity ? allSells : allSells.filter(l=>{
@@ -842,14 +881,14 @@ function render() {
   todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
   todayEl.style.color = clr(periodRet);
   const _periodAbsPnl = tv - periodStartVal;
-  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"-")+"$"+Math.abs(_periodAbsPnl).toFixed(2);
+  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"-")+fCur(Math.abs(_periodAbsPnl));
   document.getElementById("kpi-today-sub").style.color = clr(periodRet);
   const _accEl = document.getElementById("kpi-today-accent");
   if(_accEl) _accEl.className = "kpi-accent " + (periodRet>=0?"green":"red");
   const acc = document.getElementById("kpi-today-accent");
   acc.className = "kpi-accent " + (todayPnl>=0?"green":"red");
   // Drawdown KPI if exists
-  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":periodMaxDD>1?"var(--gold)":"var(--green)"; } }
+  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = periodMaxDD>0?"-"+periodMaxDD.toFixed(2)+"%":"—"; ddEl2.style.color = periodMaxDD>5?"var(--red)":periodMaxDD>1?"var(--gold)":periodMaxDD>0?"var(--gold)":"var(--green)"; } }
 
   // Chart (wrapped in try/catch so Estado del mercado always updates)
   try { drawChart(); } catch(chartErr) { console.warn("[chart]", chartErr.message); }
@@ -897,7 +936,7 @@ function render() {
 
   // Period-filtered fees
   const feesDisplay = currentPeriod==="ALL" ? (s.totalFees||0) : periodFees;
-  document.getElementById("total-fees").textContent = fU(feesDisplay)+" en comisiones";
+  document.getElementById("total-fees").textContent = fCur(feesDisplay)+" en comisiones";
 
   // Momentum hoy
   const mEl = document.getElementById("momentum-val");
