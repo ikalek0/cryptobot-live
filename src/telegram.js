@@ -529,32 +529,32 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
 
 
               else if(text==="/condiciones") {
-                if(!bot) return send("❌ Bot no iniciado");
-                const s = bot.getState ? bot.getState() : {};
-                const params = bot.optimizer?.getParams() || {};
-                const regime = bot.marketRegime || "UNKNOWN";
-                const fg = bot.fearGreed || 50;
-                const wr = bot.recentWinRate ? bot.recentWinRate() : null;
-                const nOpen = Object.keys(bot.portfolio||{}).length;
-                const maxPos = regime==="BEAR" ? 1 : (bot.profile?.maxOpenPositions||2);
-                const cash = bot.cash || 0;
-                const tv = bot.totalValue ? bot.totalValue() : 0;
+                const s = state; // state comes from getState() - already available
+                if(!s || s.loading) return send("❌ Bot no iniciado aún");
+                const regime = s.marketRegime || "UNKNOWN";
+                const fg = s.fearGreed || 50;
+                const wr = s.recentWinRate ?? null;
+                const nOpen = Object.keys(s.portfolio||{}).length;
+                const maxPos = regime==="BEAR" ? 1 : 2;
+                const cash = s.cash || 0;
+                const tv = s.totalValue || 0;
                 const availCash = Math.max(0, cash - tv*0.15);
-                const regimeMin = regime==="BULL" ? (params.minScore||70)-5 :
+                const minScore = s.optimizerParams?.minScore || 70;
+                const regimeMin = regime==="BULL" ? minScore-5 :
                                   regime==="BEAR" ? 82 :
-                                  regime==="LATERAL" ? Math.max(58,(params.minScore||70)-8) :
-                                  (params.minScore||70);
+                                  regime==="LATERAL" ? Math.max(58, minScore-8) :
+                                  minScore;
                 const fearAdj = regime==="LATERAL"
                   ? (fg<25?1.3:fg<35?1.15:fg>75?0.7:1.0)
                   : (fg<25?0.8:fg>80?0.6:1.0);
-                const dailyUsed = s.dailyUsed||bot.dailyTrades?.count||0;
-                const dailyLimit = s.dailyLimit||9;
+                const dailyUsed = s.dailyUsed || s.dailyTrades?.count || 0;
+                const dailyLimit = s.dailyLimit || 9;
                 const blockers = [];
-                if(bot._pausedByTelegram)       blockers.push("⏸ Bot pausado por Telegram");
-                if(bot.marketDefensive)         blockers.push("🛡 Modo defensivo activo");
+                if(paused)                       blockers.push("⏸ Bot pausado por Telegram");
+                if(s.marketDefensive)           blockers.push("🛡 Modo defensivo activo");
                 if(nOpen >= maxPos)             blockers.push(`📊 Posiciones llenas (${nOpen}/${maxPos})`);
                 if(availCash < tv*0.05)         blockers.push(`💸 Sin cash ($${availCash.toFixed(2)})`);
-                if(bot.breaker?.triggered)      blockers.push("🚨 Circuit breaker activo");
+                if(s.circuitBreaker?.triggered) blockers.push("🚨 Circuit breaker activo");
                 if(dailyUsed >= dailyLimit)     blockers.push(`📅 Límite diario (${dailyUsed}/${dailyLimit} ops)`);
                 const ok = blockers.length===0;
                 send([
