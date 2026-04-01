@@ -320,6 +320,34 @@ app.post("/api/sync/transfer", (req,res) => {
   if(trades < 50) return res.json({adopted:false, reason:`Paper solo tiene ${trades} trades (mínimo 50)`});
   if(wr < 30) return res.json({adopted:false, reason:`WR paper ${wr}% muy bajo para transferir`});
 
+  // Registrar WR del live ANTES de la transferencia para medir impacto después
+  const liveSells = (bot.log||[]).filter(l=>l.type==="SELL");
+  const liveWrBefore = liveSells.length >= 10
+    ? Math.round(liveSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, liveSells.length) * 100)
+    : null;
+  bot._transferHistory = bot._transferHistory || [];
+  const transferRecord = {
+    ts: new Date().toISOString(),
+    paperWR: wr, paperTrades: trades,
+    liveWRbefore: liveWrBefore,
+    liveWRafter: null,  // se rellena 2h después
+    blend: Math.min(0.4, trades/500),
+    improved: null,
+  };
+  bot._transferHistory.push(transferRecord);
+  if(bot._transferHistory.length > 20) bot._transferHistory.shift();
+  // Ajustar blend según historial de transferencias anteriores
+  const goodTransfers = (bot._transferHistory||[]).filter(t=>t.improved===true).length;
+  const badTransfers  = (bot._transferHistory||[]).filter(t=>t.improved===false).length;
+  const totalEval = goodTransfers + badTransfers;
+  let adaptiveBlend = Math.min(0.4, trades/500);
+  if(totalEval >= 3) {
+    const successRate = goodTransfers / totalEval;
+    adaptiveBlend = Math.max(0.05, Math.min(0.50, adaptiveBlend * successRate * 2));
+    console.log(`[TRANSFER] Blend adaptativo: ${(adaptiveBlend*100).toFixed(0)}% (${goodTransfers}/${totalEval} transferencias mejoraron)`);
+  }
+  transferRecord.blend = adaptiveBlend;
+
   let transferred = [];
 
   // Transferir pesos DQN (blend 30% paper, 70% live para no perder lo aprendido en live)
@@ -363,11 +391,39 @@ app.post("/api/sync/transfer", (req,res) => {
     } catch(e) { console.warn("[TRANSFER] Q-table error:", e.message); }
   }
 
-  const msg = `✅ Transfer learning: ${transferred.join(", ")} | paper WR:${wr}% trades:${trades}`;
+  const msg = `✅ Transfer learning: ${transferred.join(", ")} | paper WR:${wr}% trades:${trades} | blend:${(adaptiveBlend*100).toFixed(0)}%`;
   console.log(`[TRANSFER] ${msg}`);
-  tg.send && tg.send(`🧠 <b>[LIVE] Transfer learning</b>\n${msg}`);
+  tg.send && tg.send(`🧠 <b>[LIVE] Transfer learning recibido</b>\n${msg}\n<i>Midiendo impacto en 2h...</i>`);
+
+  // Evaluar impacto 2h después
+  setTimeout(() => {
+    if(!bot) return;
+    const afterSells = (bot.log||[]).filter(l=>l.type==="SELL");
+    const liveWrAfter = afterSells.length >= 10
+      ? Math.round(afterSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, afterSells.length) * 100)
+      : null;
+    // Buscar el registro de esta transferencia
+    const rec = (bot._transferHistory||[]).find(t=>t.liveWRafter===null && t.liveWRbefore!==null);
+    if(rec && liveWrAfter !== null && rec.liveWRbefore !== null) {
+      rec.liveWRafter = liveWrAfter;
+      rec.improved = liveWrAfter >= rec.liveWRbefore;
+      const delta = liveWrAfter - rec.liveWRbefore;
+      const verdict = rec.improved ? `✅ Mejoró +${delta}%` : `❌ Empeoró ${delta}%`;
+      console.log(`[TRANSFER] Evaluación 2h: WR antes=${rec.liveWRbefore}% después=${liveWrAfter}% → ${verdict}`);
+      tg.send && tg.send(
+        `📊 <b>[LIVE] Evaluación transfer learning</b>\n` +
+        `WR antes: ${rec.liveWRbefore}% → después: ${liveWrAfter}%\n` +
+        `${verdict}\n` +
+        (rec.improved
+          ? `El blend del paper aumentará en la próxima transferencia`
+          : `El blend del paper se reducirá — el live confía menos en estos pesos`)
+      );
+      save().catch(()=>{});
+    }
+  }, 2 * 60 * 60 * 1000); // 2 horas
+
   save().catch(()=>{});
-  res.json({adopted:true, transferred, blend: Math.min(0.4, trades/500)});
+  res.json({adopted:true, transferred, blend: adaptiveBlend});
 });
 
 app.get("/api/sync/history", (_,res) => res.json({
