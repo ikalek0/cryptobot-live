@@ -495,8 +495,16 @@ class CryptoBotFinal {
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
         const reserve=this.totalValue()*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
-        const regimeMin=this.marketRegime==="BULL"?params.minScore-3:this.marketRegime==="BEAR"?85:params.minScore;
-        const fearAdj=this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0;
+        // LATERAL: slightly lower threshold, markets move less but opportunities exist
+    const regimeMin=this.marketRegime==="BULL"?params.minScore-5:
+                    this.marketRegime==="BEAR"?82:
+                    this.marketRegime==="LATERAL"?Math.max(58,params.minScore-8):
+                    params.minScore;
+        // In LATERAL regime: extreme fear = mean reversion opportunity → LARGER positions
+    // In BULL/BEAR: fear = reduce positions
+    const fearAdj = this.marketRegime==="LATERAL"
+      ? (this.fearGreed<25?1.3:this.fearGreed<35?1.15:this.fearGreed>75?0.7:1.0)
+      : (this.fearGreed<25?0.8:this.fearGreed>80?0.6:1.0);
         // Ajuste por confianza: baja confianza → posiciones más pequeñas
         const confAdj=this.confidence.get()<40?0.6:this.confidence.get()>75?1.1:1.0;
         const groupCount={};
@@ -504,6 +512,15 @@ class CryptoBotFinal {
 
         // Respetar pausa de Telegram
       if(this._pausedByTelegram) return {signals,newTrades,circuitBreaker:cb,optimizerResult:optResult,dailyLimit:dailyLimit,dailyUsed:this.dailyTrades.count,drawdownAlert};
+      // Debug: log why signals are rejected (every 50 ticks)
+      if(this.tick%50===0 && signals.length>0) {
+        const top = signals.slice(0,3).map(s=>{
+          const bl = this.autoBlacklist.isBlacklisted(s.symbol);
+          const news = this._cryptoPanicFn && this._cryptoPanicFn(s.symbol)<0.6;
+          return `${s.symbol.replace("USDC","")}:${s.score}${s.score<regimeMin?"<MIN":""}${bl?"🚫BL":""}${news?"📰BL":""}`;
+        }).join(" ");
+        console.log(`[LIVE][${this.marketRegime}] signals:${signals.length} top:${top} minScore:${regimeMin} fearAdj:${fearAdj.toFixed(2)} F&G:${this.fearGreed}`);
+      }
       const buyable=signals.filter(s=>{
           if(s.signal!=="BUY"||s.score<regimeMin)return false;
           if(this.portfolio[s.symbol])return false;
