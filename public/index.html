@@ -900,10 +900,10 @@ function render() {
   try { updatePairSelector(s.portfolio, s.log); } catch(e) {}
 
   // Mercado
+  try {
   const regime = s.marketRegime||"UNKNOWN";
   const rb = document.getElementById("regime-badge");
-  rb.textContent = regime;
-  rb.className = "regime regime-"+regime.toLowerCase();
+  if(rb) { rb.textContent = regime; rb.className = "regime regime-"+regime.toLowerCase(); }
 
   const fg = s.fearGreed||50;
   const fgLabel = fg<25?"😱 Pánico":fg<45?"😟 Miedo":fg<55?"😐 Neutral":fg<75?"😊 Codicia":"🤑 Extrema codicia";
@@ -955,6 +955,7 @@ function render() {
   }
 
   // Portfolio mini
+  } catch(mercadoErr) { console.warn("[mercado]", mercadoErr.message); }
   renderPortfolio("portfolio-mini", s.portfolio, s.prices, true);
   renderPortfolio("portfolio-full", s.portfolio, s.prices, false);
 
@@ -1084,6 +1085,7 @@ function renderPortfolio(id, portfolio, prices, mini) {
 
 function renderLog(id, log, max) {
   const el = document.getElementById(id);
+  if(!el) return;
   const sells = (log||[]).filter(l=>l.type==="SELL").slice(0,max);
   if (!sells.length) {
     el.innerHTML=`<div style="text-align:center;padding:16px;color:var(--dim);font-size:12px;font-style:italic">Sin operaciones aún</div>`;
