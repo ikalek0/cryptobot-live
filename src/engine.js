@@ -322,7 +322,10 @@ class CryptoBotFinal {
       this.pairScores=saved.pairScores||{};this.reentryTs=saved.reentryTs||{};
       this.dailyTrades=saved.dailyTrades||{date:"",count:0};this.useBnb=saved.useBnb!==undefined?saved.useBnb:true;
       this.contrafactualLog=saved.contrafactualLog||[];
-      this.maxEquity=saved.maxEquity||INITIAL_CAPITAL;this.drawdownAlerted=saved.drawdownAlerted||false;
+      // Cap maxEquity: if restored value is >10x initial capital, it's from paper bot — reset
+      const restoredMax = saved.maxEquity || INITIAL_CAPITAL;
+      this.maxEquity = restoredMax > INITIAL_CAPITAL * 10 ? INITIAL_CAPITAL : restoredMax;
+      this.drawdownAlerted=saved.drawdownAlerted||false;
       this.tfHistory=saved.tfHistory||{};
       if(saved.optimizerHistory)this.optimizer.history=saved.optimizerHistory;
       if(saved.optimizerParams)Object.assign(this.optimizer.params,saved.optimizerParams);
@@ -365,7 +368,7 @@ class CryptoBotFinal {
   checkMaxDrawdown(tv){
     if(tv>this.maxEquity){this.maxEquity=tv;this.drawdownAlerted=false;}
     const dd=(this.maxEquity-tv)/this.maxEquity;
-    if(dd>=MAX_DRAWDOWN_PCT&&!this.drawdownAlerted){this.drawdownAlerted=true;return{triggered:true,drawdownPct:+(dd*100).toFixed(2),maxEquity:+this.maxEquity.toFixed(2)};}
+    if(dd>=MAX_DRAWDOWN_PCT&&!this.drawdownAlerted){this.drawdownAlerted=true;return{triggered:true,drawdownPct:+(dd*100).toFixed(2),maxEquity:+this.maxEquity.toFixed(2),currentEquity:+tv.toFixed(2)};}
     return{triggered:false,drawdownPct:+(dd*100).toFixed(2)};
   }
 
@@ -374,7 +377,7 @@ class CryptoBotFinal {
     this.tick++;this.checkDailyReset();
     const tv=this.totalValue(),cb=this.breaker.check(tv);
     this.marketRegime=detectRegime(this.history["BTCUSDC"]);
-    const drawdownAlert=this.checkMaxDrawdown(tv);
+    const drawdownAlert = tv > 0 ? this.checkMaxDrawdown(tv) : null;
     if(cb.triggered){
       const signals=PAIRS.map(p=>({...p,price:this.prices[p.symbol]||0,...computeSignal(p.symbol,this.history,this.optimizer.getParams(),this.marketRegime)}));
       this.equity=[...this.equity,{v:tv,t:Date.now()}].slice(-500);
