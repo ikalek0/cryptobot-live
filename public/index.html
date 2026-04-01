@@ -203,13 +203,13 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
       <div class="kpi-accent"></div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Rendimiento hoy</div>
+      <div class="kpi-label" id="label-kpi-today">Rendimiento</div>
       <div class="kpi-value" id="kpi-today">—</div>
       <div class="kpi-sub" id="kpi-today-sub">—</div>
       <div class="kpi-accent" id="kpi-today-accent"></div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Drawdown período</div>
+      <div class="kpi-label" id="label-drawdown-period">Drawdown</div>
       <div class="kpi-value" id="kpi-drawdown" style="font-size:20px">—</div>
       <div class="kpi-sub" id="kpi-dd-sub">máx caída</div>
       <div class="kpi-accent red"></div>
@@ -258,7 +258,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
         </div>
         <div class="separator"></div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Operaciones hoy</span>
+          <span style="font-size:11px;color:var(--dim2)" id="label-daily-ops">Operaciones hoy</span>
           <span style="font-size:13px;font-weight:500" id="daily-ops">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
@@ -275,7 +275,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
           <span style="font-size:11px;font-weight:500" id="kpi-drawdown">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Momentum hoy</span>
+          <span style="font-size:11px;color:var(--dim2)" id="label-momentum">Momentum hoy</span>
           <span style="font-size:11px;font-weight:600" id="momentum-val">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
@@ -789,6 +789,16 @@ function render() {
   retEl.textContent = fP(periodRet) + " " + periodLabel;
   retEl.style.color = clr(periodRet);
 
+  // Update all labels to reflect selected period
+  const lbl = document.getElementById("label-kpi-today");
+  if(lbl) lbl.textContent = currentPeriod==="1D"||currentPeriod==="1H" ? "Rendimiento "+periodLabel : "Rendimiento ("+periodLabel+")";
+  const lblDd = document.getElementById("label-drawdown-period");
+  if(lblDd) lblDd.textContent = "Drawdown "+periodLabel;
+  const lblOps = document.getElementById("label-daily-ops");
+  if(lblOps) lblOps.textContent = "Operaciones "+periodLabel;
+  const lblMom = document.getElementById("label-momentum");
+  if(lblMom) lblMom.textContent = "Momentum "+periodLabel;
+
   document.getElementById("kpi-cash").textContent = fU(s.cash||0);
   document.getElementById("kpi-cash-pct").textContent = cashPct.toFixed(0)+"% disponible";
 
@@ -821,14 +831,15 @@ function render() {
   const sells = allSells.length;
   document.getElementById("kpi-ops").textContent = periodSells.length+"/"+sells+" op"+(sells!==1?"s":"");
 
-  // Rendimiento HOY — con signo explícito y color
-  const todaySells = (s.log||[]).filter(l=>l.type==="SELL"&&new Date(l.ts).toDateString()===new Date().toDateString());
-  const todayPnl = todaySells.reduce((sum,l)=>sum+(l.pnl||0),0);
+  // Rendimiento PERÍODO — se ajusta al período seleccionado
   const todayEl = document.getElementById("kpi-today");
-  todayEl.textContent = (todayPnl>=0?"+":"")+todayPnl.toFixed(2)+"%";
-  todayEl.style.color = clr(todayPnl);
-  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · fees $"+periodFees.toFixed(2);
-  document.getElementById("kpi-today-sub").style.color = clr(todayPnl);
+  todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
+  todayEl.style.color = clr(periodRet);
+  const _periodAbsPnl = tv - periodStartVal;
+  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"")+"$"+Math.abs(_periodAbsPnl).toFixed(2);
+  document.getElementById("kpi-today-sub").style.color = clr(periodRet);
+  const _accEl = document.getElementById("kpi-today-accent");
+  if(_accEl) _accEl.className = "kpi-accent " + (periodRet>=0?"green":"red");
   const acc = document.getElementById("kpi-today-accent");
   acc.className = "kpi-accent " + (todayPnl>=0?"green":"red");
   // Drawdown KPI if exists
@@ -852,20 +863,31 @@ function render() {
   const fgDate = fgTime ? " · "+fgTime+fgSrc : fgSrc;
   document.getElementById("fg-val").textContent = fg+" — "+fgLabel+fgDate;
 
-  document.getElementById("daily-ops").textContent = (s.dailyTrades?.count||0)+" operaciones";
-  document.getElementById("daily-limit").textContent = "máx. "+(s.dailyLimit||10)+" hoy";
+  // Period-filtered operations count (using already-defined periodMs + periodSells)
+  const periodOpsCount = currentPeriod==="ALL" ? (s.log||[]).filter(l=>l.type==="SELL").length : periodSells.length;
+  document.getElementById("daily-ops").textContent = periodSells.length+" operaciones";
+  document.getElementById("daily-limit").textContent = "máx. "+(s.dailyLimit||10)+" "+(currentPeriod==="1D"||currentPeriod==="1H"?"hoy":periodLabel);
 
   const cb = s.circuitBreaker;
   const cbEl = document.getElementById("cb-status");
-  cbEl.textContent = cb?.triggered ? "⚠ ACTIVADO" : "OK — "+fPn(Math.abs((cb?.drawdown||0)*100))+" pérdida hoy";
-  cbEl.style.color = cb?.triggered ? "var(--red)" : "var(--green)";
+  const _cbLoss = Math.abs(Math.min(0, periodRet));
+  cbEl.textContent = cb?.triggered ? "🔴 ACTIVADO" : "OK — "+_cbLoss.toFixed(2)+"% pérdida "+periodLabel;
+  cbEl.style.color = cb?.triggered ? "var(--red)" : _cbLoss>3?"var(--gold)":"var(--green)";
 
-  const dd = s.drawdownPct||0;
+  // Period max-drawdown
+  let dd = s.drawdownPct||0;
+  if(periodEquity.length>1) {
+    let peak=periodEquity[0].v, periodDD=0;
+    for(const p of periodEquity){ if(p.v>peak)peak=p.v; const d=(peak-p.v)/peak*100; if(d>periodDD)periodDD=d; }
+    dd = periodDD;
+  }
   const ddEl = document.getElementById("kpi-drawdown");
-  ddEl.textContent = "-"+dd.toFixed(2)+"% desde máximo";
+  ddEl.textContent = dd>0 ? "-"+dd.toFixed(2)+"% desde máximo" : "Sin drawdown";
   ddEl.style.color = dd>10 ? "var(--red)" : dd>5 ? "var(--gold)" : "var(--green)";
 
-  document.getElementById("total-fees").textContent = fU(s.totalFees||0)+" en comisiones";
+  // Period-filtered fees
+  const feesDisplay = currentPeriod==="ALL" ? (s.totalFees||0) : periodFees;
+  document.getElementById("total-fees").textContent = fU(feesDisplay)+" en comisiones";
 
   // Momentum hoy
   const mEl = document.getElementById("momentum-val");
