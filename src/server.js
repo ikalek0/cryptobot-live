@@ -791,11 +791,13 @@ function startLoop(){
           bot.maxEquity = CAPITAL_USDT;
           bot.breaker?.reset && bot.breaker.reset(CAPITAL_USDT);
         } else if(realUSDC < 1 && openPositions === 0 && virtualFree > 10) {
-          // No hay USDC real pero sí cash virtual y sin posiciones
-          // → Binance no tiene fondos o hubo un error grave
-          console.warn(`[RECONCILE] ⚠️ Binance USDC=$0 pero virtual=$${virtualFree.toFixed(2)} sin posiciones → pausando bot`);
-          bot._pausedByTelegram = true;
-          tg.send && tg.send(`⚠️ <b>[LIVE] BOT PAUSADO</b>\nBinance tiene $0 USDC libre pero el bot espera $${virtualFree.toFixed(2)}.\nVerifica que tienes USDC en Binance Spot.\nUsa /reanudar cuando lo hayas confirmado.`);
+          // Puede ser problema de IP (API key restringida) o falta de fondos
+          // Solo avisar, no pausar automáticamente (la IP puede causar $0 falso)
+          bot._reconcileZeroCount = (bot._reconcileZeroCount||0) + 1;
+          if(bot._reconcileZeroCount === 1) {
+            console.warn(`[RECONCILE] ⚠️ Binance USDC=$0 pero virtual=$${virtualFree.toFixed(2)} — puede ser restricción de IP`);
+            tg.send && tg.send(`⚠️ <b>[LIVE]</b> Binance muestra $0 USDC libre.\nPuede ser restricción de IP en API key.\nEl bot continúa operando. Si persiste más de 30min, verifica en Binance.`);
+          }
         } else {
           const drift = realUSDC - virtualFree;
           if(Math.abs(drift) > 2 && Math.abs(drift) < 15) {

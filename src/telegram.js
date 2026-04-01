@@ -239,6 +239,7 @@ function buildMomentum(state) {
             const state=getState();
             const mode=state.instance||state.mode||"BOT";
             if(text==="/estado")       send(buildDaily(state));
+            else if(text==="/mercado")     send(buildMercado(state));
             else if(text==="/walkforward") {
               const wf = state.walkForwardIntra;
               if(!wf) { send("⏳ WF intradía aún no calculado. Espera ~30 min."); }

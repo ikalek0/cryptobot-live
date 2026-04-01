@@ -259,7 +259,7 @@ function calcDynamicStop(entryPrice, atr, regime, options = {}) {
 // MÓDULO 5: Walk-forward analysis en backtesting
 // ══════════════════════════════════════════════════════════════════════════════
 let simulatePeriod;
-try { simulatePeriod = require('./historicalSimulation').simulatePeriod; } catch { simulatePeriod = null; }
+try { simulatePeriod = null; } catch { simulatePeriod = null; } // historicalSimulation not available in live
 
 async function walkForwardAnalysis(symbol, candles, options = {}) {
   if (!simulatePeriod) return null; // no disponible en live bot

@@ -68,9 +68,10 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 
 /* ── CHART ── */
 .chart-wrap{position:relative}
-.period-selector{display:flex;gap:4px;margin-bottom:8px}
-.ps-btn{padding:3px 10px;border-radius:2px;font-size:10px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--dim);font-family:'DM Sans',sans-serif;transition:all .2s}
-.ps-btn.active,.ps-btn:hover{background:var(--dark);color:white;border-color:var(--dark)}
+.period-selector{display:flex;gap:5px;margin-bottom:12px;align-items:center}
+.period-selector-label{font-size:10px;color:var(--dim);margin-right:4px;letter-spacing:.05em;text-transform:uppercase}
+.ps-btn{padding:5px 13px;border-radius:6px;font-size:11px;font-weight:500;cursor:pointer;border:1.5px solid var(--border);background:transparent;color:var(--dim2);font-family:'DM Sans',sans-serif;transition:all .15s}
+.ps-btn.active,.ps-btn:hover{background:var(--dark);color:white;border-color:var(--dark);box-shadow:0 2px 8px rgba(0,0,0,.15)}
 .chart-wrap{position:relative;user-select:none}
 .chart-canvas-wrap{position:relative;height:140px;width:100%}
 #chart-canvas{display:block;width:100%;height:140px;cursor:crosshair}
@@ -207,6 +208,12 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
       <div class="kpi-sub" id="kpi-today-sub">—</div>
       <div class="kpi-accent" id="kpi-today-accent"></div>
     </div>
+    <div class="kpi">
+      <div class="kpi-label">Drawdown período</div>
+      <div class="kpi-value" id="kpi-drawdown" style="font-size:20px">—</div>
+      <div class="kpi-sub" id="kpi-dd-sub">máx caída</div>
+      <div class="kpi-accent red"></div>
+    </div>
   </div>
 
   <div class="row row-21">
@@ -267,7 +274,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
           <span style="font-size:11px;color:var(--dim2)">Drawdown máx.</span>
-          <span style="font-size:11px;font-weight:500" id="drawdown-val">—</span>
+          <span style="font-size:11px;font-weight:500" id="kpi-drawdown">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
           <span style="font-size:11px;color:var(--dim2)">Momentum hoy</span>
@@ -447,9 +454,13 @@ const fT  = ts => new Date(ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute
 // ── CHART ─────────────────────────────────────────────────────────────────────
 function setPeriod(p, btn) {
   currentPeriod = p;
-  document.querySelectorAll(".ps-btn").forEach(b=>b.classList.remove("active"));
-  btn.classList.add("active");
-  drawChart();
+  // Sync ALL period buttons (there may be two sets: header + chart)
+  document.querySelectorAll(".ps-btn").forEach(b=>{
+    b.classList.toggle("active", b.textContent.trim()===btn.textContent.trim());
+  });
+  // Re-render everything: chart + KPIs + drawdown + fees
+  if(state) render();
+  else drawChart();
 }
 
 function filterByPeriod(equity, period) {
@@ -580,13 +591,26 @@ function drawChart() {
     ctx.stroke();
   }
 
-  // Y axis min/max
-  ctx.fillStyle = "rgba(138,130,120,0.7)";
+  // Y-axis gridlines with values (5 levels)
+  const PAD_Y = 38; // left padding for Y labels
+  const nGridLines = 4;
   ctx.font = "9px DM Sans, sans-serif";
-  ctx.textAlign = "right";
-  ctx.fillText(fU(maxV), W - PAD_R, PAD_T + 10);
-  ctx.textAlign = "left";
-  ctx.fillText(fU(minV), PAD_L, PAD_T + chartH - 2);
+  for(let g=0; g<=nGridLines; g++) {
+    const frac = g / nGridLines;
+    const yVal = minV + rangeV * (1 - frac);
+    const yPos = PAD_T + chartH * frac;
+    // Gridline
+    ctx.strokeStyle = "rgba(138,130,120,0.1)";
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(PAD_Y, yPos);
+    ctx.lineTo(W - PAD_R, yPos);
+    ctx.stroke();
+    // Label
+    ctx.fillStyle = "rgba(138,130,120,0.7)";
+    ctx.textAlign = "right";
+    ctx.fillText(fU(yVal), PAD_Y - 3, yPos + 3);
+  }
 
   // Update info
   document.getElementById("chart-start").textContent = formatAxisTime(times[0], currentPeriod) + " · " + fU(vals[0]);
@@ -635,10 +659,14 @@ function drawChart() {
     }
     ctx.shadowBlur = 0;
   });
-    // Store for hover
+    // Store trades for hover detection
   canvas._equity = equity;
+  canvas._trades = trades.map(t => {
+    const ts = new Date(t.ts).getTime();
+    const nearestIdx = equity.reduce((bi,_,i)=>Math.abs(equity[i].t-ts)<Math.abs(equity[bi].t-ts)?i:bi, 0);
+    return { ...t, _x: xOf(nearestIdx), _y: yOf(equity[nearestIdx].v) };
+  });
   canvas._chartBounds = {W, H, chartH, chartW, PAD_L, PAD_R, PAD_T, AXIS_H, minV, rangeV};
-  // (trade marks handled above)
 }
 
 // Hover/tooltip interaction
@@ -654,28 +682,50 @@ function drawChart() {
     if (!eq?.length || !b) return;
     const rect = canvas.getBoundingClientRect();
     const mx = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
+    const my = (e.clientY ?? e.touches?.[0]?.clientY) - rect.top;
     const chartW = b.W - b.PAD_L - b.PAD_R;
     const idx = Math.round((mx - b.PAD_L) / chartW * (eq.length-1));
-    if (idx < 0 || idx >= eq.length) return;
+    if (idx < 0 || idx >= eq.length) { tooltip.style.opacity="0"; return; }
+
+    // Check if hovering near a trade circle (priority)
+    const nearTrade = (canvas._trades||[]).find(t => {
+      const dx = mx - t._x, dy = my - t._y;
+      return Math.sqrt(dx*dx + dy*dy) < 12;
+    });
+
+    if (nearTrade) {
+      const isSell = nearTrade.type === "SELL";
+      const win = isSell && (nearTrade.pnl||0) > 0;
+      const exitVal = +((nearTrade.qty||0)*(nearTrade.price||0)).toFixed(2);
+      const entryVal = nearTrade.pnl !== 0 ? +(exitVal/(1+(nearTrade.pnl||0)/100)).toFixed(2) : exitVal;
+      const pnlAbs = nearTrade.pnlAbs != null ? nearTrade.pnlAbs : +(exitVal-entryVal).toFixed(2);
+      const coin = (nearTrade.symbol||"").replace("USDC","").replace("USDT","");
+      const time = nearTrade.ts ? new Date(nearTrade.ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}) : "";
+      const clrStr = win ? "#00d97e" : "#ff4d6a";
+      tooltip.innerHTML =
+        `<b style="color:${clrStr}">${isSell?(win?"💰 GANANCIA":"❌ PÉRDIDA"):"🟡 COMPRA"} — ${coin}</b><br>`+
+        (isSell?`<b>${(nearTrade.pnl||0)>=0?"+":""}${(nearTrade.pnl||0).toFixed(2)}%</b> · <b>${pnlAbs>=0?"+":""}$${Math.abs(pnlAbs).toFixed(2)}</b><br>`:"") +
+        `Entró $${entryVal.toFixed(2)} → Salió $${exitVal.toFixed(2)}<br>`+
+        `${(nearTrade.qty||0).toFixed(5)} ${coin}<br>`+
+        `<span style="opacity:.6">${nearTrade.reason||nearTrade.strategy||""} · ${time}</span>`;
+      tooltip.style.opacity = "1";
+      const tx = Math.min(nearTrade._x + 12, b.W - 190);
+      tooltip.style.left = tx + "px";
+      tooltip.style.top = Math.max(2, nearTrade._y - 65) + "px";
+      return;
+    }
+
+    // Default: equity value at cursor
     const pt = eq[idx];
     const x = b.PAD_L + (idx/(eq.length-1||1)) * chartW;
     const pnl = pt.v - eq[0].v;
-    const pnlPct = ((pt.v - eq[0].v) / eq[0].v * 100).toFixed(2);
+    const pnlPct = ((pt.v-eq[0].v)/eq[0].v*100).toFixed(2);
     const sign = pnl >= 0 ? "+" : "";
-
-    document.getElementById("ct-val").textContent = fU(pt.v);
-    document.getElementById("ct-val").style.color = pnl >= 0 ? "var(--green)" : "var(--red)";
-    document.getElementById("ct-ts").textContent = new Date(pt.t).toLocaleString("es-ES") + " · " + sign + fU(pnl) + " (" + sign + pnlPct + "%)";
-
-    // Position tooltip
-    const tw = 200;
-    const left = x + tw > b.W ? x - tw - 8 : x + 8;
-    tooltip.style.left = left + "px";
-    tooltip.style.top = "4px";
+    tooltip.innerHTML = `<b>${fU(pt.v)}</b>  <span style="color:${pnl>=0?"#00d97e":"#ff4d6a"}">${sign}${fU(pnl)} (${sign}${pnlPct}%)</span><br><span style="opacity:.6">${new Date(pt.t).toLocaleString("es-ES",{hour:"2-digit",minute:"2-digit",day:"2-digit",month:"2-digit"})}</span>`;
     tooltip.style.opacity = "1";
-
-    crosshair.style.left = x + "px";
-    crosshair.style.opacity = "1";
+    const tx = x < b.W/2 ? x+12 : x-160;
+    tooltip.style.left = tx+"px";
+    tooltip.style.top = "4px";
   }
 
   function onLeave() {
@@ -710,9 +760,13 @@ function render() {
   document.getElementById("kpi-total").style.color = "var(--blue)";
 
   // Rendimiento — no "pérdida", siempre con signo
+  // Period-aware return
+  const periodStartVal = periodEquity.length ? periodEquity[0].v : (s.equity?.[0]?.v || tv);
+  const periodRet = periodStartVal > 0 ? ((tv - periodStartVal) / periodStartVal * 100) : ret;
+  const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
   const retEl = document.getElementById("kpi-return");
-  retEl.textContent = fP(ret) + " desde inicio";
-  retEl.style.color = clr(ret);
+  retEl.textContent = fP(periodRet) + " " + periodLabel;
+  retEl.style.color = clr(periodRet);
 
   document.getElementById("kpi-cash").textContent = fU(s.cash||0);
   document.getElementById("kpi-cash-pct").textContent = cashPct.toFixed(0)+"% disponible";
@@ -721,11 +775,30 @@ function render() {
   const nPos = Object.keys(s.portfolio||{}).length;
   document.getElementById("kpi-positions").textContent = nPos+" posición"+(nPos!==1?"es":"")+" abierta"+(nPos!==1?"s":"");
 
-  const wr = s.winRate;
-  document.getElementById("kpi-wr").textContent = wr!=null ? wr+"%" : "—";
-  document.getElementById("kpi-wr").style.color = wr!=null ? clr(wr-50) : "var(--text)";
-  const sells = (s.log||[]).filter(l=>l.type==="SELL").length;
-  document.getElementById("kpi-ops").textContent = sells+" operación"+(sells!==1?"es":"")+" cerrada"+(sells!==1?"s":"");
+  // Period-aware WR and stats
+  const periodMs = {"1H":3600000,"1D":86400000,"1W":604800000,"1M":2592000000,"ALL":Infinity,"Todo":Infinity}[currentPeriod]||Infinity;
+  const now = Date.now();
+  const allSells = (s.log||[]).filter(l=>l.type==="SELL");
+  const periodSells = periodMs===Infinity ? allSells : allSells.filter(l=>{
+    const t = l.ts ? new Date(l.ts).getTime() : 0;
+    return (now - t) <= periodMs;
+  });
+  const periodWins = periodSells.filter(l=>l.pnl>0).length;
+  const periodWR = periodSells.length ? Math.round(periodWins/periodSells.length*100) : null;
+  const periodPnlAbs = periodSells.reduce((s,l)=>s+(l.pnlAbs||0),0);
+  const periodFees = periodSells.reduce((s,l)=>s+(l.fee||0),0);
+  // Drawdown for period
+  const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
+  let periodMaxDD = 0;
+  if(periodEquity.length>1) {
+    let peak=periodEquity[0].v;
+    for(const p of periodEquity){ if(p.v>peak) peak=p.v; const dd=(peak-p.v)/peak*100; if(dd>periodMaxDD) periodMaxDD=dd; }
+  }
+
+  document.getElementById("kpi-wr").textContent = periodWR!=null ? periodWR+"%" : "—";
+  document.getElementById("kpi-wr").style.color = periodWR!=null ? clr(periodWR-50) : "var(--text)";
+  const sells = allSells.length;
+  document.getElementById("kpi-ops").textContent = periodSells.length+"/"+sells+" op"+(sells!==1?"s":"");
 
   // Rendimiento HOY — con signo explícito y color
   const todaySells = (s.log||[]).filter(l=>l.type==="SELL"&&new Date(l.ts).toDateString()===new Date().toDateString());
@@ -733,10 +806,12 @@ function render() {
   const todayEl = document.getElementById("kpi-today");
   todayEl.textContent = (todayPnl>=0?"+":"")+todayPnl.toFixed(2)+"%";
   todayEl.style.color = clr(todayPnl);
-  document.getElementById("kpi-today-sub").textContent = todaySells.length+" op"+(todaySells.length!==1?"s":"")+" hoy";
+  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · fees $"+periodFees.toFixed(2);
   document.getElementById("kpi-today-sub").style.color = clr(todayPnl);
   const acc = document.getElementById("kpi-today-accent");
   acc.className = "kpi-accent " + (todayPnl>=0?"green":"red");
+  // Drawdown KPI if exists
+  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":"var(--dim2)"; } }
 
   // Chart
   drawChart();
@@ -765,7 +840,7 @@ function render() {
   cbEl.style.color = cb?.triggered ? "var(--red)" : "var(--green)";
 
   const dd = s.drawdownPct||0;
-  const ddEl = document.getElementById("drawdown-val");
+  const ddEl = document.getElementById("kpi-drawdown");
   ddEl.textContent = "-"+dd.toFixed(2)+"% desde máximo";
   ddEl.style.color = dd>10 ? "var(--red)" : dd>5 ? "var(--gold)" : "var(--green)";
 
