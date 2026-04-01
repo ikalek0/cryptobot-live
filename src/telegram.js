@@ -526,6 +526,50 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
                   send(`💰 <b>Balance Binance</b>\n${HR}\n${lines.join("\n")}`);
                 }).catch(()=>send("❌ Error al obtener balance"));
               }
+
+
+              else if(text==="/condiciones") {
+                if(!bot) return send("❌ Bot no iniciado");
+                const s = bot.getState ? bot.getState() : {};
+                const params = bot.optimizer?.getParams() || {};
+                const regime = bot.marketRegime || "UNKNOWN";
+                const fg = bot.fearGreed || 50;
+                const wr = bot.recentWinRate ? bot.recentWinRate() : null;
+                const nOpen = Object.keys(bot.portfolio||{}).length;
+                const maxPos = regime==="BEAR" ? 1 : (bot.profile?.maxOpenPositions||2);
+                const cash = bot.cash || 0;
+                const tv = bot.totalValue ? bot.totalValue() : 0;
+                const availCash = Math.max(0, cash - tv*0.15);
+                const regimeMin = regime==="BULL" ? (params.minScore||70)-5 :
+                                  regime==="BEAR" ? 82 :
+                                  regime==="LATERAL" ? Math.max(58,(params.minScore||70)-8) :
+                                  (params.minScore||70);
+                const fearAdj = regime==="LATERAL"
+                  ? (fg<25?1.3:fg<35?1.15:fg>75?0.7:1.0)
+                  : (fg<25?0.8:fg>80?0.6:1.0);
+                const dailyUsed = s.dailyUsed||bot.dailyTrades?.count||0;
+                const dailyLimit = s.dailyLimit||9;
+                const blockers = [];
+                if(bot._pausedByTelegram)       blockers.push("⏸ Bot pausado por Telegram");
+                if(bot.marketDefensive)         blockers.push("🛡 Modo defensivo activo");
+                if(nOpen >= maxPos)             blockers.push(`📊 Posiciones llenas (${nOpen}/${maxPos})`);
+                if(availCash < tv*0.05)         blockers.push(`💸 Sin cash ($${availCash.toFixed(2)})`);
+                if(bot.breaker?.triggered)      blockers.push("🚨 Circuit breaker activo");
+                if(dailyUsed >= dailyLimit)     blockers.push(`📅 Límite diario (${dailyUsed}/${dailyLimit} ops)`);
+                const ok = blockers.length===0;
+                send([
+                  `${ok?"✅":"🔴"} <b>Condiciones para operar</b>`,
+                  HR,
+                  `📍 Régimen: <b>${regime}</b> | F&G: <b>${fg}</b>`,
+                  `🎯 Score mín: <b>${regimeMin}</b> | fearAdj: <b>×${fearAdj.toFixed(2)}</b>`,
+                  `💼 Posiciones: <b>${nOpen}/${maxPos}</b> | Cash libre: <b>$${availCash.toFixed(2)}</b>`,
+                  `📈 Ops hoy: <b>${dailyUsed}/${dailyLimit}</b> | WR: <b>${wr!=null?wr+"%":"—"}</b>`,
+                  HR,
+                  ok
+                    ? `✅ <b>Listo para operar</b> — esperando señal ≥${regimeMin}`
+                    : `🚫 <b>Bloqueadores:</b>\n`+blockers.map(b=>`  • ${b}`).join("\n"),
+                ].join("\n"));
+              }
               else if(text==="/ayuda") {
                 send(
 `🤖 <b>[LIVE] Comandos disponibles</b>
@@ -535,6 +579,7 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
 /mercado — análisis del mercado ahora mismo
 /posiciones — qué tiene abierto el bot
 /log — últimas 10 operaciones
+/condiciones — ver si el bot puede entrar ahora
 
 📈 <b>Análisis</b>
 /semana — resumen de los últimos 7 días

@@ -962,10 +962,15 @@ function startLoop(){
     if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
       fetchFearGreed().then(fg=>{
-        bot._officialFearGreed=fg.value; bot.fearGreed=fg.value;
-        if(bot.fearGreedRealtime?.scores && fg.source !== "fallback") {
-          fgCalibrator.recordObservation(bot.fearGreedRealtime.scores, bot.fearGreedRealtime.synthetic, fg.value);
-        } bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);});
+        try {
+          bot._officialFearGreed=fg.value; bot.fearGreed=fg.value;
+          if(bot.fearGreedRealtime?.scores && fg.source !== "fallback" && fgCalibrator?.recordObservation) {
+            fgCalibrator.recordObservation(bot.fearGreedRealtime.scores, bot.fearGreedRealtime.synthetic, fg.value);
+          }
+          bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown";
+          console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);
+        } catch(e) { console.warn("[F&G] calibration error:", e.message); }
+      }).catch(e=>console.warn("[F&G] fetch failed:", e.message));
       // Market data for Telegram /mercado command
       fetchLongShortRatio("BTCUSDT").then(ls=>{bot.longShortRatio=ls;}).catch(()=>{});
       fetchFundingRate("BTCUSDT").then(fr=>{bot.fundingRate=fr;}).catch(()=>{});

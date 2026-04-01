@@ -566,4 +566,4 @@ module.exports.fgCalibrator = fgCalibrator;
 
 module.exports={calcRealtimeFearGreed,fetchFearGreed,fetchNewsAlert,fetchAllKlines,runNightlyReplay,
   fetchLongShortRatio,fetchFundingRate,fetchRedditSentiment,
-  fetchOpenInterest,fetchTakerVolume};
+  fetchOpenInterest,fetchTakerVolume,fgCalibrator};
