@@ -6,6 +6,7 @@ const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } =
 const { DQN } = require("./dqn");
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
+const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly } = require("./adaptive_learning");
 
 const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const MIN_CASH_RESERVE = 0.15;
@@ -299,6 +300,10 @@ class CryptoBotFinal {
     this.confidence      = new ConfidenceScore();
     this.riskLearning    = new RiskLearning();
     this.corrManager    = new CorrelationManager();
+    this.adaptiveStop   = new AdaptiveStopLoss();
+    this.adaptiveHours  = new AdaptiveHours();
+    this.newsLearner    = new NewsImpactLearner();
+    this.regimeDetector = new AdaptiveRegimeDetector();
     this.longShortRatio = null;
     this.fundingRate    = null;
     this.openInterest   = null;
@@ -445,6 +450,16 @@ class CryptoBotFinal {
         const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":scalpExit?"SCALP TARGET":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
         // Actualizar blacklist automática
         this.autoBlacklist.recordResult(symbol, pnl>0);
+        const _leh = pos.ts ? new Date(pos.ts).getUTCHours() : new Date().getUTCHours();
+        const _ltr = {symbol,pnl,reason,strategy:pos.strategy||"MOMENTUM",ts:new Date().toISOString()};
+        if(this.adaptiveStop)  this.adaptiveStop.recordTrade(_ltr, this.marketRegime, _leh);
+        if(this.adaptiveHours) this.adaptiveHours.recordTrade(_ltr, this.marketRegime);
+        if(this.regimeDetector) this.regimeDetector.recordOutcome(pos.regime||this.marketRegime, pnl, {lsRatio:this.longShortRatio?.ratio, fg:this.fearGreed});
+        if(this.qLearning) {
+          const _ls=this.log.filter(l=>l.type==="SELL");
+          const _lwr=_ls.length>=10?_ls.slice(-20).filter(l=>l.pnl>0).length/Math.min(20,_ls.length):0.5;
+          this.qLearning.lr = calcAdaptiveLR(0.1, _ls.length, _lwr);
+        }
         delete this.portfolio[symbol];this.trailing.remove(symbol);
         if(pnl<0)this.reentryTs[symbol]=Date.now();
         // DQN training on trade close
@@ -542,7 +557,8 @@ class CryptoBotFinal {
                            liveDqnQ.SKIP > liveDqnQ.BUY + 0.5 ? 0.7 : 1.0;
             sig._dqnState = liveDqnState;
           }
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost;
+          const _lKelly = calcAdaptiveKelly(1.0, this.portfolio, this.prices, this.history);
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost*_lKelly;
           if(invest<10||invest>availCash)continue;
           // Slippage estimation: pares poco líquidos (OP, ARB, NEAR) tienen mayor slippage
           const ILLIQUID = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC"];
@@ -554,7 +570,10 @@ class CryptoBotFinal {
           const atrVal=atr(this.history[sig.symbol]||[price],14);
           // ── Stop loss dinámico por volatilidad ────────────────────────────
           const dynStop=calcDynamicStop(price,atrVal,this.marketRegime);
-          const stopLoss=dynStop.stop;
+          const _learnedPct = this.adaptiveStop
+            ? this.adaptiveStop.getStop(sig.symbol, this.marketRegime, new Date().getUTCHours(), dynStop.stopPct||0.03)
+            : (dynStop.stopPct||0.03);
+          const stopLoss = price * (1 - _learnedPct);
           const target=price+(price-stopLoss)*2; // target 2:1 R:R para cierre parcial
           const posId=`${sig.symbol}_${Date.now()}`;
           this.cash = Math.max(0, this.cash - invest); // nunca permitir cash negativo
@@ -607,6 +626,9 @@ class CryptoBotFinal {
       cash:this.cash,log:this.log,equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
       mode:this.mode,totalValue:tv,returnPct:ret,fxRate:parseFloat(process.env.FX_RATE||"1.08"),
       longShortRatio:this.longShortRatio||null,fundingRate:this.fundingRate||null,
+      adaptiveStopStats:this.adaptiveStop?.getStats()||null,
+      adaptiveHoursStats:this.adaptiveHours?.getStats()||null,
+      regimeDetectorStats:this.regimeDetector?.getStats()||null,
       openInterest:this.openInterest||null,redditSentiment:this.redditSentiment||null,
       winRate:sells?+((wins/sells)*100).toFixed(0):null,
       pairs:PAIRS,categories:CATEGORIES,

@@ -445,6 +445,11 @@ async function save() {
   s.trailingHighs=bot.trailing.highs;
   s.reentryTs=bot.reentryTs;
   s.syncHistory=syncHistory;
+  if(bot.adaptiveStop)   s.adaptiveStop   = bot.adaptiveStop.serialize();
+  if(bot.adaptiveHours)  s.adaptiveHours  = bot.adaptiveHours.serialize();
+  if(bot.newsLearner)    s.newsLearner    = bot.newsLearner.serialize();
+  if(bot.regimeDetector) s.regimeDetector = bot.regimeDetector.serialize();
+  if(bot._transferHistory) s.transferHistory = bot._transferHistory;
   await saveState(s);
 }
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
