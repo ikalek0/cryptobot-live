@@ -497,9 +497,9 @@ class CryptoBotFinal {
     // hasta 3 extras para no perder oportunidades de alta calidad
     const goldSlotUsed = this._goldSlotCount || 0;
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
-    const goldenOpportunity = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= 85;
-    if((!dailyLimitReached || goldenOpportunity) && !this.marketDefensive){
-      if(goldenOpportunity) console.log(`[LIVE] 🌟 Golden slot: señal ${bestSignalScore} supera límite diario (${goldSlotUsed+1}/3)`);
+    // goldenOpportunity is re-evaluated per trade inside the loop
+    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= 85;
+    if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
@@ -531,6 +531,8 @@ class CryptoBotFinal {
         console.log(`[LIVE][${this.marketRegime}] signals:${signals.length} top:${top} minScore:${regimeMin} fearAdj:${fearAdj.toFixed(2)} F&G:${this.fearGreed}`);
       }
       const buyable=signals.filter(s=>{
+          // If limit reached, only allow this signal if it qualifies for golden slot
+          if(dailyLimitReached && !((this._goldSlotCount||0) < 3 && s.score >= 85)) return false;
           if(s.signal!=="BUY"||s.score<regimeMin)return false;
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping||s.isFalling)return false;
@@ -620,7 +622,11 @@ class CryptoBotFinal {
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM"};
           newTrades.push(trade);this.dailyTrades.count++;
           const g=PAIRS.find(p=>p.symbol===sig.symbol)?.group||"";groupCount[g]=(groupCount[g]||0)+1;
-          if(goldenOpportunity) this._goldSlotCount = (this._goldSlotCount||0) + 1;
+          const _isGolden = dailyLimitReached && (this._goldSlotCount||0) < 3 && sig.score >= 85;
+          if(_isGolden) {
+            this._goldSlotCount = (this._goldSlotCount||0) + 1;
+            console.log(`[LIVE] 🌟 Golden slot: señal ${sig.score} supera límite diario (${this._goldSlotCount}/3)`);
+          }
           console.log(`[${this.mode}][${this.marketRegime}][BUY] ${sig.symbol} score:${sig.score} stop:${dynStop.stopPct} $${invest.toFixed(0)} | ${this.dailyTrades.count}/${dailyLimit}`);
         }
       }
