@@ -4,6 +4,7 @@
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } = require("./live_features_patch");
 const { DQN } = require("./dqn");
+const { MultiAgentSystem } = require("./multiAgent");
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
 const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly } = require("./adaptive_learning");

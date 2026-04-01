@@ -305,6 +305,7 @@ ${best ? `• 🥇 Mejor:  ${coin(best.symbol)} ${sign(best.pnl)}${best.pnl.toFi
 
 // ── Comandos del usuario ──────────────────────────────────────────────────────
 let lastUpdateId = 0;
+let _pauseTimer = null;
 function startCommandListener(getState, botControls={}) {
   if(!TOKEN) return;
 
