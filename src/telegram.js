@@ -563,7 +563,7 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
                   `📍 Régimen: <b>${regime}</b> | F&G: <b>${fg}</b>`,
                   `🎯 Score mín: <b>${regimeMin}</b> | fearAdj: <b>×${fearAdj.toFixed(2)}</b>`,
                   `💼 Posiciones: <b>${nOpen}/${maxPos}</b> | Cash libre: <b>$${availCash.toFixed(2)}</b>`,
-                  `📈 Ops hoy: <b>${dailyUsed}/${dailyLimit}</b> | WR: <b>${wr!=null?wr+"%":"—"}</b>`,
+                  `📈 Ops hoy: <b>${dailyUsed}/${dailyLimit}</b> | WR: <b>${wr!=null?wr+"%":"—"}</b> | 🌟 Golden slots: <b>${s.goldSlotCount||0}/3</b>`,
                   HR,
                   ok
                     ? `✅ <b>Listo para operar</b> — esperando señal ≥${regimeMin}`

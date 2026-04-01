@@ -362,7 +362,7 @@ class CryptoBotFinal {
     updateMultiTF(this.tfHistory,sym,price,this.tick);
   }
   totalValue(){return this.cash+Object.entries(this.portfolio).reduce((s,[sym,pos])=>s+pos.qty*(this.prices[sym]||pos.entryPrice),0);}
-  checkDailyReset(){const today=new Date().toDateString();if(this.dailyTrades.date!==today)this.dailyTrades={date:today,count:0};}
+  checkDailyReset(){const today=new Date().toDateString();if(this.dailyTrades.date!==today){this.dailyTrades={date:today,count:0};this._goldSlotCount=0;}}
   recentWinRate(){const sells=this.log.filter(l=>l.type==="SELL").slice(0,20);if(!sells.length)return null;return Math.round(sells.filter(l=>l.pnl>0).length/sells.length*100);}
 
   checkMaxDrawdown(tv){
@@ -493,7 +493,13 @@ class CryptoBotFinal {
     }
 
     // NUEVAS ENTRADAS — con blacklist automática y stop dinámico
-    if(!dailyLimitReached&&!this.marketDefensive){
+    // "Golden slots": señales excepcionales (score>=85) pueden superar el límite diario
+    // hasta 3 extras para no perder oportunidades de alta calidad
+    const goldSlotUsed = this._goldSlotCount || 0;
+    const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
+    const goldenOpportunity = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= 85;
+    if((!dailyLimitReached || goldenOpportunity) && !this.marketDefensive){
+      if(goldenOpportunity) console.log(`[LIVE] 🌟 Golden slot: señal ${bestSignalScore} supera límite diario (${goldSlotUsed+1}/3)`);
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
@@ -614,6 +620,7 @@ class CryptoBotFinal {
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM"};
           newTrades.push(trade);this.dailyTrades.count++;
           const g=PAIRS.find(p=>p.symbol===sig.symbol)?.group||"";groupCount[g]=(groupCount[g]||0)+1;
+          if(goldenOpportunity) this._goldSlotCount = (this._goldSlotCount||0) + 1;
           console.log(`[${this.mode}][${this.marketRegime}][BUY] ${sig.symbol} score:${sig.score} stop:${dynStop.stopPct} $${invest.toFixed(0)} | ${this.dailyTrades.count}/${dailyLimit}`);
         }
       }
@@ -667,7 +674,7 @@ class CryptoBotFinal {
       optimizerParams:this.optimizer.getParams(),
       optLog:this.optLog,profile:this.profile,
       pairScores:this.pairScores,marketRegime:this.marketRegime,
-      fearGreed:this.fearGreed,dailyTrades:this.dailyTrades,dailyLimit,
+      fearGreed:this.fearGreed,dailyTrades:this.dailyTrades,dailyLimit,goldSlotCount:this._goldSlotCount||0,
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
