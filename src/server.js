@@ -14,7 +14,7 @@ const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
 const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
-const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment } = require("./feeds");
+const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const tg         = require("./telegram");
 
@@ -298,6 +298,78 @@ app.post("/api/set-capital", (req,res) => {
 });
 
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
+// ── Transfer learning: recibe pesos DQN y Q-table del paper ─────────────────
+app.post("/api/sync/transfer", (req,res) => {
+  const sig = req.headers["x-signature"];
+  const body = JSON.stringify(req.body);
+  if(!sig) return res.status(401).json({error:"Firma requerida"});
+  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
+  try {
+    if(!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex")))
+      return res.status(401).json({error:"Firma inválida"});
+  } catch(e) { return res.status(401).json({error:"Firma inválida"}); }
+
+  if(!bot) return res.status(503).json({error:"Bot no listo"});
+  const { dqnWeights, qTable, paperStats } = req.body;
+  if(!dqnWeights && !qTable) return res.status(400).json({error:"Sin datos"});
+
+  const wr = paperStats?.winRate||0;
+  const trades = paperStats?.nTrades||0;
+
+  // Solo transferir si paper tiene suficiente experiencia y buen WR
+  if(trades < 50) return res.json({adopted:false, reason:`Paper solo tiene ${trades} trades (mínimo 50)`});
+  if(wr < 30) return res.json({adopted:false, reason:`WR paper ${wr}% muy bajo para transferir`});
+
+  let transferred = [];
+
+  // Transferir pesos DQN (blend 30% paper, 70% live para no perder lo aprendido en live)
+  if(dqnWeights && bot.dqn) {
+    try {
+      const BLEND = Math.min(0.4, trades/500); // más trades = más confianza en paper
+      const blendWeights = (live, paper) => {
+        if(!live || !paper || live.length !== paper.length) return live;
+        return live.map((v, i) => v * (1-BLEND) + paper[i] * BLEND);
+      };
+      if(dqnWeights.W1) bot.dqn.W1 = blendWeights(bot.dqn.W1, dqnWeights.W1);
+      if(dqnWeights.W2) bot.dqn.W2 = blendWeights(bot.dqn.W2, dqnWeights.W2);
+      if(dqnWeights.W3) bot.dqn.W3 = blendWeights(bot.dqn.W3, dqnWeights.W3);
+      if(dqnWeights.b1) bot.dqn.b1 = blendWeights(bot.dqn.b1, dqnWeights.b1);
+      if(dqnWeights.b2) bot.dqn.b2 = blendWeights(bot.dqn.b2, dqnWeights.b2);
+      if(dqnWeights.b3) bot.dqn.b3 = blendWeights(bot.dqn.b3, dqnWeights.b3);
+      transferred.push(`DQN (blend ${(BLEND*100).toFixed(0)}%)`);
+    } catch(e) { console.warn("[TRANSFER] DQN error:", e.message); }
+  }
+
+  // Transferir Q-table (merge: mantener lo de live, añadir estados nuevos del paper)
+  if(qTable && bot.qLearning?.q) {
+    try {
+      let newStates = 0;
+      for(const [state, actions] of Object.entries(qTable)) {
+        if(!bot.qLearning.q[state]) {
+          bot.qLearning.q[state] = actions; // nuevo estado del paper
+          newStates++;
+        } else {
+          // Blend existing states
+          for(const [action, val] of Object.entries(actions)) {
+            if(bot.qLearning.q[state][action] != null) {
+              bot.qLearning.q[state][action] = bot.qLearning.q[state][action]*0.7 + val*0.3;
+            } else {
+              bot.qLearning.q[state][action] = val;
+            }
+          }
+        }
+      }
+      transferred.push(`Q-table (+${newStates} estados nuevos)`);
+    } catch(e) { console.warn("[TRANSFER] Q-table error:", e.message); }
+  }
+
+  const msg = `✅ Transfer learning: ${transferred.join(", ")} | paper WR:${wr}% trades:${trades}`;
+  console.log(`[TRANSFER] ${msg}`);
+  tg.send && tg.send(`🧠 <b>[LIVE] Transfer learning</b>\n${msg}`);
+  save().catch(()=>{});
+  res.json({adopted:true, transferred, blend: Math.min(0.4, trades/500)});
+});
+
 app.get("/api/sync/history", (_,res) => res.json({
   syncHistory,
   threshold: SYNC_THRESHOLD,
@@ -744,9 +816,27 @@ function startLoop(){
     if(!circuitBreaker?.triggered) cbNotified=false;
     if(optimizerResult?.changes?.length>0) tg.notifyOptimizer(optimizerResult);
 
+    // Real-time F&G — actualizar cada tick
+    if(bot && bot.history) {
+      const rtFG = calcRealtimeFearGreed(bot, {
+        longShortRatio: bot.longShortRatio,
+        fundingRate: bot.fundingRate,
+        openInterest: bot.openInterest,
+        redditSentiment: bot.redditSentiment,
+        officialFearGreed: bot._officialFearGreed || bot.fearGreed,
+      });
+      bot.fearGreedRealtime = rtFG;
+      bot.fearGreed = rtFG.value;
+      bot.fearGreedSource = rtFG.source;
+    }
+
     if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
-      fetchFearGreed().then(fg=>{bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);});
+      fetchFearGreed().then(fg=>{
+        bot._officialFearGreed=fg.value; bot.fearGreed=fg.value;
+        if(bot.fearGreedRealtime?.scores && fg.source !== "fallback") {
+          fgCalibrator.recordObservation(bot.fearGreedRealtime.scores, bot.fearGreedRealtime.synthetic, fg.value);
+        } bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);});
       // Market data for Telegram /mercado command
       fetchLongShortRatio("BTCUSDT").then(ls=>{bot.longShortRatio=ls;}).catch(()=>{});
       fetchFundingRate("BTCUSDT").then(fr=>{bot.fundingRate=fr;}).catch(()=>{});

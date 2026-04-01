@@ -167,7 +167,11 @@ class DQN {
 
   // ── Store experience ───────────────────────────────────────────────────────
   remember(state, action, reward, nextState, done=false) {
-    this.replayBuffer.push({ state, action: this.actions.indexOf(action), reward, nextState, done });
+    // PER: new experiences start with max priority so they get sampled at least once
+    const maxPriority = this.replayBuffer.length > 0
+      ? Math.max(...this.replayBuffer.map(e => e.priority || 1))
+      : 1.0;
+    this.replayBuffer.push({ state, action: this.actions.indexOf(action), reward, nextState, done, priority: maxPriority });
     if(this.replayBuffer.length > this.replayBufferSize) this.replayBuffer.shift();
   }
 
@@ -175,10 +179,28 @@ class DQN {
   trainBatch() {
     if(this.replayBuffer.length < this.minReplaySize) return 0;
 
-    // Sample random batch
+    // PER: sample based on priority (higher priority = sampled more often)
+    const alpha = 0.6; // priority exponent — 0 = uniform, 1 = full priority
+    const priorities = this.replayBuffer.map(e => Math.pow(e.priority || 1, alpha));
+    const totalPriority = priorities.reduce((s, p) => s + p, 0);
     const batch = [];
+    const batchIndices = [];
     for(let i=0;i<this.batchSize;i++) {
-      batch.push(this.replayBuffer[Math.floor(Math.random()*this.replayBuffer.length)]);
+      let rand = Math.random() * totalPriority;
+      let cumulative = 0;
+      for(let j=0;j<this.replayBuffer.length;j++) {
+        cumulative += priorities[j];
+        if(cumulative >= rand) {
+          batch.push(this.replayBuffer[j]);
+          batchIndices.push(j);
+          break;
+        }
+      }
+      if(batch.length < i+1) { // fallback
+        const idx = Math.floor(Math.random() * this.replayBuffer.length);
+        batch.push(this.replayBuffer[idx]);
+        batchIndices.push(idx);
+      }
     }
 
     let totalLoss = 0;
@@ -233,6 +255,15 @@ class DQN {
     // Update target network periodically
     if(this._trainSteps % this._targetUpdateFreq === 0) {
       this._copyWeightsToTarget();
+    }
+
+    // PER: update priorities based on TD error for each sampled experience
+    for(let k=0;k<batch.length;k++) {
+      const bufIdx = batchIndices[k];
+      if(bufIdx != null && this.replayBuffer[bufIdx]) {
+        const tdErr = Math.abs(batch[k]._tdError || 0.1);
+        this.replayBuffer[bufIdx].priority = tdErr + 0.01; // epsilon=0.01
+      }
     }
 
     return totalLoss / batch.length;
