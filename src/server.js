@@ -14,7 +14,7 @@ const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
 const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
-const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
+const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const tg         = require("./telegram");
 
