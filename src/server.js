@@ -131,6 +131,38 @@ function broadcast(msg) {
 }
 
 // ── API REST ──────────────────────────────────────────────────────────────────
+app.get("/api/summary", (_,res) => {
+  if(!bot) return res.json({loading:true, instance:"LIVE"});
+  const s = bot.getState();
+  // Lightweight summary for Bafir dashboard — avoids sending full log/history
+  res.json({
+    instance:   "LIVE",
+    totalValue: s.totalValue||0,
+    cash:       s.cash||0,
+    returnPct:  s.returnPct||0,
+    winRate:    s.winRate||0,
+    tick:       s.tick||0,
+    marketRegime:    s.marketRegime||"UNKNOWN",
+    fearGreed:       s.fearGreed||50,
+    fearGreedSource: s.fearGreedSource||null,
+    dailyPnlPct:     bot._dailyPnlPct||0,
+    momentumMult:    bot.hourMultiplier||1,
+    openPositions:   Object.keys(s.portfolio||{}).length,
+    recentTrades:    (s.log||[]).filter(l=>l.type==="SELL").slice(0,10),
+    circuitBreaker:  s.circuitBreaker||null,
+    cryptoPanic:     s.cryptoPanic||null,
+    confidence:      s.confidence||null,
+    longShortRatio:  s.longShortRatio||null,
+    fundingRate:     s.fundingRate||null,
+    drawdownPct:     s.drawdownPct||0,
+    winStreak:       s.winStreak||0,
+    dailyLimit:      s.dailyLimit||0,
+    dailyTrades:     s.dailyTrades||null,
+    equity:          (s.equity||[]).slice(-60),   // last hour only
+    loading:         false,
+  });
+});
+
 app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory,dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:bot?.tick,uptime:process.uptime(),tv:bot?.totalValue()}));
 
