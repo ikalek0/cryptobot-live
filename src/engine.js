@@ -63,9 +63,12 @@ function updateMultiTF(tfHistory, symbol, price, tick) {
 }
 
 function getDailyLimit(regime, wr) {
+  const h = new Date(Date.now()+2*3600000).getUTCHours();
+  const isNight = h < 9; // madrugada Francia
   let base = regime==="BULL"?25:regime==="LATERAL"?15:regime==="BEAR"?5:10;
   if(wr!==null){if(wr>65)base=Math.round(base*1.3);else if(wr<45)base=Math.round(base*0.6);else if(wr<50)base=Math.round(base*0.8);}
-  return Math.max(3,Math.min(25,base));
+  const limit = Math.max(3,Math.min(25,base));
+  return isNight ? Math.min(3, limit) : limit; // madrugada: max 3
 }
 
 // ── Indicadores ───────────────────────────────────────────────────────────────
@@ -362,7 +365,23 @@ class CryptoBotFinal {
     updateMultiTF(this.tfHistory,sym,price,this.tick);
   }
   totalValue(){return this.cash+Object.entries(this.portfolio).reduce((s,[sym,pos])=>s+pos.qty*(this.prices[sym]||pos.entryPrice),0);}
-  checkDailyReset(){const today=new Date().toDateString();if(this.dailyTrades.date!==today){this.dailyTrades={date:today,count:0};this._goldSlotCount=0;}}
+  checkDailyReset(){
+    const now = new Date(Date.now()+2*3600000); // UTC+2 Francia
+    const h = now.getUTCHours();
+    // 3 sesiones por día (hora Francia):
+    //   Madrugada: 00:00-08:59  → límite reducido
+    //   Europa:    09:00-16:59  → límite completo
+    //   América:   17:00-23:59  → límite completo
+    const session = h < 9 ? "night" : h < 17 ? "europe" : "america";
+    const sessionKey = now.toDateString() + "_" + session;
+    if(this.dailyTrades.date !== sessionKey){
+      const prev = this.dailyTrades.date;
+      this.dailyTrades = {date: sessionKey, count:0};
+      this._goldSlotCount = 0;
+      const labels = {night:"Madrugada (00-08h)", europe:"Europa (09-16h)", america:"América (17-23h)"};
+      if(prev) console.log(`[LIVE] ♻️ Nueva sesión: ${labels[session]} — contador reseteado`);
+    }
+  }
   recentWinRate(){const sells=this.log.filter(l=>l.type==="SELL").slice(0,20);if(!sells.length)return null;return Math.round(sells.filter(l=>l.pnl>0).length/sells.length*100);}
 
   checkMaxDrawdown(tv){
@@ -498,7 +517,9 @@ class CryptoBotFinal {
     const goldSlotUsed = this._goldSlotCount || 0;
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
     // goldenOpportunity is re-evaluated per trade inside the loop
-    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= 85;
+    // Golden slot: señal buena (regimeMin+10) puede añadir hasta 3 extras por sesión
+    const goldThreshold = Math.max(70, regimeMin + 10);
+    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
     if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
