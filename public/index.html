@@ -910,22 +910,22 @@ function render() {
   const fgTime = s.fearGreedPublished ? new Date(s.fearGreedPublished).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}) : null;
   const fgSrc = s.fearGreedSource ? " ("+s.fearGreedSource+")" : "";
   const fgDate = fgTime ? " · "+fgTime+fgSrc : fgSrc;
-  document.getElementById("fg-val").textContent = fg+" — "+fgLabel+fgDate;
+  const _fgEl=document.getElementById("fg-val"); if(_fgEl) _fgEl.textContent = fg+" — "+fgLabel+fgDate;
 
   // Period-filtered operations count (using already-defined periodMs + periodSells)
   const periodOpsCount = currentPeriod==="ALL" ? (s.log||[]).filter(l=>l.type==="SELL").length : periodSells.length;
-  document.getElementById("daily-ops").textContent = periodSells.length+" operaciones";
+  const _dopsEl=document.getElementById("daily-ops"); if(_dopsEl) _dopsEl.textContent = periodSells.length+" operaciones";
   const limitVal = s.dailyLimit||9;
   const limitTxt = currentPeriod==="1D"||currentPeriod==="1H"
     ? "máx. "+limitVal+" hoy"
     : "máx. "+limitVal+"/día";
-  document.getElementById("daily-limit").textContent = limitTxt;
+  const _dlEl=document.getElementById("daily-limit"); if(_dlEl) _dlEl.textContent = limitTxt;
 
   const cb = s.circuitBreaker;
   const cbEl = document.getElementById("cb-status");
   const _cbLoss = Math.abs(Math.min(0, periodRet));
-  cbEl.textContent = cb?.triggered ? "🔴 ACTIVADO" : "OK — "+_cbLoss.toFixed(2)+"% pérdida "+periodLabel;
-  cbEl.style.color = cb?.triggered ? "var(--red)" : _cbLoss>3?"var(--gold)":"var(--green)";
+  if(cbEl) { cbEl.textContent = cb?.triggered ? "🔴 ACTIVADO" : "OK — "+_cbLoss.toFixed(2)+"% pérdida "+periodLabel;
+  cbEl.style.color = cb?.triggered ? "var(--red)" : _cbLoss>3?"var(--gold)":"var(--green)"; }
 
   // Period max-drawdown
   let dd = s.drawdownPct||0;
@@ -940,7 +940,7 @@ function render() {
 
   // Period-filtered fees
   const feesDisplay = currentPeriod==="ALL" ? (s.totalFees||0) : periodFees;
-  document.getElementById("total-fees").textContent = fCur(feesDisplay)+" en comisiones";
+  const _feesEl=document.getElementById("total-fees"); if(_feesEl) _feesEl.textContent = fCur(feesDisplay)+" en comisiones";
 
   // Momentum hoy
   const mEl = document.getElementById("momentum-val");
@@ -1051,6 +1051,7 @@ function renderLearning(s) {
 
 function renderPortfolio(id, portfolio, prices, mini) {
   const el = document.getElementById(id);
+  if(!el) return;
   const entries = Object.entries(portfolio||{});
   if (!entries.length) {
     el.innerHTML=`<div style="text-align:center;padding:${mini?"16":"30"}px;color:var(--dim);font-size:12px;font-style:italic">Sin posiciones abiertas</div>`;

@@ -571,6 +571,93 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
                     : `🚫 <b>Bloqueadores:</b>\n`+blockers.map(b=>`  • ${b}`).join("\n"),
                 ].join("\n"));
               }
+
+              else if(text==="/situacion") {
+                const s = state;
+                if(!s||s.loading) return send("❌ Bot no iniciado aún");
+                const HR2 = "─────────────────────";
+                const mode = s.instance||"LIVE";
+                const tv = s.totalValue||0;
+                const cash = s.cash||0;
+                const invested = tv - cash;
+                const regime = s.marketRegime||"UNKNOWN";
+                const fg = s.fearGreed||50;
+                const fgLabel = fg<25?"😱 Pánico extremo":fg<40?"😟 Miedo":fg<60?"😐 Neutral":fg<75?"😊 Codicia":"🤑 Euforia";
+                const wr = s.recentWinRate??null;
+                const dp = s.dailyPnlPct||0;
+                const ret = s.returnPct||0;
+                const allSells = (s.log||[]).filter(l=>l.type==="SELL");
+                const todaySells = allSells.filter(l=>{
+                  const t = l.ts?new Date(l.ts).getTime():0;
+                  return Date.now()-t < 86400000;
+                });
+                const todayWins = todaySells.filter(l=>l.pnl>0).length;
+                const todayPnlAbs = todaySells.reduce((s,l)=>s+(l.pnlAbs||0),0);
+                const totalFees = s.totalFees||0;
+                const openPos = Object.entries(s.portfolio||{});
+                const nOpen = openPos.length;
+                const mom = s.momentumMult||1;
+                const momLabel = mom<=0.7?"🛡 Defensivo":mom>=1.5?"🚀 Agresivo":"— Normal";
+                const lsRatio = s.longShortRatio?.value||null;
+                const fundRate = s.fundingRate?.value||null;
+                const cb = s.circuitBreaker;
+                const drawdown = s.drawdownPct||0;
+
+                // Posiciones abiertas
+                const posLines = openPos.length
+                  ? openPos.map(([sym,pos])=>{
+                      const price = s.prices?.[sym]||pos.entryPrice;
+                      const pnl = pos.entryPrice>0?((price-pos.entryPrice)/pos.entryPrice*100):0;
+                      const e = pnl>0?"🟢":pnl<-1?"🔴":"🟡";
+                      return `${e} ${sym.replace("USDC","")}: ${pnl>=0?"+":""}${pnl.toFixed(2)}% · Stop $${pos.stopLoss?.toFixed(4)||"—"} · ${pos.strategy||"—"}`;
+                    }).join("\n")
+                  : "Sin posiciones abiertas";
+
+                // Últimas 5 ops
+                const lastOps = todaySells.slice(0,5).map(t=>{
+                  const e = t.pnl>0?"✅":t.pnl<-1?"❌":"⚠️";
+                  return `${e} ${(t.symbol||"").replace("USDC","")} ${t.pnl>=0?"+":""}${(t.pnl||0).toFixed(2)}% · ${t.reason||""}`;
+                }).join("\n")||"Sin operaciones hoy";
+
+                // Explicación contextual del comportamiento del bot
+                const regimeExplain = regime==="BULL"?"mercado alcista — el bot está siendo más agresivo en entradas":
+                                      regime==="BEAR"?"mercado bajista — el bot opera solo en rebotes extremos con stops muy ajustados":
+                                      regime==="LATERAL"?"mercado sin tendencia clara — el bot prioriza mean reversion y scalps selectivos":"régimen desconocido, el bot actúa con máxima cautela";
+                const fgExplain = fg<25?"el pánico extremo del mercado activa la estrategia de rebote (oportunidad)":
+                                  fg<40?"el miedo predomina, el bot reduce agresividad salvo en señales muy claras":
+                                  fg>75?"euforia en el mercado, el bot reduce exposición ante posible corrección":
+                                  "sentimiento neutral, el bot opera con parámetros estándar";
+                const momExplain = mom<=0.7?"el P&L negativo de hoy ha activado modo defensivo (posiciones más pequeñas)":
+                                   mom>=1.5?"el P&L positivo de hoy ha activado modo agresivo (posiciones más grandes)":
+                                   "momentum neutro, tamaños de posición estándar";
+                const wrExplain = wr!==null?(wr>=50?"el WR reciente es bueno, el bot mantiene confianza alta":
+                                  wr>=35?"WR moderado, el bot está siendo selectivo en entradas":
+                                  "WR bajo, el bot exige señales más fuertes para entrar"):"sin datos suficientes aún";
+
+                send([
+                  `📊 <b>SITUACIÓN ${mode}</b>`,
+                  HR2,
+                  `💼 Capital: <b>$${tv.toFixed(2)}</b> | En posiciones: <b>$${invested.toFixed(2)}</b> | Efectivo: <b>$${cash.toFixed(2)}</b>`,
+                  `📈 Rendimiento total: <b>${ret>=0?"+":""}${ret.toFixed(2)}%</b> | Hoy: <b>${dp>=0?"+":""}${dp.toFixed(2)}%</b> ($${todayPnlAbs>=0?"+":""}${Math.abs(todayPnlAbs).toFixed(2)})`,
+                  `🎯 Ops hoy: <b>${todaySells.length}</b> (${todayWins} ganadoras · WR ${wr!=null?wr+"%":"—"}) | Comisiones: <b>$${totalFees.toFixed(2)}</b>`,
+                  HR2,
+                  `🌡️ Régimen: <b>${regime}</b> | F&G: <b>${fg}/100 ${fgLabel}</b>`,
+                  lsRatio?`⚖️ L/S: <b>${lsRatio.toFixed(3)}</b>${fundRate!==null?" · Funding: "+fundRate.toFixed(4)+"%":""}`:null,
+                  cb?.triggered?"🚨 Circuit breaker: <b>ACTIVO</b>":drawdown>3?`⚠️ Drawdown: <b>${drawdown.toFixed(2)}%</b>`:`✅ Sin alertas de riesgo`,
+                  HR2,
+                  `📂 <b>Posiciones abiertas (${nOpen}):</b>`,
+                  posLines,
+                  HR2,
+                  `🔄 <b>Últimas operaciones hoy:</b>`,
+                  lastOps,
+                  HR2,
+                  `🧠 <b>Por qué está actuando así el bot:</b>`,
+                  `• Régimen ${regimeExplain}`,
+                  `• Sentimiento: ${fgExplain}`,
+                  `• Momentum: ${momExplain}`,
+                  `• Calidad señales: ${wrExplain}`,
+                ].filter(Boolean).join("\n"));
+              }
               else if(text==="/ayuda") {
                 send(
 `🤖 <b>[LIVE] Comandos disponibles</b>
@@ -581,6 +668,7 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
 /posiciones — qué tiene abierto el bot
 /log — últimas 10 operaciones
 /condiciones — ver si el bot puede entrar ahora
+/situacion — resumen completo con explicación contextual
 
 📈 <b>Análisis</b>
 /semana — resumen de los últimos 7 días
