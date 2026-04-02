@@ -516,10 +516,15 @@ class CryptoBotFinal {
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
 
     // Calcular regimeMin y golden slots ANTES del if para tenerlos en scope
+    // Losing streak protection: si las últimas 5 ops son pérdidas → ser más exigente
+    const _last5 = (this.log||[]).filter(l=>l.type==="SELL").slice(-5);
+    const _losingStreak = _last5.length>=5 && _last5.every(l=>l.pnl<0);
+    const _streakPenalty = _losingStreak ? 8 : 0; // +8 al minScore si racha de pérdidas
+
     const _regimeMinPre = this.marketRegime==="BULL" ? params.minScore-5 :
                           this.marketRegime==="BEAR" ? 82 :
-                          this.marketRegime==="LATERAL" ? Math.max(58, params.minScore-8) :
-                          params.minScore;
+                          this.marketRegime==="LATERAL" ? Math.max(58, params.minScore-8+_streakPenalty) :
+                          params.minScore + _streakPenalty;
     const goldThreshold = Math.max(70, _regimeMinPre + 10);
     // Golden slots dinámicos: depende del cash libre y régimen
     const _cashPct = this.cash / (this.totalValue() || 1);

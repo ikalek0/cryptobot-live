@@ -609,7 +609,8 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
                       const price = s.prices?.[sym]||pos.entryPrice;
                       const pnl = pos.entryPrice>0?((price-pos.entryPrice)/pos.entryPrice*100):0;
                       const e = pnl>0?"🟢":pnl<-1?"🔴":"🟡";
-                      return `${e} ${sym.replace("USDC","")}: ${pnl>=0?"+":""}${pnl.toFixed(2)}% · Stop $${pos.stopLoss?.toFixed(4)||"—"} · ${pos.strategy||"—"}`;
+                      const sl = pos.stopLoss||pos.trailingStop||null;
+                      return `${e} ${sym.replace("USDC","")}: ${pnl>=0?"+":""}${pnl.toFixed(2)}% · Stop ${sl?"$"+sl.toFixed(4):"—"} · ${pos.strategy||"—"}`;
                     }).join("\n")
                   : "Sin posiciones abiertas";
 
@@ -638,7 +639,7 @@ Pares bloqueados: ${(cp.defensivePairs||[]).map(p=>coin(p)).join(", ")||"ninguno
                   `📊 <b>SITUACIÓN ${mode}</b>`,
                   HR2,
                   `💼 Capital: <b>$${tv.toFixed(2)}</b> | En posiciones: <b>$${invested.toFixed(2)}</b> | Efectivo: <b>$${cash.toFixed(2)}</b>`,
-                  `📈 Rendimiento total: <b>${ret>=0?"+":""}${ret.toFixed(2)}%</b> | Hoy: <b>${dp>=0?"+":""}${dp.toFixed(2)}%</b> ($${todayPnlAbs>=0?"+":""}${Math.abs(todayPnlAbs).toFixed(2)})`,
+                  `📈 Rendimiento total: <b>${ret>=0?"+":""}${ret.toFixed(2)}%</b> | Hoy: <b>${dp>=0?"+":""}${dp.toFixed(2)}%</b> (${todayPnlAbs>=0?"+":"-"}$${Math.abs(todayPnlAbs).toFixed(2)})`,
                   `🎯 Ops hoy: <b>${todaySells.length}</b> (${todayWins} ganadoras · WR ${wr!=null?wr+"%":"—"}) | Comisiones: <b>$${totalFees.toFixed(2)}</b>`,
                   HR2,
                   `🌡️ Régimen: <b>${regime}</b> | F&G: <b>${fg}/100 ${fgLabel}</b>`,

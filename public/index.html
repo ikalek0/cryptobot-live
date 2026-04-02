@@ -935,8 +935,8 @@ function render() {
     dd = periodDD;
   }
   const ddEl = document.getElementById("kpi-drawdown");
-  ddEl.textContent = dd>0 ? "-"+dd.toFixed(2)+"% desde máximo" : "Sin drawdown";
-  ddEl.style.color = dd>10 ? "var(--red)" : dd>5 ? "var(--gold)" : "var(--green)";
+  if(ddEl) { ddEl.textContent = dd>0 ? "-"+dd.toFixed(2)+"% desde máximo" : "Sin drawdown";
+  ddEl.style.color = dd>10 ? "var(--red)" : dd>5 ? "var(--gold)" : "var(--green)"; }
 
   // Period-filtered fees
   const feesDisplay = currentPeriod==="ALL" ? (s.totalFees||0) : periodFees;
