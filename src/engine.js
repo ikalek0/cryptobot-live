@@ -517,9 +517,7 @@ class CryptoBotFinal {
     const goldSlotUsed = this._goldSlotCount || 0;
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
     // goldenOpportunity is re-evaluated per trade inside the loop
-    // Golden slot: señal buena (regimeMin+10) puede añadir hasta 3 extras por sesión
-    const goldThreshold = Math.max(70, regimeMin + 10);
-    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
+    // [goldThreshold moved below regimeMin declaration]
     if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
@@ -530,6 +528,9 @@ class CryptoBotFinal {
                     this.marketRegime==="BEAR"?82:
                     this.marketRegime==="LATERAL"?Math.max(58,params.minScore-8):
                     params.minScore;
+    // Golden slot: señal buena puede añadir hasta 3 extras por sesión
+    const goldThreshold = Math.max(70, regimeMin + 10);
+    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
         // In LATERAL regime: extreme fear = mean reversion opportunity → LARGER positions
     // In BULL/BEAR: fear = reduce positions
     const fearAdj = this.marketRegime==="LATERAL"
