@@ -521,11 +521,16 @@ class CryptoBotFinal {
                           this.marketRegime==="LATERAL" ? Math.max(58, params.minScore-8) :
                           params.minScore;
     const goldThreshold = Math.max(70, _regimeMinPre + 10);
-    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
+    // Golden slots dinámicos: depende del cash libre y régimen
+    const _cashPct = this.cash / (this.totalValue() || 1);
+    // Cash >40%: el cash es el límite natural → más permisivo
+    // BULL: sin límite práctico si hay cash; LATERAL/BEAR: más conservador
+    const _goldMax = this.marketRegime === "BULL"
+      ? (_cashPct > 0.4 ? 99 : 5)
+      : (_cashPct > 0.4 ? 5 : 3);
+    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < _goldMax && bestSignalScore >= goldThreshold;
 
     if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
-      if(canUseGoldenSlot && dailyLimitReached)
-        console.log(`[LIVE] 🌟 Golden slot: señal ${bestSignalScore}≥${goldThreshold} (${goldSlotUsed+1}/3 esta sesión)`);
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
@@ -647,7 +652,6 @@ class CryptoBotFinal {
           const _isGolden = dailyLimitReached && (this._goldSlotCount||0) < 3 && sig.score >= 85;
           if(_isGolden) {
             this._goldSlotCount = (this._goldSlotCount||0) + 1;
-            console.log(`[LIVE] 🌟 Golden slot: señal ${sig.score} supera límite diario (${this._goldSlotCount}/3)`);
           }
           console.log(`[${this.mode}][${this.marketRegime}][BUY] ${sig.symbol} score:${sig.score} stop:${dynStop.stopPct} $${invest.toFixed(0)} | ${this.dailyTrades.count}/${dailyLimit}`);
         }

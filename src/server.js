@@ -681,8 +681,17 @@ async function placeLiveSell(symbol, quantity) {
       console.log(`[LIVE][SELL] ${symbol} sin balance real → cerrando posición virtual`);
       // Si no hay balance real, la posición es huérfana — cerrarla virtualmente
       if(bot?.portfolio?.[symbol]) {
+        const orphanPos = bot.portfolio[symbol];
+        // Restaurar cash que se gastó en la compra virtual (nunca ejecutada realmente)
+        const orphanCost = (orphanPos.qty||0) * (orphanPos.entryPrice||0);
+        if(orphanCost > 0) {
+          bot.cash = (bot.cash||0) + orphanCost;
+          // Eliminar también el log entry de esta posición huérfana
+          bot.log = (bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
+            Math.abs(l.price-(orphanPos.entryPrice||0))<0.01));
+          console.log(`[LIVE] Posición huérfana ${symbol} eliminada — cash restaurado +$${orphanCost.toFixed(2)}`);
+        }
         delete bot.portfolio[symbol];
-        console.log(`[LIVE] Posición huérfana ${symbol} eliminada del portfolio virtual`);
       }
       return null;
     }
@@ -696,6 +705,12 @@ async function placeLiveSell(symbol, quantity) {
       tg.send && tg.send(`🔴 <b>VENTA REAL EJECUTADA</b>\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
     } else {
       console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
+      // -2010 = insufficient balance → position doesn't exist in Binance
+      // Close virtual position to stay in sync
+      if(order?.code === -2010 && bot?.portfolio?.[symbol]) {
+        delete bot.portfolio[symbol];
+        console.log(`[LIVE] Posición virtual ${symbol} cerrada por -2010 (no existe en Binance)`);
+      }
     }
     return order;
   } catch(e) {
