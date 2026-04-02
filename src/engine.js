@@ -512,25 +512,25 @@ class CryptoBotFinal {
     }
 
     // NUEVAS ENTRADAS — con blacklist automática y stop dinámico
-    // "Golden slots": señales excepcionales (score>=85) pueden superar el límite diario
-    // hasta 3 extras para no perder oportunidades de alta calidad
     const goldSlotUsed = this._goldSlotCount || 0;
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
-    // goldenOpportunity is re-evaluated per trade inside the loop
-    // [goldThreshold moved below regimeMin declaration]
+
+    // Calcular regimeMin y golden slots ANTES del if para tenerlos en scope
+    const _regimeMinPre = this.marketRegime==="BULL" ? params.minScore-5 :
+                          this.marketRegime==="BEAR" ? 82 :
+                          this.marketRegime==="LATERAL" ? Math.max(58, params.minScore-8) :
+                          params.minScore;
+    const goldThreshold = Math.max(70, _regimeMinPre + 10);
+    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
+
     if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
+      if(canUseGoldenSlot && dailyLimitReached)
+        console.log(`[LIVE] 🌟 Golden slot: señal ${bestSignalScore}≥${goldThreshold} (${goldSlotUsed+1}/3 esta sesión)`);
       const nOpen=Object.keys(this.portfolio).length;
       const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
       if(nOpen<maxPos){
         const reserve=this.totalValue()*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
-        // LATERAL: slightly lower threshold, markets move less but opportunities exist
-    const regimeMin=this.marketRegime==="BULL"?params.minScore-5:
-                    this.marketRegime==="BEAR"?82:
-                    this.marketRegime==="LATERAL"?Math.max(58,params.minScore-8):
-                    params.minScore;
-    // Golden slot: señal buena puede añadir hasta 3 extras por sesión
-    const goldThreshold = Math.max(70, regimeMin + 10);
-    const canUseGoldenSlot = dailyLimitReached && goldSlotUsed < 3 && bestSignalScore >= goldThreshold;
+        const regimeMin = _regimeMinPre; // ya calculado arriba
         // In LATERAL regime: extreme fear = mean reversion opportunity → LARGER positions
     // In BULL/BEAR: fear = reduce positions
     const fearAdj = this.marketRegime==="LATERAL"
