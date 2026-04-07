@@ -3,11 +3,14 @@
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { AutoBlacklist, PartialCloseManager, calcDynamicStop, ConfidenceScore } = require("./live_features_patch");
+const { StrategyEvaluator } = require("./strategyEvaluator");
+const { CounterfactualMemory } = require("./counterfactual");
+const { PatternMemory }        = require("./patternMemory");
 const { DQN } = require("./dqn");
 const { MultiAgentSystem } = require("./multiAgent");
 const { RiskLearning } = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
-const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly } = require("./adaptive_learning");
+const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly, calcRealKelly } = require("./adaptive_learning");
 
 const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const MIN_CASH_RESERVE = 0.15;
@@ -39,7 +42,17 @@ const PAIRS = [
   { symbol:"ATOMUSDC", name:"Cosmos",    short:"ATOM", category:"L1",   group:"alt3"  },
   { symbol:"NEARUSDC", name:"NEAR",      short:"NEAR", category:"L1",   group:"alt3"  },
   { symbol:"APTUSDC",  name:"Aptos",     short:"APT",  category:"L1",   group:"alt3"  },
-];
+  // ── USDT alternatives: 10x more liquidity on Binance, 1:1 with USDC ────
+  { symbol:"BTCUSDT",  name:"Bitcoin",   short:"BTC",  category:"L1",   group:"major", quoteAsset:"USDT" },
+  { symbol:"ETHUSDT",  name:"Ethereum",  short:"ETH",  category:"L1",   group:"major", quoteAsset:"USDT" },
+  { symbol:"SOLUSDT",  name:"Solana",    short:"SOL",  category:"L1",   group:"alt1",  quoteAsset:"USDT" },
+  { symbol:"BNBUSDT",  name:"BNB",       short:"BNB",  category:"L1",   group:"alt1",  quoteAsset:"USDT" },
+  { symbol:"XRPUSDT",  name:"Ripple",    short:"XRP",  category:"Pago", group:"pay",   quoteAsset:"USDT" },
+  { symbol:"LINKUSDT", name:"Chainlink", short:"LINK", category:"DeFi", group:"defi",  quoteAsset:"USDT" },
+]
+// Pre-built Map for O(1) symbol lookup
+const PAIRS_MAP = new Map(PAIRS.map(p=>[p.symbol,p]));
+;
 
 const CATEGORIES = {
   L1:   { name:"Layer 1", color:"#f7931a", emoji:"🔶" },
@@ -209,7 +222,8 @@ function signalScalp(sym, history, params) {
     score = 58; signal = "BUY";
     reason = `SCALP REBOTE · RSI ${rsiVal.toFixed(0)}`;
   }
-  return {signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:+mom3.toFixed(2),bbPos:+bbPos.toFixed(2),strategy:"SCALP"};
+  // SCALP eliminated from live: convert to MEAN_REVERSION (better R/R)
+  return {signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:+mom3.toFixed(2),bbPos:+bbPos.toFixed(2),strategy:"MEAN_REVERSION"};
 }
 
 function computeSignal(sym,history,params,regime="UNKNOWN"){
@@ -291,6 +305,52 @@ function _calcConsecutive(sells){
 }
 
 // ── CLASE PRINCIPAL ───────────────────────────────────────────────────────────
+
+
+// ── Kalman Filter for trend/noise separation ─────────────────────────────
+// Professional bots use this to distinguish real trends from noise
+// Returns: { trend: number, noise: number, confidence: 0-1 }
+function kalmanFilter(prices, Q=0.01, R=1.0) {
+  if(!prices||prices.length<5) return {trend:prices[prices.length-1]||0,noise:1,confidence:0.5};
+  let x = prices[0]; // initial estimate
+  let P = 1.0;       // initial uncertainty
+  for(let i=1; i<prices.length; i++) {
+    // Predict
+    const x_pred = x;
+    const P_pred = P + Q;
+    // Update
+    const K = P_pred / (P_pred + R); // Kalman gain
+    x = x_pred + K * (prices[i] - x_pred);
+    P = (1 - K) * P_pred;
+  }
+  const lastPrice = prices[prices.length-1];
+  const noise = Math.abs(lastPrice - x) / (x || 1) * 100;
+  const confidence = Math.max(0, Math.min(1, 1 - noise/2));
+  return { trend: x, noise, confidence, isTrending: noise < 0.5 };
+}
+// ── Order Flow Imbalance ──────────────────────────────────────────────────
+// Measures buying vs selling pressure at the microstructure level
+// Professional bots use this to time entries with higher precision
+function calcOFI(prevBook, currBook) {
+  if(!prevBook||!currBook) return 0;
+  let ofi = 0;
+  const n = Math.min(5, prevBook.bids?.length||0, currBook.bids?.length||0);
+  for(let i=0; i<n; i++) {
+    const prevBidP = parseFloat(prevBook.bids[i]?.[0]||0);
+    const currBidP = parseFloat(currBook.bids[i]?.[0]||0);
+    const prevBidQ = parseFloat(prevBook.bids[i]?.[1]||0);
+    const currBidQ = parseFloat(currBook.bids[i]?.[1]||0);
+    const prevAskP = parseFloat(prevBook.asks[i]?.[0]||0);
+    const currAskP = parseFloat(currBook.asks[i]?.[0]||0);
+    const prevAskQ = parseFloat(prevBook.asks[i]?.[1]||0);
+    const currAskQ = parseFloat(currBook.asks[i]?.[1]||0);
+    // Bid OFI: positive when bids increasing (buyers aggressive)
+    ofi += currBidP >= prevBidP ? currBidQ : -currBidQ;
+    // Ask OFI: negative when asks increasing (sellers aggressive)
+    ofi -= currAskP <= prevAskP ? currAskQ : -currAskQ;
+  }
+  return ofi;
+}
 class CryptoBotFinal {
   constructor(saved=null){
     this.profile=RISK_PROFILES["moderate"];
@@ -344,6 +404,7 @@ class CryptoBotFinal {
       this.tick=0;this.mode="PAPER";this.optLog=[];
       this.pairScores={};this.reentryTs={};this.dailyTrades={date:"",count:0};
       this.useBnb=true;this.contrafactualLog=[];
+    this.declaredCapital=INITIAL_CAPITAL;
       this.maxEquity=INITIAL_CAPITAL;this.drawdownAlerted=false;
       this.tfHistory={};
     }
@@ -394,7 +455,8 @@ class CryptoBotFinal {
   evaluate(){
     if(Object.keys(this.prices).length<3)return{signals:[],newTrades:[],circuitBreaker:null,optimizerResult:null,drawdownAlert:null};
     this.tick++;this.checkDailyReset();
-    const tv=this.totalValue(),cb=this.breaker.check(tv);
+    const tv=this.totalValue(); // cached for this tick - reuse everywhere
+    const cb=this.breaker.check(tv);
     this.marketRegime=detectRegime(this.history["BTCUSDC"]);
     const drawdownAlert = tv > 0 ? this.checkMaxDrawdown(tv) : null;
     if(cb.triggered){
@@ -403,6 +465,8 @@ class CryptoBotFinal {
       return{signals,newTrades:[],circuitBreaker:cb,optimizerResult:null,drawdownAlert};
     }
 
+    // Cache sells to avoid 6x repeated filter(type=SELL) per tick
+    this._cachedSells = this.log.filter(l=>l.type==="SELL");
     const wr=this.recentWinRate(),dailyLimit=getDailyLimit(this.marketRegime,wr)+(this._dailyLimitBoost||0);
     const dailyLimitReached=this.dailyTrades.count>=dailyLimit;
     const params=this.optimizer.getParams();
@@ -433,7 +497,9 @@ class CryptoBotFinal {
       const posAgeSec = (Date.now() - new Date(pos.ts).getTime()) / 1000;
       const posAgeLimitSec = 8 * 3600;
       const priceMovePct = Math.abs((cp - pos.entryPrice) / pos.entryPrice * 100);
-      const timeStop = posAgeSec > posAgeLimitSec && priceMovePct < 0.5 && (pos.profitLocked||0) < 0.3;
+      const _mrDeadline = pos.strategy==="MEAN_REVERSION" && _holdH>(this.marketRegime==="LATERAL"?4:6) && pnl>-0.3;
+      const timeStop = (_mrDeadline) ||
+                       (posAgeSec > posAgeLimitSec && priceMovePct < 0.5 && (pos.profitLocked||0) < 0.3);
 
       this.portfolio[symbol].trailingStop=+ts.stopPrice.toFixed(4);
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
@@ -443,16 +509,48 @@ class CryptoBotFinal {
       // Trend riding: adapta targets por régimen
       const mrTarget_v = this.marketRegime==="BULL" ? 0.92 : this.marketRegime==="LATERAL" ? 0.65 : 0.82;
       const mrRsi_v    = this.marketRegime==="BULL" ? 72 : 60;
-      const mrExit     = !isScalp && sig?.bbPos>mrTarget_v && sig?.rsiVal>mrRsi_v;
+      const mrExit     = pos.strategy==="MEAN_REVERSION" && sig?.bbPos>mrTarget_v && sig?.rsiVal>mrRsi_v;
+
+      // ── Momentum trailing: widen stop as profit grows ─────────────────
+      if(pos.useTrailing && cp > pos.entryPrice) {
+        const _profitPct = (cp - pos.entryPrice) / pos.entryPrice;
+        // As profit grows, trail tighter to protect gains
+        const _trailPct = _profitPct > 0.025 ? pos.stopPct * 0.6  // locked 60% of gains
+                        : _profitPct > 0.015 ? pos.stopPct * 0.8  // locked 80% of entry risk
+                        : pos.stopPct;                              // normal stop
+        const _newStop = cp * (1 - _trailPct);
+        if(_newStop > this.portfolio[symbol].stopLoss) {
+          this.portfolio[symbol].stopLoss = +_newStop.toFixed(4);
+          this.portfolio[symbol].trailingStop = +_newStop.toFixed(4);
+        }
+      }
       const livePairWins=(this._pairStreak||{})[symbol]?.wins||0;
       const liveRegimeCont=pos.regime===this.marketRegime;
       const liveTrendRide=(this.marketRegime==="BULL"||(livePairWins>=2&&liveRegimeCont))&&!isScalp&&(pos.profitLocked||0)>0.3;
       if(liveTrendRide) {
-        const bullTrail=cp*0.96;
-        if(bullTrail>this.portfolio[symbol].trailingStop) this.portfolio[symbol].trailingStop=+bullTrail.toFixed(4);
+        // Progressive trailing: tighter as profit grows
+        const _openPnl = (cp - pos.entryPrice) / pos.entryPrice * 100;
+        const _trailPct = _openPnl > 5 ? 0.97 : _openPnl > 3 ? 0.965 : 0.96; // tighter trail as profit grows
+        const bullTrail = cp * _trailPct;
+        if(bullTrail > this.portfolio[symbol].trailingStop) {
+          this.portfolio[symbol].trailingStop = +bullTrail.toFixed(4);
+          // Auto-activate trend ride for BULL even before profitLocked threshold
+          this.portfolio[symbol].profitLocked = Math.max(pos.profitLocked||0, _openPnl*0.8);
+        }
+      }
+      // BULL: activate trend riding earlier (at 0.5% profit not 1.5%)
+      if(this.marketRegime==="BULL" && pos.strategy==="MOMENTUM" && !isScalp) {
+        const _pnlNow = (cp - pos.entryPrice) / pos.entryPrice * 100;
+        if(_pnlNow > 0.5) {
+          const _earlyTrail = cp * 0.97;
+          if(_earlyTrail > this.portfolio[symbol].trailingStop) {
+            this.portfolio[symbol].trailingStop = +_earlyTrail.toFixed(4);
+          }
+        }
       }
       const bearSell=this.marketRegime==="BEAR"&&pos.profitLocked<0&&ts.profitLocked<0;
       const posId=pos.posId||symbol;
+      // (time stop already computed above)
 
       // ── Cierre parcial: 50% al llegar al target ────────────────────────────
       if(!pos.partialClosed && pos.target && cp>=pos.target){
@@ -472,11 +570,11 @@ class CryptoBotFinal {
         continue;
       }
 
-      const scalpExit = pos.strategy==="SCALP" && pos.target && cp>=pos.target;
-      if(cp<=pos.stopLoss||ts.hit||scalpExit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
+      const mrTargetExit = pos.strategy==="MEAN_REVERSION" && pos.target && cp>=pos.target;
+      if(cp<=pos.stopLoss||ts.hit||mrTargetExit||sig?.signal==="SELL"||mrExit||bearSell||timeStop){
         const proceeds=pos.qty*cp*(1-fee),pnl=((cp-pos.entryPrice)/pos.entryPrice)*100-fee*100*2;
         this.cash+=proceeds;
-        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":scalpExit?"SCALP TARGET":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
+        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":mrTargetExit?"MR OBJETIVO":mrExit?"MR SEÑAL":bearSell?"BEAR EXIT":"SEÑAL VENTA";
         // Actualizar blacklist automática
         this.autoBlacklist.recordResult(symbol, pnl>0);
         const _leh = pos.ts ? new Date(pos.ts).getUTCHours() : new Date().getUTCHours();
@@ -490,18 +588,61 @@ class CryptoBotFinal {
           this.qLearning.lr = calcAdaptiveLR(0.1, _ls.length, _lwr);
         }
         delete this.portfolio[symbol];this.trailing.remove(symbol);
-        if(pnl<0)this.reentryTs[symbol]=Date.now();
+        if(pnl<0) {
+          // Smart cooldown: scales with loss size, can re-enter sooner if very strong signal
+          const _cooldown = pnl < -1.5 ? 4*3600000  // big loss: 4h cooldown
+                          : pnl < -0.5 ? 2*3600000  // normal loss: 2h
+                          : 30*60000;                // small loss: 30min only
+          this.reentryTs[symbol] = Date.now() + _cooldown - REENTRY_COOLDOWN;
+        }
         // DQN training on trade close
         if(this.dqn && pos.dqnState) {
-          const dqnNextState = this.dqn.encodeState({rsi:50,bbZone:"lower_half",regime:this.marketRegime,trend:"neutral",volumeRatio:1,atrLevel:1,fearGreed:this.fearGreed||50,lsRatio:1});
-          const dqnR = Math.max(-2,Math.min(2,pnl/100*20))+(pnl>0?0.3:0)+(reason==="PARTIAL TARGET"?0.4:0)+(reason==="STOP LOSS"?-0.5:0);
+          const _sH = new Date(Date.now()+2*3600000).getUTCHours();
+          const _bH2 = this.history["BTCUSDC"]||this.history["BTCUSDT"]||[];
+          const _bt2 = _bH2.length>=144?(_bH2[_bH2.length-1]-_bH2[_bH2.length-144])/_bH2[_bH2.length-144]*100:0;
+          const dqnNextState = this.dqn.encodeState({rsi:50,bbZone:"lower_half",regime:this.marketRegime,trend:"neutral",volumeRatio:1,atrLevel:1,fearGreed:this.fearGreed||50,lsRatio:this.longShortRatio?.ratio||1,sessionHour:_sH,winStreak:0,btcTrend24h:_bt2,volatilityPct:50});
+          // Reward shaping: P&L + time penalty + commission + consistency
+          const _holdHours = pos.ts ? (Date.now()-new Date(pos.ts).getTime())/3600000 : 0;
+          const _timePenalty = pnl <= 0 ? Math.min(0.3, _holdHours * 0.02) : 0; // penalizar tiempo si perdida
+          const _commPenalty = 0.15; // comisiones siempre cuestan (~0.15% por round trip)
+          const _recentSells = (this._cachedSells||this.log.filter(l=>l.type==="SELL")).slice(-5);
+          const _consWins = _recentSells.length>=3 && _recentSells.slice(-3).every(l=>l.pnl>0) ? 0.3 : 0;
+          // Sharpe-adjusted reward: penalize inconsistency (high variance = bad)
+          const _rs = (this._cachedSells||[]).slice(-20);
+          const _rAvg = _rs.length>0?_rs.reduce((s,x)=>s+x.pnl,0)/_rs.length:0;
+          const _rStd = _rs.length>1?Math.sqrt(_rs.reduce((s,x)=>s+Math.pow(x.pnl-_rAvg,2),0)/(_rs.length-1)):1;
+          const _sharpeBonus = _rStd>0.5 ? -0.1 : _rStd<0.2 ? 0.2 : 0; // reward low variance
+          const dqnR = Math.max(-2,Math.min(2,pnl/100*20))
+            + (pnl>0 ? 0.3 : 0)
+            + (reason==="PARTIAL TARGET" ? 0.4 : 0)
+            + (reason==="STOP LOSS" ? -0.5 : 0)
+            - _timePenalty
+            - _commPenalty
+            + _consWins
+            + _sharpeBonus;
           this.dqn.remember(pos.dqnState,"BUY",dqnR,dqnNextState);
           const liveSells=this.log.filter(l=>l.type==="SELL").length;
-          if(this.dqn.replayBuffer.length>=50&&liveSells%50===0) {
-            const loss=this.dqn.trainBatch();
-            console.log(`[DQN-LIVE] loss:${loss.toFixed(5)} updates:${this.dqn.totalUpdates}`);
+          // Counterfactual augmentation: generate variations of this trade to learn faster
+          // What if the stop had been tighter/wider? What if we exited earlier?
+          if(pos.dqnState && this.dqn) {
+            const cfVariations = [
+              { r: dqnR * 0.8, label:"tighter stop"  },  // what if stop was tighter
+              { r: dqnR * 1.2, label:"wider target"  },  // what if target was wider
+              { r: pnl>0 ? dqnR*0.5 : dqnR*1.5, label:"earlier exit" }, // earlier exit
+            ];
+            cfVariations.forEach(cf => {
+              this.dqn.remember(pos.dqnState, "BUY", cf.r, dqnNextState);
+            });
+            // Now we have 4x training signal (1 real + 3 synthetic)
           }
-          this.dqn.decayEpsilon(0.03,liveSells);
+          if(this.dqn.replayBuffer.length>=20) { // train more often now that we have augmentation
+            const loss=this.dqn.trainBatch(3); // 3 epochs per batch
+            if(liveSells%20===0) console.log(`[DQN-LIVE] loss:${loss.toFixed(5)} eps:${this.dqn.epsilon.toFixed(3)} buf:${this.dqn.replayBuffer.length}`);
+          }
+          // Adaptive epsilon decay: faster when WR is good (exploit), slower when bad (explore)
+          const _wrNow = this.recentWinRate()||50;
+          const _decayRate = _wrNow >= 55 ? 0.05 : _wrNow >= 45 ? 0.03 : 0.01;
+          this.dqn.decayEpsilon(_decayRate, liveSells);
         }
         const pnlAbs = +(pos.qty * cp * (pnl/100)).toFixed(2);
         const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),pnlAbs,reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
@@ -516,10 +657,26 @@ class CryptoBotFinal {
     const bestSignalScore = signals.filter(s=>s.signal==="BUY").reduce((m,s)=>Math.max(m,s.score),0);
 
     // Calcular regimeMin y golden slots ANTES del if para tenerlos en scope
-    // Losing streak protection: si las últimas 5 ops son pérdidas → ser más exigente
+    // Equity curve signal: is the system working right now?
+    const _equity3d = this.equity.slice(-1080); // ~3 days (360 ticks/day × 3)
+    const _eqTrend = _equity3d.length>=10
+      ? (_equity3d[_equity3d.length-1]?.v||0) - (_equity3d[0]?.v||0) : 0;
+    const _eqMult = _eqTrend > 0 ? Math.min(1.3, 1.0+_eqTrend/tv*2) // winning: bigger
+                  : _eqTrend < -tv*0.03 ? 0.6  // losing >3%: much smaller
+                  : _eqTrend < 0 ? 0.8 : 1.0;  // slight loss: smaller
+
+    // F&G momentum: rate of change matters as much as value
+    const _fgHistory = this._fgHistory = this._fgHistory||[];
+    if(this.fearGreed) { _fgHistory.push(this.fearGreed); if(_fgHistory.length>72) _fgHistory.shift(); }
+    const _fgMomentum = _fgHistory.length>=6
+      ? _fgHistory[_fgHistory.length-1] - _fgHistory[0] : 0;
+    // Rising F&G = sentiment improving → more aggressive
+    const _fgMomBoost = _fgMomentum > 15 ? 1.15 : _fgMomentum < -15 ? 0.80 : 1.0;
+
+    // Losing streak protection
     const _last5 = (this.log||[]).filter(l=>l.type==="SELL").slice(-5);
     const _losingStreak = _last5.length>=5 && _last5.every(l=>l.pnl<0);
-    const _streakPenalty = _losingStreak ? 8 : 0; // +8 al minScore si racha de pérdidas
+    const _streakPenalty = _losingStreak ? 8 : 0;
 
     const _regimeMinPre = this.marketRegime==="BULL" ? params.minScore-5 :
                           this.marketRegime==="BEAR" ? 82 :
@@ -527,7 +684,7 @@ class CryptoBotFinal {
                           params.minScore + _streakPenalty;
     const goldThreshold = Math.max(70, _regimeMinPre + 10);
     // Golden slots dinámicos: depende del cash libre y régimen
-    const _cashPct = this.cash / (this.totalValue() || 1);
+    const _cashPct = this.cash / (tv || 1);
     // Cash >40%: el cash es el límite natural → más permisivo
     // BULL: sin límite práctico si hay cash; LATERAL/BEAR: más conservador
     const _goldMax = this.marketRegime === "BULL"
@@ -537,9 +694,15 @@ class CryptoBotFinal {
 
     if((!dailyLimitReached || canUseGoldenSlot) && !this.marketDefensive){
       const nOpen=Object.keys(this.portfolio).length;
-      const maxPos=this.marketRegime==="BEAR"?1:this.profile.maxOpenPositions;
+      // Adaptive max positions by regime and WR
+      const _wrForMaxPos = this.recentWinRate()||50;
+      const _baseMaxPos = this.marketRegime==="BEAR"    ? 1 :
+                          this.marketRegime==="LATERAL" ? (_wrForMaxPos>=45?2:1) :
+                          this.marketRegime==="BULL"    ? (_wrForMaxPos>=45?3:2) : // BULL: 3 positions when learning
+                          this.profile.maxOpenPositions;
+      const maxPos = _baseMaxPos;
       if(nOpen<maxPos){
-        const reserve=this.totalValue()*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
+        const reserve=tv*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
         const regimeMin = _regimeMinPre; // ya calculado arriba
         // In LATERAL regime: extreme fear = mean reversion opportunity → LARGER positions
     // In BULL/BEAR: fear = reduce positions
@@ -549,7 +712,7 @@ class CryptoBotFinal {
         // Ajuste por confianza: baja confianza → posiciones más pequeñas
         const confAdj=this.confidence.get()<40?0.6:this.confidence.get()>75?1.1:1.0;
         const groupCount={};
-        Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
+        Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS_MAP.get(sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
 
         // Respetar pausa de Telegram
       if(this._pausedByTelegram) return {signals,newTrades,circuitBreaker:cb,optimizerResult:optResult,dailyLimit:dailyLimit,dailyUsed:this.dailyTrades.count,drawdownAlert};
@@ -562,13 +725,70 @@ class CryptoBotFinal {
         }).join(" ");
         console.log(`[LIVE][${this.marketRegime}] signals:${signals.length} top:${top} minScore:${regimeMin} fearAdj:${fearAdj.toFixed(2)} F&G:${this.fearGreed}`);
       }
+      // ── Strategy scoring: regime + session + meta-learning ─────────────────
+      const _parisH = new Date(Date.now()+2*3600000).getUTCHours();
+      const _stratW = this.stratEval?.getWeights?.(this.marketRegime)||null;
+      signals.forEach(s=>{
+        let _mult = 1.0;
+        if(this.marketRegime==="BULL") {
+          _mult = s.strategy==="MOMENTUM"?1.15:s.strategy==="MEAN_REVERSION"?0.80:0.90;
+        } else if(this.marketRegime==="LATERAL") {
+          _mult = s.strategy==="MEAN_REVERSION"?1.20:s.strategy==="MOMENTUM"?0.70:0.75;
+        } else if(this.marketRegime==="BEAR") {
+          _mult = s.strategy==="MEAN_REVERSION"?1.10:s.strategy==="MOMENTUM"?0.40:0.50;
+        }
+        // Session boost
+        const _sBoost = (_parisH>=1&&_parisH<9)?(s.strategy==="MEAN_REVERSION"?1.10:0.90):
+                        (_parisH>=9&&_parisH<12)?(s.strategy==="MOMENTUM"?1.15:s.strategy==="MEAN_REVERSION"?0.85:1.0):
+                        (_parisH>=15&&_parisH<18)?1.10:1.0;
+        // StrategyEvaluator learned adjustment
+        if(_stratW?.[s.strategy]) _mult *= _stratW[s.strategy];
+        s.score = Math.min(99, Math.max(0, Math.round(s.score * _mult * _sBoost)));
+      });
+
+      // Kelly Gate: real Kelly with rolling WR window
+      const _kellyData = calcRealKelly(this.log, 30);
+      this._kellyGate = _kellyData;
+      if(_kellyData.negative && _kellyData.n >= 10 && this.tick % 60 === 0)
+        console.log(`[KELLY-GATE] 🔴 Kelly=${_kellyData.raw} WR=${_kellyData.wr}% → OBSERVATION MODE (${_kellyData.n} trades)`);
+      const _kellyBlocked = _kellyData.negative && _kellyData.n >= 10;
+
+      // Kelly gate: if negative edge, no new entries
+      if(_kellyBlocked) {
+        if(this.tick % 30 === 0)
+          console.log(`[KELLY-GATE] Bloqueando ${signals.length} señales — WR rolling: ${_kellyData.wr}%`);
+        signals.length = 0; // clear signals - no new trades (in-place mutation)
+      }
       const buyable=signals.filter(s=>{
           // If limit reached, only allow this signal if it qualifies for golden slot
           if(dailyLimitReached && !((this._goldSlotCount||0) < 3 && s.score >= 85)) return false;
           if(s.signal!=="BUY"||s.score<regimeMin)return false;
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping||s.isFalling)return false;
+          // MR compound filter: price below VWAP AND market conditions right
+          const _h = this.history[s.symbol]||[];
+          // Kalman filter: avoid entering during pure noise (no real signal)
+          const _kalman = kalmanFilter(_h.slice(-30));
+          if(_kalman.confidence < 0.3 && s.strategy==="MOMENTUM") return false; // no trend = no momentum
+          if(s.strategy==="MEAN_REVERSION") {
+            const _vwap = _h.length>=20 ? _h.slice(-20).reduce((a,p)=>a+p,0)/20 : this.prices[s.symbol];
+            const _price = this.prices[s.symbol]||_vwap;
+            if(_price > _vwap * 1.003) return false; // must be at/below VWAP
+
+            // CRITICAL: In extreme panic (F&G<25), require bounce confirmation
+            // Don't catch falling knives - wait for 2 consecutive green candles
+            if(this.fearGreed < 30) {
+              const _last3 = _h.slice(-3);
+              const _bouncing = _last3.length>=3 && _last3[2]>_last3[1] && _last3[1]>_last3[0];
+              if(!_bouncing) return false; // no bounce confirmed yet
+            }
+            if(this.marketRegime==="LATERAL" && this.fearGreed > 55) return false;
+          }
           // ── Blacklist automática ──────────────────────────────────────────
+          // Dynamic pair cooldown: if pair lost 3x in a row recently, skip temporarily
+          const _pairLosses = (this._cachedSells||[]).filter(l=>l.symbol===s.symbol).slice(-3);
+          const _pairRecentLoss = _pairLosses.length>=3 && _pairLosses.every(l=>l.pnl<0);
+          if(_pairRecentLoss) { return false; } // soft cooldown for consistently losing pairs
           if(this.autoBlacklist.isBlacklisted(s.symbol)){
             this.riskLearning.recordDecision("BLACKLIST_LOSSES", s.symbol, this.prices[s.symbol]||0, "block_entry");
             return false;
@@ -609,19 +829,60 @@ class CryptoBotFinal {
           // Volume anomaly: boost size if anomalous volume in the right direction
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 60 ? 1.25 : 1.0;
+          const ofiBoost = 1.0; // OFI in test only
+          // Multi-pair confirmation: if 3+ correlated pairs signal BUY → stronger signal
+          const _sameDirSignals = signals.filter(s2 =>
+            s2.signal==="BUY" && s2.score>=regimeMin &&
+            ["major","alt1"].includes(PAIRS_MAP.get(s2.symbol)?.group)
+          ).length;
+          const multiPairBoost = _sameDirSignals >= 3 ? 1.30 :
+                                  _sameDirSignals >= 2 ? 1.15 : 1.0;
+          // BTC Dominance: si BTC.D alto, reducir exposición a altcoins
+          const _btcD = this.btcDominance;
+          const btcDomMult = (_btcD?.signal === "BTC_DOMINANT_AVOID_ALTS" && sig.symbol !== "BTCUSDC" && sig.symbol !== "BTCUSDT")
+            ? 0.7  // altcoins suffer when BTC dominance high
+            : (_btcD?.signal === "ALTSEASON_FAVORABLE" ? 1.15 : 1.0);
           const newsMultiplier = this._cryptoPanicFn ? this._cryptoPanicFn(sig.symbol) : (this._newsMultiplier||1.0);
           const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
           // DQN guidance in live
           let liveDqnBoost = 1.0;
           if(this.dqn && this.dqn.totalUpdates > 0) {
+            const _sessionH = new Date(Date.now()+2*3600000).getUTCHours();
+            const _recentW = (this._cachedSells||[]).slice(-5);
+            const _wStreak = _recentW.reduce((s,t)=>t.pnl>0?s+1:s-1, 0);
+            // BTC 24h trend: is market falling over multiple days? (crisis detector)
+            const _btcH = this.history["BTCUSDC"]||this.history["BTCUSDT"]||[];
+            const _btc24hTrend = _btcH.length>=144
+              ? (_btcH[_btcH.length-1]-_btcH[_btcH.length-144])/_btcH[_btcH.length-144]*100
+              : 0; // 144 ticks × 10s = 24h
+            // Volatility percentile: high ATR vs recent history
+            const _atrHistory = Object.values(this.history||{}).slice(0,5)
+              .map(h=>h.length>14?atr(h,14)/(h[h.length-1]||1)*100:2);
+            const _volPct = _atrHistory.length
+              ? _atrHistory.reduce((s,v)=>s+v,0)/_atrHistory.length * 10
+              : 50;
             const liveDqnState = this.dqn.encodeState({
-              rsi:sig.rsiVal||50, bbZone:sig.bbPos<0.2?"below_lower":sig.bbPos<0.5?"lower_half":"upper_half",
-              regime:this.marketRegime, trend:"neutral",
-              volumeRatio:1, atrLevel:sig.atrPct||1, fearGreed:this.fearGreed||50, lsRatio:1
+              rsi: sig.rsiVal||50,
+              bbZone: sig.bbPos<0.2?"below_lower":sig.bbPos<0.5?"lower_half":sig.bbPos<0.8?"upper_half":"above_upper",
+              regime: this.marketRegime,
+              trend: sig.score>75?"strong_up":sig.score>60?"up":sig.score<40?"down":"neutral",
+              volumeRatio: (this.volumeHistory?.[sig.symbol]?.slice(-3)?.reduce((s,v)=>s+v,0)/3||1) / (this.volumeHistory?.[sig.symbol]?.slice(-20)?.reduce((s,v)=>s+v,0)/20||1),
+              atrLevel: sig.atrPct||1,
+              fearGreed: this.fearGreed||50,
+              lsRatio: this.longShortRatio?.ratio||1,
+              sessionHour: _sessionH,
+              winStreak: _wStreak,
+              btcTrend24h: _btc24hTrend,
+              volatilityPct: Math.min(100, _volPct),
+              institutionalBias: (this.coinbasePremium?.signal==="INSTITUTIONAL_BUY" ? 1 :
+                                  this.coinbasePremium?.signal==="INSTITUTIONAL_SELL" ? -1 :
+                                  this.exchangeFlow?.bullish===true ? 0.5 :
+                                  this.exchangeFlow?.bullish===false ? -0.5 : 0)
             });
             const liveDqnQ = this.dqn.getQValues(liveDqnState);
-            liveDqnBoost = liveDqnQ.BUY > liveDqnQ.SKIP + 0.3 ? 1.1 :
-                           liveDqnQ.SKIP > liveDqnQ.BUY + 0.5 ? 0.7 : 1.0;
+            // Smooth proportional boost based on Q value difference
+            const _qDiff = liveDqnQ.BUY - liveDqnQ.SKIP;
+            liveDqnBoost = Math.max(0.6, Math.min(1.3, 1.0 + _qDiff * 0.15));
             sig._dqnState = liveDqnState;
           }
           const _lKelly = calcAdaptiveKelly(1.0, this.portfolio, this.prices, this.history);
@@ -629,8 +890,34 @@ class CryptoBotFinal {
           const _maBoost = this.multiAgent
             ? this.multiAgent.getSignalBoost(sig.symbol, this.marketRegime, sig.score)
             : 1.0;
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost*_lKelly*_maBoost;
-          if(invest<10||invest>availCash)continue;
+          // Pair performance: reduce size for pairs with poor recent history
+          const _pairScore = (this.pairScores||{})[sig.symbol]||0;
+          const _pairMult = _pairScore < -3 ? 0.6 : _pairScore < -1 ? 0.8 : _pairScore > 3 ? 1.1 : 1.0;
+          // Funding rate: extreme negative = shorts paying, long advantage
+          const _fr = this.fundingRate?.value||0;
+          const fundingBoost = _fr < -0.05 ? 1.20 : _fr < -0.02 ? 1.10 : _fr > 0.05 ? 0.80 : 1.0;
+          // Liquidations: short squeeze risk = good for MR entries
+          const _liqs = this.liquidations||null;
+          const liqBoost = _liqs?.signal==="SHORT_SQUEEZE_RISK" && sig.strategy==="MEAN_REVERSION" ? 1.2
+                         : _liqs?.signal==="LONG_FLUSH_RISK" ? 0.75 : 1.0;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*confAdj*newsMultiplier*corrMult*volBoost*liveDqnBoost*_lKelly*_maBoost*_pairMult*btcDomMult*multiPairBoost*fundingBoost*liqBoost*_eqMult*_fgMomBoost*institutionalBoost*flowBoost*reserveBoost*ofiBoost;
+          // BULL: can risk more per position (trend is our friend)
+          // Regime-weighted capital deployment
+          // BULL: aggressive (80% deployable), LATERAL: moderate, BEAR: defensive
+          const _deployPct = this.marketRegime==="BULL"    ? 0.80 :
+                             this.marketRegime==="LATERAL" ? 0.50 :
+                             this.marketRegime==="BEAR"    ? 0.15 : 0.40;
+          const _maxInvest = tv * (_deployPct / Math.max(1, Object.keys(this.portfolio).length+1));
+          const _hardMax   = tv * (this.marketRegime==="BULL" ? 0.60 : 0.45);
+          const maxInvestPerTrade = Math.min(_maxInvest, _hardMax);
+          if(invest<15||invest>Math.min(availCash,maxInvestPerTrade))continue; // $15 min, 45% max
+          // Profit mínimo: el target debe superar 2.5× el fee del round trip
+          const _feeRt = fee * 2; // round trip fee (buy + sell)
+          const _minProfit = _feeRt * 2.5; // profit debe ser 2.5x el coste total en fees
+          const _expectedProfit = sig.strategy==="SCALP" ? 0.008 :
+                                  sig.strategy==="MEAN_REVERSION" ? 0.012 :
+                                  sig.strategy==="MOMENTUM" ? 0.015 : 0.010;
+          if(_expectedProfit < _minProfit) continue; // no vale la pena vs fees
           // Slippage estimation: pares poco líquidos (OP, ARB, NEAR) tienen mayor slippage
           const ILLIQUID = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC"];
           const slippageFactor = ILLIQUID.includes(sig.symbol) ? 0.998 : 0.9995; // 0.2% o 0.05%
@@ -644,13 +931,33 @@ class CryptoBotFinal {
           const _learnedPct = this.adaptiveStop
             ? this.adaptiveStop.getStop(sig.symbol, this.marketRegime, new Date().getUTCHours(), dynStop.stopPct||0.03)
             : (dynStop.stopPct||0.03);
-          const stopLoss = price * (1 - _learnedPct);
-          const target=price+(price-stopLoss)*2; // target 2:1 R:R para cierre parcial
+          // Dynamic ATR-based targets: capture the NATURAL move size
+          // ATR = average true range = what the asset actually moves on average
+          const _atrVal = atr(this.history[sig.symbol]||[price], 14);
+          const _atrPct = (_atrVal / price) * 100;
+          let _stopPct, _targetPct, _useTrailing;
+          if(sig.strategy==="MEAN_REVERSION") {
+            _stopPct    = Math.min(_learnedPct, 0.010);
+            // ATR-based target: 2× stop minimum, up to 2× ATR
+            _targetPct  = Math.max(_stopPct * 2.0, Math.min(_atrPct * 2.0, _stopPct * 3.0));
+            _useTrailing= false;
+          } else if(sig.strategy==="MOMENTUM" && this.marketRegime==="BULL") {
+            _stopPct    = Math.min(_learnedPct, 0.015);
+            // In BULL: target = 2.5× ATR (captures full momentum move)
+            _targetPct  = Math.max(_stopPct * 2.5, _atrPct * 2.5);
+            _useTrailing= true;
+          } else {
+            _stopPct    = Math.min(_learnedPct, 0.012);
+            _targetPct  = Math.max(_stopPct * 2.0, _atrPct * 1.5);
+            _useTrailing= false;
+          }
+          const stopLoss = price * (1 - _stopPct);
+          const target   = price * (1 + _targetPct);
           const posId=`${sig.symbol}_${Date.now()}`;
           this.cash = Math.max(0, this.cash - invest); // nunca permitir cash negativo
           // Recalcular availCash para el siguiente trade en este tick
           availCash = Math.max(0, this.cash - this.totalValue()*MIN_CASH_RESERVE);
-          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM",target:+target.toFixed(4),partialClosed:false,posId,dynStopInfo:dynStop,dqnState:sig._dqnState||null};
+          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM",target:+target.toFixed(4),partialClosed:false,posId,dynStopInfo:dynStop,dqnState:sig._dqnState||null,useTrailing:_useTrailing,stopPct:_stopPct};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"MOMENTUM"};
           newTrades.push(trade);this.dailyTrades.count++;
           const g=PAIRS.find(p=>p.symbol===sig.symbol)?.group||"";groupCount[g]=(groupCount[g]||0)+1;
@@ -714,7 +1021,14 @@ class CryptoBotFinal {
       fearGreed:this.fearGreed,dailyTrades:this.dailyTrades,dailyLimit,goldSlotCount:this._goldSlotCount||0,
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
-      useBnb:this.useBnb,recentWinRate:wr,
+      useBnb:this.useBnb,declaredCapital:this.declaredCapital,recentWinRate:wr,
+      coinbasePremium: this.coinbasePremium||null,
+      exchangeFlow: this.exchangeFlow||null,
+      binanceReserve: this.binanceReserve||null,
+      profitFactor: (()=>{ const s=this._cachedSells||[]; if(s.length<5) return null;
+        const wins=s.slice(-30).filter(x=>x.pnl>0).reduce((a,x)=>a+x.pnl,0)||0.001;
+        const loss=Math.abs(s.slice(-30).filter(x=>x.pnl<0).reduce((a,x)=>a+x.pnl,0))||0.001;
+        return +(wins/loss).toFixed(2); })(),
       priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
       volumeAnomaly:Object.fromEntries(Object.keys(this.volumeHistory||{}).map(k=>[k,getVolumeAnomaly(this.volumeHistory,k)])),
       riskLearningStats:this.riskLearning.getStats(),

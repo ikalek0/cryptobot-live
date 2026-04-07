@@ -156,6 +156,16 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 .kpi-sub2{font-size:10px;color:var(--dim2);margin-top:2px}
 .kpi-value.gold{color:var(--gold)}
 @media(max-width:768px){.row-4{grid-template-columns:repeat(2,1fr)}.filter-bar{gap:8px}}
+.srow{display:grid;grid-template-columns:4px 1fr auto auto auto;gap:10px;align-items:center;padding:9px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);transition:border-color .2s;font-size:12px}
+.srow.ac1{border-color:var(--blue);background:#f0f5fa}.srow.ac2{border-color:var(--gold);background:#faf8f0}
+.scapa{border-radius:2px;align-self:stretch;min-height:32px}
+.scapa.c1{background:var(--blue)}.scapa.c2{background:var(--gold)}
+.stag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:9px;letter-spacing:1px;font-weight:600}
+.stag.c1{background:rgba(29,111,164,.15);color:var(--blue)}.stag.c2{background:rgba(184,147,42,.15);color:var(--gold)}
+.sstatus{font-size:10px;padding:2px 7px;border-radius:10px;letter-spacing:1px;font-weight:500}
+.sstatus.open{background:rgba(26,122,74,.15);color:var(--green)}
+.sstatus.kneg{background:rgba(192,57,43,.15);color:var(--red)}
+.sstatus.wait{background:rgba(138,130,120,.15);color:var(--dim)}
 </style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
 </head>
@@ -179,6 +189,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <button class="nav-tab" onclick="showPanel('portfolio',this)">Posiciones</button>
     <button class="nav-tab" onclick="showPanel('log',this)">Operaciones</button>
     <button class="nav-tab" onclick="showPanel('risk',this)">Riesgo</button>
+    <button class="nav-tab" onclick="showPanel('strategies',this)">Estrategias</button>
   </div>
   <div class="hdr-right">
     <span class="tick-counter">Tick <span id="tick-num">—</span></span>
@@ -328,6 +339,55 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <div class="card-title">Posiciones abiertas con trailing stop</div>
     <div id="portfolio-full">
       <div style="text-align:center;padding:30px;color:var(--dim);font-style:italic">Sin posiciones abiertas</div>
+    </div>
+  </div>
+</div>
+
+<!-- STRATEGIES -->
+<div class="panel" id="panel-strategies">
+  <div class="row row-2" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">KELLY GATE — Estado global</div>
+      <div id="kelly-status" style="padding:8px">
+        <div style="text-align:center;color:var(--dim);font-size:12px">Cargando...</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Capital por capa</div>
+      <div style="display:flex;flex-direction:column;gap:10px;padding:4px 0" id="capa-capital">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;color:var(--dim2)">Capa 1 (30m/1h)</span>
+          <span style="font-weight:600;color:var(--blue)" id="s-c1cash">—</span>
+        </div>
+        <div style="height:1px;background:var(--border)"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;color:var(--dim2)">Capa 2 (4h/1d)</span>
+          <span style="font-weight:600;color:var(--gold)" id="s-c2cash">—</span>
+        </div>
+        <div style="height:1px;background:var(--border)"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;color:var(--dim2)">En posiciones</span>
+          <span style="font-weight:600" id="s-invested">—</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11px;color:var(--dim2)">Win Rate global</span>
+          <span style="font-weight:600" id="s-wr">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">7 Estrategias validadas — Estado en tiempo real</div>
+    <div id="simple-strategies" style="display:flex;flex-direction:column;gap:8px;padding:4px 0">
+      <div style="text-align:center;color:var(--dim);font-size:12px;padding:20px">
+        Acumulando velas... (hasta 60 min para primera señal en 1h)
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Operaciones del engine validado</div>
+    <div id="simple-log" style="max-height:300px;overflow-y:auto">
+      <div style="text-align:center;color:var(--dim);font-size:12px;padding:20px;font-style:italic">Sin operaciones aún</div>
     </div>
   </div>
 </div>
@@ -498,7 +558,7 @@ function showPanel(id, btn) {
 const fU  = n => "$" + Number(n||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const fP  = n => (n>=0?"+":"") + Number(n||0).toFixed(2) + "%";
 const fPn = n => Number(n||0).toFixed(2) + "%";
-const clr = n => n>=0 ? "var(--green)" : "var(--red)";
+const clr = n => n>0.001 ? "var(--green)" : n<-0.001 ? "var(--red)" : "var(--dim2)";
 const fD  = ts => new Date(ts).toLocaleString("es-ES",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
 const fT  = ts => new Date(ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"});
 
@@ -548,7 +608,7 @@ function setPairFilter(pair) {
   drawChart();
 }
 
-const KNOWN_PAIRS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","XRPUSDC","ADAUSDC","AVAXUSDC","DOTUSDC","LINKUSDC","UNIUSDC","AAVEUSDC","LTCUSDC","MATICUSDC","OPUSDC","ARBUSDC","ATOMUSDC","NEARUSDC","APTUSDC"];
+const KNOWN_PAIRS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","XRPUSDC","ADAUSDC","AVAXUSDC","DOTUSDC","LINKUSDC","UNIUSDC","AAVEUSDC","LTCUSDC","MATICUSDC","OPUSDC","ARBUSDC","ATOMUSDC","NEARUSDC","APTUSDC","BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","LINKUSDT"];
 function updatePairSelector(portfolio, trades) {
   const sel = document.getElementById("pair-selector");
   if (!sel) return;
@@ -799,8 +859,8 @@ function render() {
   const s = state;
 
   // Header
-  document.getElementById("tick-num").textContent = s.tick||0;
-  document.getElementById("mode-badge").textContent = s.instance||s.mode||"LIVE";
+  const _tn=document.getElementById("tick-num"); if(_tn) _tn.textContent=s.tick||0;
+  const _mb=document.getElementById("mode-badge"); if(_mb) _mb.textContent=s.instance||s.mode||"LIVE";
 
   // KPIs
   const tv = s.totalValue||0;
@@ -811,8 +871,7 @@ function render() {
   const invested = tv - (s.cash||0);
   const cashPct = tv>0 ? (s.cash/tv*100) : 100;
 
-  document.getElementById("kpi-total").textContent = fCur(tv);
-  document.getElementById("kpi-total").style.color = "var(--blue)";
+  const _kt=document.getElementById("kpi-total"); if(_kt){_kt.textContent=fCur(tv);_kt.style.color="var(--blue)";}
 
   // Rendimiento — no "pérdida", siempre con signo
   // Period-aware return
@@ -821,8 +880,8 @@ function render() {
   const periodRet = periodStartVal > 0 ? ((tv - periodStartVal) / periodStartVal * 100) : ret;
   const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","YTD":"este año","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
   const retEl = document.getElementById("kpi-return");
-  retEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"% "+periodLabel;
-  retEl.style.color = clr(periodRet);
+  if(retEl) retEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"% "+periodLabel;
+  if(retEl) retEl.style.color = clr(periodRet);
   // Absolute gain (capital total - initial capital aportado)
   const gainEl = document.getElementById("kpi-gain-abs");
   if(gainEl) {
@@ -843,7 +902,7 @@ function render() {
 
   // kpi-cash moved to kpi-cash-info subtitle
 
-  document.getElementById("kpi-invested").textContent = fCur(invested);
+  const _ki=document.getElementById("kpi-invested"); if(_ki) _ki.textContent=fCur(invested);
   const nPos = Object.keys(s.portfolio||{}).length;
   const cashInfoEl = document.getElementById("kpi-cash-info");
   if(cashInfoEl) { cashInfoEl.textContent = "efectivo: "+fCur(s.cash||0)+" ("+cashPct.toFixed(0)+"%)"; }
@@ -878,15 +937,15 @@ function render() {
     : "Sin datos";
   const sells = allSells.length;
   const periodWins2 = periodSells.filter(l=>l.pnl>0).length;
-  document.getElementById("kpi-ops").textContent = periodWins2+" ganadoras / "+periodSells.length+" ops";
+  const _ko=document.getElementById("kpi-ops"); if(_ko) _ko.textContent=periodWins2+" ganadoras / "+periodSells.length+" ops";
 
   // Rendimiento PERÍODO — se ajusta al período seleccionado
   const todayEl = document.getElementById("kpi-today");
-  todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
-  todayEl.style.color = clr(periodRet);
+  if(todayEl) todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
+  if(todayEl) todayEl.style.color = clr(periodRet);
   const _periodAbsPnl = tv - periodStartVal;
   document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(_periodAbsPnl>=0?"+":"-")+fCur(Math.abs(_periodAbsPnl));
-  document.getElementById("kpi-today-sub").style.color = clr(periodRet);
+  document.getElementById("kpi-today-sub").style.color = clr(_periodAbsPnl!=null?_periodAbsPnl:periodRet);
   const _accEl = document.getElementById("kpi-today-accent");
   if(_accEl) _accEl.className = "kpi-accent " + (periodRet>=0?"green":"red");
   const acc = document.getElementById("kpi-today-accent");
@@ -899,7 +958,8 @@ function render() {
   if (!window._chartResizeAdded) { window._chartResizeAdded=true; window.addEventListener("resize",()=>requestAnimationFrame(drawChart)); }
   try { updatePairSelector(s.portfolio, s.log); } catch(e) {}
 
-  // Mercado
+  // Mercado — each section independent so partial failure doesn't kill others
+  // Section 1: Régimen + F&G
   try {
   const regime = s.marketRegime||"UNKNOWN";
   const rb = document.getElementById("regime-badge");
@@ -911,7 +971,29 @@ function render() {
   const fgSrc = s.fearGreedSource ? " ("+s.fearGreedSource+")" : "";
   const fgDate = fgTime ? " · "+fgTime+fgSrc : fgSrc;
   const _fgEl=document.getElementById("fg-val"); if(_fgEl) _fgEl.textContent = fg+" — "+fgLabel+fgDate;
+  } catch(e1i) { console.warn("[fg]",e1i.message); }
 
+  // Institutional data display (if available)
+  try {
+  const _cbp = s.coinbasePremium;
+  const _ef  = s.exchangeFlow;
+  const _br  = s.binanceReserve;
+  const _instEl = document.getElementById("institutional-val");
+  if(_instEl && (_cbp||_ef)) {
+    const cbLabel = _cbp?.signal==="INSTITUTIONAL_BUY" ? "🏦 Inst.COMPRANDO" :
+                    _cbp?.signal==="INSTITUTIONAL_SELL"? "🏦 Inst.VENDIENDO" :
+                    _cbp?.bullish ? "🏦 Leve compra" : _cbp ? "🏦 Leve venta" : "";
+    const efLabel = _ef?.signal==="ACCUMULATION_STRONG" ? "📦 Acumulación" :
+                    _ef?.signal==="DISTRIBUTION_STRONG" ? "📤 Distribución" : "";
+    const parts = [cbLabel, efLabel].filter(Boolean).join(" · ");
+    _instEl.textContent = parts || "Datos institucionales: neutral";
+    _instEl.style.color = _cbp?.bullish&&_ef?.bullish ? "var(--green)" :
+                          !_cbp?.bullish&&!_ef?.bullish ? "var(--red)" : "var(--dim)";
+  }
+  } catch(e1) { console.warn("[mercado-fg]", e1.message); }
+
+  // Section 2: Ops, Límite, Circuit Breaker, Drawdown, Fees, Momentum
+  try {
   // Period-filtered operations count (using already-defined periodMs + periodSells)
   const periodOpsCount = currentPeriod==="ALL" ? (s.log||[]).filter(l=>l.type==="SELL").length : periodSells.length;
   const _dopsEl=document.getElementById("daily-ops"); if(_dopsEl) _dopsEl.textContent = periodSells.length+" operaciones";
@@ -1272,6 +1354,84 @@ function drawPairChart() {
 
 document.querySelectorAll(".nav-tab").forEach(btn=>{
   btn.addEventListener("click",()=>{ if(state) { renderSignals(state); renderRisk(state); } });
+
+// ── Simple engine polling ─────────────────────────────────────────────────
+async function fetchSimpleState() {
+  try {
+    const s = await fetch('/api/simple').then(r=>r.json()).catch(()=>null);
+    if(!s||s.loading) return;
+    // Capa capital
+    const c1 = document.getElementById('s-c1cash');
+    const c2 = document.getElementById('s-c2cash');
+    const inv = document.getElementById('s-invested');
+    const wr = document.getElementById('s-wr');
+    if(c1) c1.textContent = fCur(s.capa1Cash||0);
+    if(c2) c2.textContent = fCur(s.capa2Cash||0);
+    const inPos = Object.values(s.portfolio||{}).reduce((sum,p)=>sum+((p.qty||0)*(p.entryPrice||0)),0);
+    if(inv) inv.textContent = fCur(inPos);
+    if(wr) { const w=s.winRate||0; wr.textContent=w+'%'; wr.style.color=w>=40?'var(--green)':w>=30?'var(--gold)':'var(--red)'; }
+    // Kelly status
+    const ks = document.getElementById('kelly-status');
+    if(ks && s.kellyByStrategy) {
+      const strats = Object.entries(s.kellyByStrategy);
+      const blocked = strats.filter(([,k])=>k.negative&&k.n>=10).length;
+      const active = strats.filter(([,k])=>!k.negative||k.n<10).length;
+      ks.innerHTML = `<div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:10px;color:var(--dim2);letter-spacing:1px">ESTRATEGIAS ACTIVAS</div>
+        <div style="font-size:22px;font-weight:700;color:var(--green)">${active}</div></div>
+        <div><div style="font-size:10px;color:var(--dim2);letter-spacing:1px">KELLY BLOQUEADAS</div>
+        <div style="font-size:22px;font-weight:700;color:${blocked>0?'var(--red)':'var(--green)'}">${blocked}</div></div>
+        <div><div style="font-size:10px;color:var(--dim2);letter-spacing:1px">TRADES TOTALES</div>
+        <div style="font-size:22px;font-weight:700">${s.trades||0}</div></div>
+        <div><div style="font-size:10px;color:var(--dim2);letter-spacing:1px">WIN RATE</div>
+        <div style="font-size:22px;font-weight:700;color:${(s.winRate||0)>=40?'var(--green)':'var(--red)'}">${s.winRate||0}%</div></div>
+      </div>`;
+    }
+    // Strategies
+    const sl = document.getElementById('simple-strategies');
+    if(sl && s.strategies?.length) {
+      sl.innerHTML = s.strategies.map(st => {
+        const cc = st.capa===1?'c1':'c2';
+        const rc = st.active?(st.capa===1?'ac1':'ac2'):'';
+        const k = st.kelly||{};
+        const neg = k.negative && (k.n||0)>=10;
+        const kstr = k.wr!=null?`WR:${k.wr}% Kelly:${k.kelly}`:(`Kelly:${st.kelly?.toFixed?.(3)||st.kelly}`);
+        const sc = st.active?'open':neg?'kneg':'wait';
+        const sl2 = st.active?'● ABIERTA':neg?'○ KELLY NEG':'○ ESPERANDO';
+        const need = st.tf==='1d'?200:50;
+        const candles = st.candles||0;
+        return `<div class="srow ${rc}">
+          <div class="scapa ${cc}"></div>
+          <div>
+            <div style="font-weight:600">${st.pair} <span class="stag ${cc}">C${st.capa}</span> <span style="color:var(--dim2)">${st.type} ${st.tf}</span></div>
+            <div style="font-size:10px;color:var(--dim2);margin-top:2px">Stop ${(st.stop*100).toFixed(1)}% / Target ${(st.target*100).toFixed(1)}% · ${kstr} · PF:${st.pf}</div>
+          </div>
+          <div style="font-size:10px;color:var(--dim2)" title="Velas">${candles}/${need}</div>
+          <div style="font-size:11px;color:${neg?'var(--red)':'var(--green)'}">PF:${st.pf}</div>
+          <div class="sstatus ${sc}">${sl2}</div>
+        </div>`;
+      }).join('');
+    }
+    // Log
+    const ll = document.getElementById('simple-log');
+    if(ll && s.log?.length) {
+      const items = s.log.filter(l=>l.type==='SELL'||l.type==='BUY').slice(-30).reverse();
+      if(items.length) ll.innerHTML = items.map(l => {
+        const ts = new Date(l.ts).toLocaleString('es-ES',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+        const pnlStr = l.pnl!=null?`<span style="color:${l.pnl>0?'var(--green)':'var(--red)';font-weight:600">${l.pnl>0?'+':''}${l.pnl.toFixed(2)}%</span>`:'';
+        return `<div style="display:flex;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);font-size:12px;align-items:baseline">
+          <span style="font-weight:700;color:${l.type==='BUY'?'var(--green)':'var(--blue)';min-width:34px}">${l.type}</span>
+          <span>${l.symbol||''}</span>
+          <span style="font-size:10px;color:var(--dim2)">${l.strategy||''}</span>
+          ${pnlStr}
+          <span style="margin-left:auto;font-size:10px;color:var(--dim)">${ts}</span>
+        </div>`;
+      }).join('');
+    }
+  } catch(e) { console.warn('[simple]', e); }
+}
+setInterval(fetchSimpleState, 15000);
+fetchSimpleState();
 });
 </script>
 </body>

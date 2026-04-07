@@ -8,6 +8,8 @@ const http       = require("http");
 const path       = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
+const { ensureTradeLogTable } = require("./trade_logger");
+const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
@@ -16,8 +18,9 @@ const { ClientBotManager } = require("./clientManager");
 const clientManager = new ClientBotManager();
 const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
-const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment } = require("./feeds");
+const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment, fetchLiquidations, fetchBTCDominance, fetchCoinbasePremium, fetchExchangeFlow, fetchBinanceReserve } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
+const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 
 const PORT    = process.env.PORT    || 3000;
@@ -59,24 +62,95 @@ async function initBot() {
     liveReady = false;
     liveStartTime = Date.now() + LIVE_START_DELAY_MS;
     console.log(`[LIVE] ⏳ Primer arranque — esperando 1 hora para que el paper acumule datos…`);
-    tg.send && tg.send("⏳ <b>LIVE iniciado por primera vez</b>\nEsperando 1 hora para que el paper acumule datos antes de operar.");
+    tg.send && tg.send("✅ <b>LIVE iniciado</b> — Esperando datos del paper.");
     setTimeout(() => {
       liveReady = true;
       console.log("[LIVE] ✅ 1 hora transcurrida — bot LIVE listo para operar");
-      tg.send && tg.send("🎯 <b>LIVE activado</b> — El bot empieza a operar.");
+// live activated - no notification
     }, LIVE_START_DELAY_MS);
   } else {
     console.log(`[LIVE] ♻️ Reinicio detectado — operando inmediatamente (estado restaurado)`);
   }
 
   console.log(`\n[LIVE] Modo: ${bot.mode} | Capital: $${CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
+
+// ── SimpleBotEngine — 7 estrategias validadas ──────────────────────────
+let simpleBot = null;
+try {
+  const savedSimple = await db.loadSimpleState().catch(()=>null);
+  simpleBot = new SimpleBotEngine(savedSimple || {});
+  console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
+  simpleBot.setContext(client, "live", bot?.marketRegime||"UNKNOWN", bot?.fearGreed||50);
+} catch(e) {
+  console.warn("[SIMPLE] Error init:", e.message);
+  simpleBot = new SimpleBotEngine({});
+}
   tg.notifyStartup(bot.mode + " (instancia controlada)");
   tg.testTelegram && tg.testTelegram();
-  tg.scheduleReports(() => ({ ...bot.getState(), instance:bot.mode }));
+  // Auto reports disabled — use /situacion on demand
   tgControls = tg.startCommandListener(
   () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
-  { getBalance: getAccountBalance, setPaused: (v) => { if(bot) bot._pausedByTelegram=v; } }
+  {
+    getBalance:    getAccountBalance,
+    setPaused:     (v) => { if(bot) bot._pausedByTelegram=v; },
+    getSimpleState: () => simpleBot?.getState() || null,
+    setCapital:    (v) => {
+      CAPITAL_USDT = v;
+      if(bot) { if(bot.cash>v) bot.cash=v; }
+      if(simpleBot) {
+        simpleBot.capa1Cash = v*0.60;
+        simpleBot.capa2Cash = v*0.40;
+      }
+      console.log("[TG] Capital actualizado a $"+v);
+    },
+  }
 );
+
+  // Startup historical simulation: teach DQN about crisis before facing real market
+  // Live bot gets a condensed version: 2022 crash + recent 30 days only
+  setTimeout(async () => {
+    if(!bot || !bot.dqn) return;
+    console.log("[HistSim-LIVE] Entrenando DQN con datos históricos de crisis...");
+    const crisis_pairs = ["BTCUSDC","ETHUSDC","SOLUSDC"];
+    const periods = [
+      { start:"2022-05-01", end:"2022-06-30", label:"Crash LUNA/2022" },
+      { start:"2022-11-01", end:"2022-12-31", label:"Crash FTX/2022" },
+    ];
+    let simTrades = 0;
+    for(const pair of crisis_pairs) {
+      for(const period of periods) {
+        try {
+          const klines = await fetchAllKlines(pair, "5m", period.start, period.end);
+          if(!klines || klines.length < 50) continue;
+          // Simulate simplified learning: treat each 5% drop as a failed MR signal
+          for(let i=20; i<klines.length-5; i++) {
+            const window = klines.slice(i-20,i).map(k=>k.close);
+            const rsiVal = window.length>=14 ? (()=>{
+              let gains=0,losses=0;
+              for(let j=1;j<14;j++){const d=window[j]-window[j-1];d>0?gains+=d:losses+=-d;}
+              return 100-100/(1+gains/14/(losses/14||0.001));
+            })() : 50;
+            const pnl5 = (klines[i+5].close - klines[i].close) / klines[i].close * 100;
+            const isDowntrend = klines[i].close < klines[Math.max(0,i-12)].close * 0.97;
+            // In a crisis downtrend, MR entries fail → teach SKIP
+            if(isDowntrend && rsiVal < 40) {
+              const state = bot.dqn.encodeState({
+                rsi: rsiVal, bbZone:"below_lower", regime:"LATERAL",
+                trend: isDowntrend?"down":"neutral", fearGreed: 20,
+                btcTrend24h: -5, volatilityPct: 80
+              });
+              bot.dqn.remember(state, "BUY", pnl5>0?0.5:-0.8, state);
+              simTrades++;
+            }
+          }
+          if(bot.dqn.replayBuffer.length>=20) bot.dqn.trainBatch(2);
+          console.log("[HistSim-LIVE] "+period.label+" "+pair+" — "+simTrades+" trades sintéticos");
+        } catch(e) { /* non-blocking */ }
+      }
+    }
+    console.log("[HistSim-LIVE] ✅ "+simTrades+" trades de crisis aprendidos por DQN");
+  }, 15000); // 15s después del arranque
+
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
 
   // CRÍTICO: limpiar estado huérfano ANTES de empezar el loop
@@ -163,6 +237,7 @@ app.get("/api/summary", (_,res) => {
   });
 });
 
+app.get("/api/simple", (_,res) => res.json(simpleBot ? simpleBot.getState() : {loading:true}));
 app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory,dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:bot?.tick,uptime:process.uptime(),tv:bot?.totalValue()}));
 
@@ -237,11 +312,11 @@ app.post("/api/sync/params", (req,res) => {
   if (result.adopted && bot) {
     Object.assign(bot.optimizer.params, result.newParams);
     console.log(`[SYNC] ✅ ${result.bootstrap?"Bootstrap":"Estricto"}: ${result.reason}`);
-    tg.notifyParamsAdopted(result);
+
     save().catch(()=>{});
   } else {
     console.log(`[SYNC] ⏸ ${result.reason}`);
-    tg.notifyParamsRejected(result);
+
   }
 
   res.json({ adopted:result.adopted, reason:result.reason });
@@ -296,7 +371,7 @@ app.post("/api/sync/daily", (req,res) => {
   while (syncHistory.length > 120) syncHistory.shift();
   save().catch(()=>{});
 
-  tg.send && tg.send(`📊 <b>Sync diario recibido del paper</b>\nWR: ${winRate}% | avgPnl: ${avgPnl}% | ${nTrades} ops | Régimen: ${regime}\n✅ Params actualizados (blend 20%)`);
+  // Sync diario notification removed\nWR: ${winRate}% | avgPnl: ${avgPnl}% | ${nTrades} ops | Régimen: ${regime}\n✅ Params actualizados (blend 20%)`);
   res.json({ adopted:true, reason:`Día positivo — WR:${winRate}% avgPnl:${avgPnl}%` });
 });
 
@@ -449,7 +524,7 @@ app.post("/api/sync/transfer", (req,res) => {
 
   const msg = `✅ Transfer learning: ${transferred.join(", ")} | paper WR:${wr}% trades:${trades} | blend:${(adaptiveBlend*100).toFixed(0)}%`;
   console.log(`[TRANSFER] ${msg}`);
-  tg.send && tg.send(`🧠 <b>[LIVE] Transfer learning recibido</b>\n${msg}\n<i>Midiendo impacto en 2h...</i>`);
+  // Transfer learning notification removed\n${msg}\n<i>Midiendo impacto en 2h...</i>`);
 
   // Evaluar impacto 2h después
   setTimeout(() => {
@@ -583,7 +658,7 @@ function binanceRequest(method, path, params={}) {
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
 // Pares ilíquidos (ARB, OP, NEAR, APT) → 3 partes con 30s entre ellas
 // Pares principales (BTC, ETH, SOL, BNB) → 1 sola orden (alta liquidez)
-const ILLIQUID_PAIRS = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC","POLUSDC"];
+const ILLIQUID_PAIRS = ["OPUSDC","ARBUSDC","NEARUSDC","APTUSDC","ATOMUSDC","DOTUSDC","POLUSDC","OPUSDT","ARBUSDT","NEARUSDT","APTUSDT","ATOMUSDT","DOTUSDT","SUIUSDT","TONUSDT","TRXUSDT"];
 const TWAP_PARTS     = { illiquid: 3, liquid: 1 };
 const TWAP_DELAY_MS  = 30000; // 30s entre partes
 
@@ -644,7 +719,7 @@ async function placeLiveBuy(symbol, usdtAmount) {
         bot.cash += drift; // corregir por slippage real
         console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
       }
-      tg.send && tg.send(`🟢 <b>[LIVE] BUY ${symbol}</b>\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
+      // BUY notification removed\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
     }
     return orders?.[0]||null;
   } catch(e) {
@@ -702,7 +777,7 @@ async function placeLiveSell(symbol, quantity) {
     });
     if (order?.orderId) {
       console.log(`[LIVE][SELL] ✅ ${symbol} qty:${quantity} → orderId:${order.orderId}`);
-      tg.send && tg.send(`🔴 <b>VENTA REAL EJECUTADA</b>\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
+      // SELL notification removed\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
     } else {
       console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
       // -2010 = insufficient balance → position doesn't exist in Binance
@@ -788,7 +863,7 @@ async function verifyLiveBalance() {
     const others = balances.filter(b=>b.asset!=="USDC"&&b.asset!=="USDT"&&b.asset!=="BNB"&&parseFloat(b.free)>0.001);
     if (others.length>0) console.log(`[LIVE] Otros activos en Binance: ${others.map(b=>b.asset+":"+parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados por el bot)`);
     
-    if (tg?.send) tg.send(`🎯 <b>[LIVE] BINANCE ACTIVADO</b>\n💼 Capital bot: <b>$${bot?.cash?.toFixed(2)||virtualCapital}</b> USDC\n📊 Balance total Binance: $${usdtBalance.toFixed(2)} USDC\n${others.length>0?"(+otros activos no gestionados)":"Sin otras posiciones"}`);
+    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${bot?.cash?.toFixed(2)||virtualCapital} USDC`);
 
   } catch(e) {
     console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);
@@ -803,21 +878,61 @@ async function verifyLiveBalance() {
 function startLoop(){
   connectBinance();
   let _tickRunning = false;
-  setInterval(async()=>{
+  
+// ── Capital Alert: aviso de añadir capital cuando condiciones son óptimas ───
+let _lastCapAlertTs = 0;
+let _prevRegime = null;
+function checkCapitalAlert(s) {
+  if(!s||s.loading) return;
+  const now = Date.now();
+  const wr = s.recentWinRate||0;
+  const regime = s.marketRegime;
+  const dd = s.drawdownPct||0;
+  const tv = s.totalValue||0;
+  const regimeToBull = regime==="BULL" && _prevRegime!=="BULL";
+  _prevRegime = regime;
+  const shouldAlert = (regimeToBull || wr>=42) && dd<5 && (now-_lastCapAlertTs)>86400000;
+  if(!shouldAlert) return;
+  _lastCapAlertTs = now;
+  const add = tv<150?100:tv<400?200:tv<800?500:1000;
+  const why = regimeToBull?"🐂 MERCADO CAMBIA A BULL — momentum favorable":`📈 WR ${wr}% sostenido — sistema rentable`;
+  sendTelegram([
+    "🚨🚨🚨 ALERTA DE CAPITAL 🚨🚨🚨",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "",why,"",
+    `💼 Capital: $${tv.toFixed(2)} | WR: ${wr}% | DD: ${dd.toFixed(1)}%`,
+    `📊 Régimen: ${regime} | F&G: ${s.fearGreed||"?"}`,
+    "",
+    `💡 ACCIÓN: Añadir $${add} USDC en Binance`,
+    `   Capital nuevo estimado: $${(tv+add).toFixed(0)}`,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "Máx 1 alerta/día. El bot sigue operando igual sin acción.",
+  ].join("\n"));
+}
+
+setInterval(async()=>{
     if(!bot) return;
     if(_tickRunning){ console.warn("[LIVE] Tick overlap - saltando"); return; }
     _tickRunning = true;
     try {
     simulatePrices();
 
+    // Feed current prices to simple engine
+    if(simpleBot && bot.prices) {
+      for(const [sym,price] of Object.entries(bot.prices)) {
+        simpleBot.updatePrice(sym, price);
+      }
+    }
+
     const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
     if(marketState?.defensive&&!wasDefensive){
-      tg.notifyDefensiveMode(marketState.btcDrawdown);
+
       wasDefensive=true;
       // Record defensive mode decision for learning
       if(bot) bot.riskLearning?.recordDecision("DEFENSIVE_MODE","BTCUSDC",bot.prices?.["BTCUSDC"]||0,"block_entry",{drawdown:marketState.btcDrawdown});
     }
-    if(!marketState?.defensive&&wasDefensive){tg.notifyDefensiveOff();wasDefensive=false;}
+    if(!marketState?.defensive&&wasDefensive){wasDefensive=false;}
 
     bot.marketDefensive=marketGuard.isDefensive();
     bot.hourMultiplier=getTradingScore().score;
@@ -867,22 +982,13 @@ function startLoop(){
 
     // Alertas Telegram momentum
     const prevMomentumLevel = bot._prevMomentumLevel || 1.0;
-    if (momentumMult >= 1.6 && prevMomentumLevel < 1.6 && tg.notifyMomentumBoost)
-      tg.notifyMomentumBoost(momentumMult, todayPnlPct);
-    else if (momentumMult <= 0.7 && prevMomentumLevel > 0.7 && tg.notifyMomentumDefensive)
-      tg.notifyMomentumDefensive(todayPnlPct);
+    // Momentum boost notification removed
+
     bot._prevMomentumLevel = momentumMult;
 
-    // Alertas Telegram CryptoPanic
+    // CryptoPanic state tracking (notifications disabled)
     const prevCpGlobal = bot._prevCpGlobal || false;
     const prevCpPairs = bot._prevCpPairs || [];
-    if (cryptoPanic.globalDefensive && !prevCpGlobal && tg.notifyCryptoPanicAlert)
-      tg.notifyCryptoPanicAlert([], true);
-    else {
-      const newPairs = [...cryptoPanic.defensivePairs].filter(p => !prevCpPairs.includes(p));
-      if (newPairs.length && tg.notifyCryptoPanicAlert)
-        tg.notifyCryptoPanicAlert(newPairs.map(p=>p.replace("USDT","")), false);
-    }
     bot._prevCpGlobal = cryptoPanic.globalDefensive;
     bot._prevCpPairs = [...cryptoPanic.defensivePairs];
 
@@ -917,6 +1023,7 @@ function startLoop(){
     let signals=[],newTrades=[],circuitBreaker=null,optimizerResult=null,drawdownAlert=null,dailyLimit=50,dailyUsed=0;
     try {
       ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=bot.evaluate());
+      if(bot.tick%60===0){try{checkCapitalAlert(bot.getState());}catch(e){}}
     } catch(evalErr) {
       console.error("[LIVE] bot.evaluate() error:", evalErr.message);
       console.error(evalErr.stack?.split("\n").slice(0,3).join("\n"));
@@ -925,14 +1032,36 @@ function startLoop(){
     }
     ticks++;
 
+    // ── Simple engine signals → real orders ──────────────────────────────
+    if(simpleBot && !tgControls?.isPaused() && !bot._pausedByTelegram) {
+      simpleBot.evaluate();
+      // Check for new trades from simple engine
+      const simpleTrades = simpleBot.log.filter(l =>
+        l.ts > (Date.now() - TICK_MS*2) && l.type === "BUY"
+      );
+      if(LIVE_MODE) {
+        for(const st of simpleTrades) {
+          const alreadyOrdered = bot.portfolio?.[st.symbol];
+          if(!alreadyOrdered) {
+            console.log(`[SIMPLE→LIVE] BUY ${st.symbol} $${st.invest?.toFixed(0)}`);
+            placeLiveBuy(st.symbol, st.invest)
+              .catch(e=>console.error("[SIMPLE ORDER] BUY error:", e.message));
+          }
+        }
+      }
+      // Save simple state every 6 ticks
+      if(ticks%6===0) {
+        db.saveSimpleState(simpleBot.saveState()).catch(()=>{});
+      }
+    }
+
     for(const trade of newTrades){
       if(trade.type==="SELL"){
         const liveCfg=global._alertConfig||{winPct:3,lossPct:3};
-        if(trade.pnl>=liveCfg.winPct)  tg.notifyBigWin(trade);
-        if(trade.pnl<=-liveCfg.lossPct) tg.notifyBigLoss(trade);
+
         // Explicabilidad: notificar trades significativos con explicación
-        if(Math.abs(trade.pnl||0)>=2) tg.notifyTradeWithExplanation(trade, bot.marketRegime, 50);
-        if(trade.pnl<0){const wasBl=blacklist.isBlacklisted(trade.symbol);blacklist.recordLoss(trade.symbol);if(!wasBl&&blacklist.isBlacklisted(trade.symbol))tg.notifyBlacklist(trade.symbol);}
+
+        if(trade.pnl<0){blacklist.recordLoss(trade.symbol);}
         else blacklist.recordWin(trade.symbol);
       }
       // ── ÓRDENES REALES BINANCE ─────────────────────────────────────────────
@@ -958,7 +1087,7 @@ function startLoop(){
     if(!circuitBreaker?.triggered)cbNotified=false;
     if(drawdownAlert?.triggered)tg.notifyMaxDrawdown(drawdownAlert);
     if(!circuitBreaker?.triggered) cbNotified=false;
-    if(optimizerResult?.changes?.length>0) tg.notifyOptimizer(optimizerResult);
+
 
     // Real-time F&G — actualizar cada tick
     if(bot && bot.history) {
@@ -990,13 +1119,21 @@ function startLoop(){
       fetchLongShortRatio("BTCUSDT").then(ls=>{bot.longShortRatio=ls;}).catch(()=>{});
       fetchFundingRate("BTCUSDT").then(fr=>{bot.fundingRate=fr;}).catch(()=>{});
       fetchOpenInterest("BTCUSDT").then(oi=>{bot.openInterest=oi;}).catch(()=>{});
+      fetchLiquidations().then(liq=>{if(liq) bot.liquidations=liq;}).catch(()=>{});
+      fetchBTCDominance().then(dom=>{if(dom) bot.btcDominance=dom;}).catch(()=>{});
+      fetchCoinbasePremium().then(cp=>{if(cp){bot.coinbasePremium=cp;
+        if(cp.signal==="INSTITUTIONAL_BUY") console.log(`[CB-PREMIUM] 🏦 Institucionales USA comprando: ${cp.premium.toFixed(3)}%`);
+        if(cp.signal==="INSTITUTIONAL_SELL") console.log(`[CB-PREMIUM] 🏦 Institucionales USA vendiendo: ${cp.premium.toFixed(3)}%`);
+      }}).catch(()=>{});
+      fetchExchangeFlow().then(ef=>{if(ef) bot.exchangeFlow=ef;}).catch(()=>{});
+      fetchBinanceReserve().then(br=>{if(br) bot.binanceReserve=br;}).catch(()=>{});
       if(Date.now()-(bot._lastRedditFetch||0)>7200000){
         bot._lastRedditFetch=Date.now();
         fetchRedditSentiment().then(rs=>{bot.redditSentiment=rs;}).catch(()=>{});
       }
     }
 
-    if(ticks%120===0){ fetchNewsAlert().then(news=>{if(news?.negative)tg.notifyNewsAlert(news);}); }
+
 
     // Enviar equity a BAFIR
     if(ticks%60===0) sendEquityToBafir(bot.totalValue());
@@ -1035,7 +1172,7 @@ function startLoop(){
           bot._reconcileZeroCount = (bot._reconcileZeroCount||0) + 1;
           if(bot._reconcileZeroCount === 1) {
             console.warn(`[RECONCILE] ⚠️ Binance USDC=$0 pero virtual=$${virtualFree.toFixed(2)} — puede ser restricción de IP`);
-            tg.send && tg.send(`⚠️ <b>[LIVE]</b> Binance muestra $0 USDC libre.\nPuede ser restricción de IP en API key.\nEl bot continúa operando. Si persiste más de 30min, verifica en Binance.`);
+            // periodic $0 warning removed //\nPuede ser restricción de IP en API key.\nEl bot continúa operando. Si persiste más de 30min, verifica en Binance.`);
           }
         } else {
           const drift = realUSDC - virtualFree;
@@ -1081,6 +1218,9 @@ function startLoop(){
 }
 
 // Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
+scheduleWeeklyReport(tg, null, "live", null);
+scheduleTradeAnalysisReminder(tg, null, "live");
+
 server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🔴 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
 
 wss.on("connection", ws=>{

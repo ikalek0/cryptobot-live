@@ -72,7 +72,7 @@ class Matrix {
 }
 
 class DQN {
-  constructor({ lr=0.001, gamma=0.95, epsilon=0.15, inputSize=8, hiddenSize=64, hiddenSize2=32 }={}) {
+  constructor({ lr=0.001, gamma=0.95, epsilon=0.15, inputSize=12, hiddenSize=64, hiddenSize2=32 }={}) {
     this.lr = lr;
     this.gamma = gamma;
     this.epsilon = epsilon;
@@ -98,9 +98,9 @@ class DQN {
 
     // Experience replay
     this.replayBuffer = [];
-    this.replayBufferSize = 500;
-    this.batchSize = 32;
-    this.minReplaySize = 50;
+    this.replayBufferSize = 1000; // larger buffer = more diverse experiences
+    this.batchSize = 48;           // larger batches = more stable gradients
+    this.minReplaySize = 20;       // start learning sooner (was 50)
 
     // Stats
     this.totalUpdates = 0;
@@ -130,16 +130,23 @@ class DQN {
 
   // ── Encode market state as input vector (normalized 0-1) ───────────────────
   encodeState({ rsi=50, bbZone="mid", regime="LATERAL", trend="neutral",
-                volumeRatio=1, atrLevel=1, fearGreed=50, lsRatio=1 }={}) {
-    const rsiN = rsi/100;
-    const bbN = {below_lower:0.1, lower_half:0.3, upper_half:0.7, above_upper:0.9}[bbZone]||0.5;
-    const regN = {BULL:1.0, LATERAL:0.5, BEAR:0.0, UNKNOWN:0.5}[regime]||0.5;
-    const trN = {strong_up:1.0, up:0.75, neutral:0.5, down:0.25, strong_down:0.0}[trend]||0.5;
-    const volN = Math.min(1, volumeRatio/3);
-    const atrN = Math.min(1, atrLevel/5);
-    const fgN = fearGreed/100;
-    const lsN = Math.min(1, lsRatio/3);
-    return [rsiN, bbN, regN, trN, volN, atrN, fgN, lsN];
+                volumeRatio=1, atrLevel=1, fearGreed=50, lsRatio=1,
+                sessionHour=12, winStreak=0, btcTrend24h=0, volatilityPct=50 }={}) {
+    const rsiN   = rsi/100;
+    const bbN    = {below_lower:0.1, lower_half:0.3, upper_half:0.7, above_upper:0.9}[bbZone]||0.5;
+    const regN   = {BULL:1.0, LATERAL:0.5, BEAR:0.0, UNKNOWN:0.5}[regime]||0.5;
+    const trN    = {strong_up:1.0, up:0.75, neutral:0.5, down:0.25, strong_down:0.0}[trend]||0.5;
+    const volN   = Math.min(1, volumeRatio/3);
+    const atrN   = Math.min(1, atrLevel/5);
+    const fgN    = fearGreed/100;
+    const lsN    = Math.min(1, lsRatio/3);
+    const sessN  = sessionHour<9 ? 0.1 : sessionHour<13 ? 0.6 : sessionHour<18 ? 1.0 : 0.7;
+    const streakN= Math.max(0, Math.min(1, (winStreak + 5) / 10));
+    // Feature 11: BTC 24h trend (-5% to +5% → 0 to 1)  CRISIS DETECTOR
+    const btcN   = Math.max(0, Math.min(1, (btcTrend24h + 5) / 10));
+    // Feature 12: Volatility percentile (0-100 → 0-1)  HIGH VOL = RISKY
+    const volPct = Math.min(1, volatilityPct / 100);
+    return [rsiN, bbN, regN, trN, volN, atrN, fgN, lsN, sessN, streakN, btcN, volPct];
   }
 
   // ── Forward pass ───────────────────────────────────────────────────────────
@@ -180,11 +187,13 @@ class DQN {
   }
 
   // ── Train on batch ─────────────────────────────────────────────────────────
-  trainBatch() {
+  trainBatch(epochs=3) { // train multiple passes on same batch
     if(this.replayBuffer.length < this.minReplaySize) return 0;
 
+    let totalLossAll = 0;
+    for(let epoch=0; epoch<epochs; epoch++) {
     // PER: sample based on priority (higher priority = sampled more often)
-    const alpha = 0.6; // priority exponent — 0 = uniform, 1 = full priority
+    const alpha = 0.6;
     const priorities = this.replayBuffer.map(e => Math.pow(e.priority || 1, alpha));
     const totalPriority = priorities.reduce((s, p) => s + p, 0);
     const batch = [];
@@ -270,7 +279,8 @@ class DQN {
       }
     }
 
-    return totalLoss / batch.length;
+    } // end epochs loop (this closing brace closes the for loop above)
+    return totalLossAll / epochs;
   }
 
   decayEpsilon(minEpsilon=0.03, totalTrades=0) {

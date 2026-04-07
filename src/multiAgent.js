@@ -71,7 +71,10 @@ class RegimeAgent {
     if(!data) return;
     this.trades=data.trades||0; this.wins=data.wins||0;
     this.totalPnl=data.totalPnl||0;
-    if(data.dqn) this.dqn.loadJSON(data.dqn);
+    if(data.dqn) {
+      try { this.dqn.loadJSON(data.dqn); }
+      catch(e) { console.warn("[MultiAgent] DQN dim mismatch — resetting agent DQN:", e.message); }
+    }
     if(data.learningCurve) this.learningCurve=data.learningCurve;
     console.log(`[AGENT-${this.regime}] Loaded: ${this.trades} trades, WR:${this.winRate}%`);
   }

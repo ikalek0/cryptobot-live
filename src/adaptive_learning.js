@@ -317,11 +317,48 @@ function calcAdaptiveKelly(baseFraction, portfolio, prices, history) {
   return +(baseFraction * corrAdj).toFixed(4);
 }
 
+
+// ── Real Kelly Criterion Gate ─────────────────────────────────────────────
+// Returns { kelly, negative, observationMode }
+// When Kelly < 0: bot should observe but not trade
+// Uses rolling window of last N trades to avoid stale WR
+function calcRealKelly(log, windowSize=30, defaultRR=2.0) {
+  const sells = (log||[]).filter(l=>l.type==="SELL"&&l.pnl!=null);
+  
+  // Use rolling window - recent trades matter more than all-time
+  const recent = sells.slice(-windowSize);
+  if(recent.length < 10) return { kelly: 0.5, negative: false, observationMode: false, wr: null, n: recent.length };
+  
+  const wins   = recent.filter(l=>l.pnl > 0);
+  const losses = recent.filter(l=>l.pnl < 0);
+  const W = wins.length / recent.length; // rolling WR
+  
+  // Average win/loss ratio from actual data
+  const avgWin  = wins.length  ? wins.reduce((s,l)=>s+Math.abs(l.pnl),0)/wins.length   : 1.6;
+  const avgLoss = losses.length? losses.reduce((s,l)=>s+Math.abs(l.pnl),0)/losses.length: 0.8;
+  const R = avgLoss > 0 ? avgWin / avgLoss : defaultRR;
+  
+  // Kelly formula: W - (1-W)/R
+  const kelly = W - (1 - W) / R;
+  const negative = kelly < 0;
+  
+  return {
+    kelly: Math.max(0, Math.min(1, kelly)), // clamp 0-1
+    negative,
+    observationMode: negative,
+    wr: +(W * 100).toFixed(1),
+    rr: +R.toFixed(2),
+    n: recent.length,
+    raw: +kelly.toFixed(4)
+  };
+}
+
 module.exports = {
   AdaptiveStopLoss,
   AdaptiveHours,
   NewsImpactLearner,
   AdaptiveRegimeDetector,
   calcAdaptiveLR,
+  calcRealKelly,
   calcAdaptiveKelly,
 };

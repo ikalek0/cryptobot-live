@@ -89,4 +89,28 @@ async function deleteState() {
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 }
 
-module.exports = { saveState, loadState, deleteState };
+
+async function saveSimpleState(state) {
+  const json = JSON.stringify(state);
+  try {
+    const client = await getClient();
+    if (client) {
+      await client.query(
+        `INSERT INTO bot_state (key, value) VALUES ('simple_state', $1)
+         ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+        [json]
+      );
+    }
+  } catch(e) { console.warn("[DB] saveSimpleState error:", e.message); }
+}
+
+async function loadSimpleState() {
+  try {
+    const client = await getClient();
+    if (!client) return null;
+    const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
+    return r.rows[0] ? JSON.parse(r.rows[0].value) : null;
+  } catch(e) { return null; }
+}
+
+module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState };

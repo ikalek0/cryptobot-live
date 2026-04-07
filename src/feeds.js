@@ -564,6 +564,204 @@ function calcRealtimeFearGreed(bot, state = {}) {
 module.exports.calcRealtimeFearGreed = calcRealtimeFearGreed;
 module.exports.fgCalibrator = fgCalibrator;
 
+
+// ── CoinGlass liquidations (free, no auth) ──────────────────────────────────
+async function fetchLiquidations() {
+  try {
+    const https = require("https");
+    return await new Promise((resolve) => {
+      const timer = setTimeout(()=>resolve(null), 5000);
+      https.get("https://open-api.coinglass.com/public/v2/liquidation_history?symbol=BTC&time_type=h1",
+        { headers: {"coinglassSecret":"","Content-Type":"application/json"} },
+        r => {
+          let d=""; r.on("data",c=>d+=c);
+          r.on("end",()=>{
+            clearTimeout(timer);
+            try {
+              const json = JSON.parse(d);
+              const data = json?.data?.slice(-3)||[];
+              const longLiqs  = data.reduce((s,x)=>s+(x.longLiquidationUsd||0),0);
+              const shortLiqs = data.reduce((s,x)=>s+(x.shortLiquidationUsd||0),0);
+              resolve({
+                longLiqs, shortLiqs,
+                // High short liquidations = short squeeze risk = bullish signal
+                signal: shortLiqs > longLiqs*2 ? "SHORT_SQUEEZE_RISK" :
+                         longLiqs > shortLiqs*2 ? "LONG_FLUSH_RISK" : "NEUTRAL",
+                ratio: shortLiqs/(longLiqs+1)
+              });
+            } catch { resolve(null); }
+          });
+        }).on("error",()=>{ clearTimeout(timer); resolve(null); });
+    });
+  } catch { return null; }
+}
+
+// ── Alternative F&G sources (backup chain) ──────────────────────────────────
+async function fetchFGAlternative() {
+  // Try multiple sources in order
+  const sources = [
+    { url:"https://api.alternative.me/fng/?limit=1&format=json", parser: d=>({value:+d.data[0].value, label:d.data[0].value_classification, ts:d.data[0].timestamp}) },
+    { url:"https://fear-and-greed-index.p.rapidapi.com/v1/fgi", parser: d=>({value:d.now.value, label:d.now.valueText, ts:Date.now()/1000}) },
+  ];
+  for(const src of sources) {
+    try {
+      const val = await new Promise((res)=>{
+        const https = require("https");
+        const timer = setTimeout(()=>res(null),4000);
+        https.get(src.url, r=>{
+          let d=""; r.on("data",c=>d+=c);
+          r.on("end",()=>{ clearTimeout(timer); try{ res(src.parser(JSON.parse(d))); }catch{ res(null); } });
+        }).on("error",()=>{ clearTimeout(timer); res(null); });
+      });
+      if(val?.value) return val;
+    } catch {}
+  }
+  return null;
+}
+
+
+// ── BTC Dominance — señal crítica para altcoin trading ──────────────────────
+// Cuando BTC.D sube: altcoins underperform aunque BTC suba
+async function fetchBTCDominance() {
+  try {
+    const https = require("https");
+    return await new Promise((resolve) => {
+      const timer = setTimeout(()=>resolve(null), 5000);
+      // CoinGecko free endpoint - no auth needed
+      https.get("https://api.coingecko.com/api/v3/global",
+        { headers: {"User-Agent":"Mozilla/5.0"} },
+        r => {
+          let d=""; r.on("data",c=>d+=c);
+          r.on("end",()=>{
+            clearTimeout(timer);
+            try {
+              const json = JSON.parse(d);
+              const dom = json?.data?.market_cap_percentage?.btc||50;
+              resolve({
+                btcDominance: +dom.toFixed(2),
+                // Rising dominance = altcoins suffer
+                signal: dom > 55 ? "BTC_DOMINANT_AVOID_ALTS" :
+                         dom < 45 ? "ALTSEASON_FAVORABLE" : "NEUTRAL",
+                altcoinMultiplier: dom > 55 ? 0.7 : dom < 45 ? 1.2 : 1.0
+              });
+            } catch { resolve(null); }
+          });
+        }).on("error",()=>{ clearTimeout(timer); resolve(null); });
+    });
+  } catch { return null; }
+}
+
+
+// ── Coinbase Premium Index ────────────────────────────────────────────────
+// BTC price diff between Coinbase (US institutions) and Binance (retail)
+// Premium > 0: US institutions buying → bullish signal
+// Premium < 0: US institutions selling → bearish signal
+async function fetchCoinbasePremium() {
+  try {
+    const https = require("https");
+    const [cbPrice, bnPrice] = await Promise.all([
+      new Promise(res => {
+        const t = setTimeout(()=>res(null),4000);
+        https.get("https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+          {headers:{"User-Agent":"Mozilla/5.0"}}, r=>{
+            let d=""; r.on("data",c=>d+=c);
+            r.on("end",()=>{clearTimeout(t);try{res(parseFloat(JSON.parse(d).price));}catch{res(null);}});
+          }).on("error",()=>{clearTimeout(t);res(null);});
+      }),
+      new Promise(res => {
+        const t = setTimeout(()=>res(null),4000);
+        https.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+          r=>{
+            let d=""; r.on("data",c=>d+=c);
+            r.on("end",()=>{clearTimeout(t);try{res(parseFloat(JSON.parse(d).price));}catch{res(null);}});
+          }).on("error",()=>{clearTimeout(t);res(null);});
+      })
+    ]);
+    if(!cbPrice||!bnPrice) return null;
+    const premium = ((cbPrice - bnPrice) / bnPrice) * 100;
+    return {
+      cbPrice, bnPrice, premium: +premium.toFixed(4),
+      // >0.1% = strong US institutional buying → BULL signal
+      // <-0.1% = US institutions selling → BEAR signal
+      signal: premium > 0.15 ? "INSTITUTIONAL_BUY" :
+               premium > 0.05 ? "SLIGHT_BUY" :
+               premium < -0.15 ? "INSTITUTIONAL_SELL" :
+               premium < -0.05 ? "SLIGHT_SELL" : "NEUTRAL",
+      bullish: premium > 0.05
+    };
+  } catch { return null; }
+}
+
+// ── Exchange Inflow/Outflow (Binance BTC reserves proxy) ─────────────────
+// When BTC flows INTO exchanges → selling pressure incoming
+// When BTC flows OUT of exchanges → accumulation (bullish)
+// We use order book depth as a proxy (free, no auth)
+async function fetchExchangeFlow() {
+  try {
+    const https = require("https");
+    // Use Binance order book depth ratio as flow proxy
+    // High ask depth vs bid depth = selling pressure
+    const data = await new Promise(res => {
+      const t = setTimeout(()=>res(null),5000);
+      https.get("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=100", r=>{
+        let d=""; r.on("data",c=>d+=c);
+        r.on("end",()=>{clearTimeout(t);try{res(JSON.parse(d));}catch{res(null);}});
+      }).on("error",()=>{clearTimeout(t);res(null);});
+    });
+    if(!data?.bids||!data?.asks) return null;
+    const bidVol = data.bids.slice(0,20).reduce((s,[p,q])=>s+parseFloat(q),0);
+    const askVol = data.asks.slice(0,20).reduce((s,[p,q])=>s+parseFloat(q),0);
+    const ratio = bidVol / (askVol || 1);
+    return {
+      bidVol: +bidVol.toFixed(3),
+      askVol: +askVol.toFixed(3),
+      ratio: +ratio.toFixed(3),
+      // ratio > 1.2 = more buyers than sellers → accumulation
+      // ratio < 0.8 = more sellers → distribution
+      signal: ratio > 1.3 ? "ACCUMULATION_STRONG" :
+               ratio > 1.1 ? "ACCUMULATION" :
+               ratio < 0.7 ? "DISTRIBUTION_STRONG" :
+               ratio < 0.9 ? "DISTRIBUTION" : "NEUTRAL",
+      bullish: ratio > 1.1
+    };
+  } catch { return null; }
+}
+
+// ── Binance BTC Reserve Change (via CoinGlass public) ────────────────────
+// Direct measurement of BTC moving in/out of Binance
+async function fetchBinanceReserve() {
+  try {
+    const https = require("https");
+    const data = await new Promise(res => {
+      const t = setTimeout(()=>res(null),5000);
+      https.get(
+        "https://open-api.coinglass.com/public/v2/exchange_reserve?symbol=BTC&exchange=Binance",
+        {headers:{"coinglassSecret":"","Content-Type":"application/json"}},
+        r=>{
+          let d=""; r.on("data",c=>d+=c);
+          r.on("end",()=>{clearTimeout(t);try{
+            const j=JSON.parse(d);
+            const reserves=j?.data?.slice(-2)||[];
+            if(reserves.length<2) return res(null);
+            const change = reserves[1].exchangeBalance - reserves[0].exchangeBalance;
+            res({
+              current: reserves[1].exchangeBalance,
+              change: +change.toFixed(2),
+              // Negative = BTC leaving exchange = accumulation = BULLISH
+              // Positive = BTC entering exchange = selling pressure = BEARISH
+              signal: change < -500 ? "OUTFLOW_STRONG" :
+                       change < -100 ? "OUTFLOW" :
+                       change >  500 ? "INFLOW_STRONG" :
+                       change >  100 ? "INFLOW" : "NEUTRAL",
+              bullish: change < -100
+            });
+          }catch{res(null);}});
+        }).on("error",()=>{clearTimeout(t);res(null);});
+    });
+    return data;
+  } catch { return null; }
+}
+
 module.exports={calcRealtimeFearGreed,fetchFearGreed,fetchNewsAlert,fetchAllKlines,runNightlyReplay,
   fetchLongShortRatio,fetchFundingRate,fetchRedditSentiment,
-  fetchOpenInterest,fetchTakerVolume,fgCalibrator};
+  fetchOpenInterest,fetchTakerVolume,fgCalibrator,fetchLiquidations,fetchFGAlternative,fetchBTCDominance,fetchCoinbasePremium,fetchExchangeFlow,fetchBinanceReserve};
