@@ -144,7 +144,7 @@ function evalSignal(type, candles){
 // ── Kelly gate per strategy ───────────────────────────────────────────────
 function calcKelly(trades, windowSize=30){
   const recent=trades.slice(-windowSize);
-  if(recent.length<10)return{kelly:0.5,negative:false,wr:null,n:recent.length};
+  if(recent.length<20)return{kelly:-1,negative:true,wr:null,n:recent.length};
   const wins=recent.filter(t=>t.pnl>0),losses=recent.filter(t=>t.pnl<0);
   const W=wins.length/recent.length;
   const avgW=wins.length?wins.reduce((s,t)=>s+Math.abs(t.pnl),0)/wins.length:0.016;
