@@ -31,7 +31,9 @@ const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más c
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
-const LIVE_MODE          = process.env.LIVE_MODE === "true";
+// Fallback: si LIVE_MODE no viene del env, inferir de las API keys
+const _lm = process.env.LIVE_MODE;
+const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "");
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "https://bafir-trading-production.up.railway.app";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
