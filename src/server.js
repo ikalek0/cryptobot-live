@@ -75,7 +75,7 @@ async function initBot() {
 
 // ── SimpleBotEngine — 7 estrategias validadas ──────────────────────────
 try {
-  const savedSimple = null;
+  const savedSimple = await db.loadSimpleState().catch(()=>null);
   S.simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
   S.simpleBot.setContext(null, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
@@ -83,6 +83,56 @@ try {
   console.warn("[SIMPLE] Error init:", e.message);
   S.simpleBot = new SimpleBotEngine({});
 }
+
+// ── Prefill velas históricas de Binance para simpleBot ──────────────────
+async function prefillSimpleBotCandles() {
+  // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
+  const PAIRS_TF = [
+    {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1h"},
+    {api:"SOLUSDT",  key:"SOLUSDC",  tf:"1h"},
+    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
+    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
+    {api:"XRPUSDT",  key:"XRPUSDC",  tf:"4h"},
+    {api:"SOLUSDT",  key:"SOLUSDC",  tf:"4h"},
+    {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1d"},
+  ];
+  const seen = new Set();
+  let filled = 0;
+  for(const {api, key, tf} of PAIRS_TF) {
+    const candleKey = `${key}_${tf}`;
+    if(seen.has(candleKey)) continue;
+    seen.add(candleKey);
+    // Skip if already has enough candles (from saved state)
+    if(S.simpleBot._candles?.[candleKey]?.length >= 50) {
+      console.log(`[SIMPLE-PREFILL] ${candleKey}: ya tiene ${S.simpleBot._candles[candleKey].length} velas, skip`);
+      filled++;
+      continue;
+    }
+    try {
+      const limit = tf==="1d" ? 250 : 60;
+      const url = `https://api.binance.com/api/v3/klines?symbol=${api}&interval=${tf}&limit=${limit}`;
+      const res = await fetch(url);
+      const klines = await res.json();
+      if(!Array.isArray(klines)) continue;
+      if(!S.simpleBot._candles) S.simpleBot._candles = {};
+      if(!S.simpleBot._candles[candleKey]) S.simpleBot._candles[candleKey] = [];
+      for(const k of klines) {
+        S.simpleBot._candles[candleKey].push({
+          open:parseFloat(k[1]), high:parseFloat(k[2]),
+          low:parseFloat(k[3]), close:parseFloat(k[4]),
+          start:k[0],
+        });
+      }
+      if(S.simpleBot._candles[candleKey].length > 300)
+        S.simpleBot._candles[candleKey] = S.simpleBot._candles[candleKey].slice(-300);
+      filled++;
+      console.log(`[SIMPLE-PREFILL] ${candleKey}: ${S.simpleBot._candles[candleKey].length} velas`);
+    } catch(e) { console.warn(`[SIMPLE-PREFILL] Error ${api}/${tf}:`, e.message); }
+  }
+  console.log(`[SIMPLE-PREFILL] ✅ ${filled} pares prefilled`);
+}
+await prefillSimpleBotCandles();
+
   tg.notifyStartup(S.bot.mode + " (instancia controlada)");
   tg.testTelegram && tg.testTelegram();
   // Auto reports disabled — use /situacion on demand
@@ -1046,7 +1096,7 @@ setInterval(async()=>{
       }
       // Save simple state every 6 ticks
       if(ticks%6===0) {
-        //db.saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
+        S.simpleBot.saveState && db.saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
       }
     }
 
