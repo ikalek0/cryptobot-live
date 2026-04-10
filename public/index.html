@@ -502,7 +502,7 @@ function startHTTPPoll() {
     fetch('/api/state').then(r => r.json()).then(d => {
       if (d && d.totalValue !== undefined) applyState(d);
     }).catch(() => {});
-  }, 2000);
+  }, 10000);
 }
 
 function stopHTTPPoll() {
@@ -541,6 +541,8 @@ function connectWS() {
   };
 }
 connectWS();
+// Fallback: si WS no conecta en 5s, activar polling HTTP
+setTimeout(() => { if (!_wsConnected) startHTTPPoll(); }, 5000);
 
 function setLive(on) {
   document.getElementById("live-dot").className = "live-dot" + (on?" on":"");
