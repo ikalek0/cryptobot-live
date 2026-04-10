@@ -10,7 +10,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
-const { saveState, loadState, deleteState } = require("./database");
+const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -75,7 +75,7 @@ async function initBot() {
 
 // ── SimpleBotEngine — 7 estrategias validadas ──────────────────────────
 try {
-  const savedSimple = await db.loadSimpleState().catch(()=>null);
+  const savedSimple = await loadSimpleState().catch(()=>null);
   S.simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
   S.simpleBot.setContext(null, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
@@ -1096,7 +1096,7 @@ setInterval(async()=>{
       }
       // Save simple state every 6 ticks
       if(ticks%6===0) {
-        S.simpleBot.saveState && db.saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
+        S.simpleBot.saveState && saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
       }
     }
 
