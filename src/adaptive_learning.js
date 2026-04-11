@@ -327,7 +327,7 @@ function calcRealKelly(log, windowSize=30, defaultRR=2.0) {
   
   // Use rolling window - recent trades matter more than all-time
   const recent = sells.slice(-windowSize);
-  if(recent.length < 10) return { kelly: 0.5, negative: false, observationMode: false, wr: null, n: recent.length };
+  if(recent.length < 20) return { kelly: 0, negative: true, observationMode: true, wr: null, n: recent.length };
   
   const wins   = recent.filter(l=>l.pnl > 0);
   const losses = recent.filter(l=>l.pnl < 0);

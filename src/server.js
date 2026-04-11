@@ -81,6 +81,17 @@ try {
   simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
   simpleBot.setContext(client, "live", bot?.marketRegime||"UNKNOWN", bot?.fearGreed||50);
+  // Prefill 250 velas históricas por par/tf desde Binance REST API
+  simpleBot.prefill(250).then(()=>{
+    console.log("[SIMPLE][PREFILL] Prefill completado");
+  }).catch(e=>console.warn("[SIMPLE][PREFILL] Error:",e.message));
+  // Verificar sufijos de pares vs streams de Binance
+  const streamSymbols = new Set(PAIRS.map(p=>p.symbol));
+  const simplePairs = [...new Set(simpleBot.getState().strategies.map(s=>s.pair))];
+  for(const sp of simplePairs){
+    if(streamSymbols.has(sp)) console.log(`[SIMPLE][PAIRS] ✓ ${sp} — presente en streams de Binance`);
+    else console.warn(`[SIMPLE][PAIRS] ✗ ${sp} — NO está en streams de Binance, no recibirá ticks`);
+  }
 } catch(e) {
   console.warn("[SIMPLE] Error init:", e.message);
   simpleBot = new SimpleBotEngine({});

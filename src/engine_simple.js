@@ -17,6 +17,7 @@
 // - Kelly gate rolling de 30 trades por estrategia
 // - Capa 1 y Capa 2 con capital separado (60/40)
 "use strict";
+const https = require("https");
 
 const INITIAL_CAPITAL = parseFloat(process.env.CAPITAL_USDC||"10000");
 const FEE = 0.001;
@@ -171,8 +172,58 @@ class SimpleBotEngine {
     this._stratTrades = saved.stratTrades || {};
   }
 
+  // Prefill candles from Binance REST API (250 per pair/tf)
+  async prefill(limit=250){
+    const seen = new Set();
+    for(const cfg of STRATEGIES){
+      const key = `${cfg.pair}_${cfg.tf}`;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      // Skip if already have enough candles from saved state
+      if((this._candles[key]||[]).length >= CANDLE_MIN[cfg.tf]){
+        console.log(`[SIMPLE][PREFILL] ${key}: ya tiene ${this._candles[key].length} velas, skip`);
+        continue;
+      }
+      try {
+        const candles = await this._fetchKlinesOHLC(cfg.pair, cfg.tf, limit);
+        if(candles.length > 0){
+          this._candles[key] = candles;
+          console.log(`[SIMPLE][PREFILL] ${key}: ${candles.length} velas cargadas desde Binance`);
+        }
+      } catch(e){ console.warn(`[SIMPLE][PREFILL] ${key} error:`, e.message); }
+      await new Promise(r=>setTimeout(r,200)); // rate limit
+    }
+  }
+
+  _fetchKlinesOHLC(symbol, interval, limit){
+    return new Promise(resolve=>{
+      const url=`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const req=https.get(url,res=>{
+        let d="";res.on("data",c=>d+=c);
+        res.on("end",()=>{
+          try{
+            const raw=JSON.parse(d);
+            const candles=raw.map(k=>({
+              open:parseFloat(k[1]),high:parseFloat(k[2]),
+              low:parseFloat(k[3]),close:parseFloat(k[4]),
+              start:k[0]
+            }));
+            resolve(candles);
+          }catch{resolve([]);}
+        });
+      });
+      req.on("error",()=>resolve([]));
+      req.setTimeout(10000,()=>{req.destroy();resolve([]);});
+    });
+  }
+
   updatePrice(symbol, price){
     this.prices[symbol] = price;
+    // Change 4: log tick reception every 100 ticks
+    if(!this._priceTickCount) this._priceTickCount = 0;
+    this._priceTickCount++;
+    if(this._priceTickCount % 100 === 0)
+      console.log(`[SIMPLE] tick ${symbol} $${price.toFixed(2)} (tick #${this._priceTickCount})`);
     const now = Date.now();
     // Update candles for all strategies using this symbol
     for(const cfg of STRATEGIES){
@@ -202,18 +253,25 @@ class SimpleBotEngine {
 
   _onCandleClose(cfg, key){
     const candles = this._candles[key]||[];
-    if(candles.length < CANDLE_MIN[cfg.tf]) return;
+    const last = candles[candles.length-1];
+    console.log(`[SIMPLE][CANDLE] ${cfg.pair}/${cfg.tf} cerrada — O:${last?.open?.toFixed(2)} H:${last?.high?.toFixed(2)} L:${last?.low?.toFixed(2)} C:${last?.close?.toFixed(2)} (${candles.length} velas)`);
+    if(candles.length < CANDLE_MIN[cfg.tf]){
+      console.log(`[SIMPLE][FILTER] ${cfg.pair}/${cfg.tf} bloqueado — solo ${candles.length}/${CANDLE_MIN[cfg.tf]} velas`);
+      return;
+    }
     // Already have open position for this strategy
     if(this.portfolio[cfg.id]) return;
     // Kelly gate
     const stratTrades = this._stratTrades[cfg.id]||[];
     const kelly = calcKelly(stratTrades);
     if(kelly.negative && kelly.n >= 10){
-      if(this.tick%100===0)
-        console.log(`[SIMPLE][${cfg.tf}][${cfg.type}] KELLY GATE ${cfg.pair} WR=${kelly.wr}% — observando`);
+      console.log(`[SIMPLE][FILTER][KELLY] ${cfg.pair}/${cfg.tf}/${cfg.type} bloqueado — kelly=${kelly.kelly} WR=${kelly.wr}% n=${kelly.n}`);
       return;
     }
     const signal = evalSignal(cfg.type, candles);
+    if(signal === "BUY"){
+      console.log(`[SIMPLE][SIGNAL] ${cfg.pair}/${cfg.tf}/${cfg.type} → BUY score OK`);
+    }
     if(signal !== "BUY") return;
     // Capital from correct layer
     const availCash = cfg.capa===1 ? this.capa1Cash : this.capa2Cash;
@@ -227,7 +285,7 @@ class SimpleBotEngine {
         const openInGroup = Object.values(this.portfolio)
           .filter(p => members.includes(p.pair)).length;
         if(openInGroup >= MAX_PER_CORR_GROUP) {
-          if(this.tick%100===0) console.log(`[SIMPLE][CORR] ${cfg.pair} bloqueado — ${openInGroup}/${MAX_PER_CORR_GROUP} en grupo ${grp}`);
+          console.log(`[SIMPLE][FILTER][CORR] ${cfg.pair}/${cfg.tf} bloqueado — ${openInGroup}/${MAX_PER_CORR_GROUP} en grupo ${grp}`);
           return;
         }
       }
@@ -236,7 +294,7 @@ class SimpleBotEngine {
     // ── ATR volatility filter (Opus 4: no operar en mercado muerto) ──────
     const atrPct = atrPercentile(candles, ATR_WINDOW, ATR_HIST_WINDOW);
     if(atrPct < ATR_MIN_PERCENTILE) {
-      if(this.tick%100===0) console.log(`[SIMPLE][ATR] ${cfg.pair} bloqueado — volatilidad en percentil ${atrPct} (mín:${ATR_MIN_PERCENTILE})`);
+      console.log(`[SIMPLE][FILTER][ATR] ${cfg.pair}/${cfg.tf} bloqueado — volatilidad percentil ${atrPct} (mín:${ATR_MIN_PERCENTILE})`);
       return;
     }
     const invest = Math.min(availCash*0.33, this.totalValue()*0.15);
