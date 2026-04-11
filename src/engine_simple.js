@@ -218,17 +218,19 @@ class SimpleBotEngine {
   }
 
   updatePrice(symbol, price){
-    this.prices[symbol] = price;
+    // Normalizar USDT → USDC (Binance streams USDT pairs pero strategies usan USDC)
+    const sym = symbol.endsWith("USDT") ? symbol.replace(/USDT$/, "USDC") : symbol;
+    this.prices[sym] = price;
     // Change 4: log tick reception every 100 ticks
     if(!this._priceTickCount) this._priceTickCount = 0;
     this._priceTickCount++;
     if(this._priceTickCount % 100 === 0)
-      console.log(`[SIMPLE] tick ${symbol} $${price.toFixed(2)} (tick #${this._priceTickCount})`);
+      console.log(`[SIMPLE] tick ${symbol}→${sym} $${price.toFixed(2)} (tick #${this._priceTickCount})`);
     const now = Date.now();
     // Update candles for all strategies using this symbol
     for(const cfg of STRATEGIES){
-      if(cfg.pair !== symbol) continue;
-      const key = `${symbol}_${cfg.tf}`;
+      if(cfg.pair !== sym) continue;
+      const key = `${sym}_${cfg.tf}`;
       const tfMs = TF_MS[cfg.tf];
       const barStart = Math.floor(now/tfMs)*tfMs;
       if(!this._curBar[key]){
