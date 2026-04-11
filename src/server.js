@@ -241,15 +241,7 @@ for(const sp of simplePairs){
 // Historial de sincronizaciones recibidas del PAPER
 
 function sendEquityToBafir(value) {
-  try {
-    const https=require("https"), http2=require("http");
-    const body=JSON.stringify({secret:BAFIR_SECRET,value});
-    const url=new URL("/api/bot/equity",BAFIR_URL);
-    const mod=url.protocol==="https:"?https:http2;
-    const req=mod.request({hostname:url.hostname,path:url.pathname,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body)}},res=>{if(res.statusCode!==200)console.warn("[BAFIR]",res.statusCode);});
-    req.on("error",e=>console.warn("[BAFIR]",e.message));
-    req.write(body);req.end();
-  } catch(e){console.warn("[BAFIR]",e.message);}
+  // BAFIR endpoint no longer exists — silenced
 }
 
 const blacklist   = new Blacklist(4, 4); // Live: 4 pérdidas → 4h ban (no perder oportunidades)
