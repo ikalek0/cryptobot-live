@@ -830,6 +830,9 @@ class CryptoBotFinal {
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 60 ? 1.25 : 1.0;
           const ofiBoost = 1.0; // OFI in test only
+          const institutionalBoost = 1.0; // placeholder
+          const flowBoost = 1.0; // placeholder
+          const reserveBoost = 1.0; // placeholder
           // Multi-pair confirmation: if 3+ correlated pairs signal BUY → stronger signal
           const _sameDirSignals = signals.filter(s2 =>
             s2.signal==="BUY" && s2.score>=regimeMin &&
