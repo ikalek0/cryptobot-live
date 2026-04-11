@@ -298,19 +298,21 @@ class SimpleBotEngine {
       console.log(`[SIMPLE][FILTER] ${cfg.pair}/${cfg.tf} bloqueado — solo ${candles.length}/${CANDLE_MIN[cfg.tf]} velas`);
       return;
     }
+    console.log(`[SIMPLE][EVAL-START] ${cfg.id} ${cfg.pair}/${cfg.tf}/${cfg.type}`);
     // Already have open position for this strategy
-    if(this.portfolio[cfg.id]) return;
+    if(this.portfolio[cfg.id]){
+      console.log(`[SIMPLE][EVAL] ${cfg.id} — ya tiene posición abierta, skip`);
+      return;
+    }
     // Kelly gate
     const stratTrades = this._stratTrades[cfg.id]||[];
     const kelly = calcKelly(stratTrades);
+    console.log(`[SIMPLE][KELLY] ${cfg.id} kelly=${kelly.kelly} WR=${kelly.wr}% n=${kelly.n} → ${kelly.negative && kelly.n >= 10 ? "BLOQUEADO" : "OK"}`);
     if(kelly.negative && kelly.n >= 10){
-      console.log(`[SIMPLE][FILTER][KELLY] ${cfg.pair}/${cfg.tf}/${cfg.type} bloqueado — kelly=${kelly.kelly} WR=${kelly.wr}% n=${kelly.n}`);
       return;
     }
     const signal = evalSignal(cfg.type, candles);
-    if(signal === "BUY"){
-      console.log(`[SIMPLE][SIGNAL] ${cfg.pair}/${cfg.tf}/${cfg.type} → BUY score OK`);
-    }
+    console.log(`[SIMPLE][EVAL] ${cfg.id} signal=${signal || "HOLD"}`);
     if(signal !== "BUY") return;
     // Capital from correct layer
     const availCash = cfg.capa===1 ? this.capa1Cash : this.capa2Cash;
