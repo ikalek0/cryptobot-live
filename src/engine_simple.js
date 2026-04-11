@@ -170,6 +170,11 @@ class SimpleBotEngine {
     this._curBar    = saved.curBar     || {}; // key: "PAIR_tf"
     // Per-strategy trade history for Kelly
     this._stratTrades = saved.stratTrades || {};
+    // Diagnostic: log loaded state
+    const curBarKeys = Object.keys(this._curBar);
+    const candleKeys = Object.keys(this._candles);
+    console.log(`[SIMPLE][INIT] curBar keys: [${curBarKeys.join(",")}]`);
+    console.log(`[SIMPLE][INIT] candle keys: [${candleKeys.map(k=>k+"="+this._candles[k].length).join(",")}]`);
   }
 
   // Prefill candles from Binance REST API (250 per pair/tf)
@@ -235,6 +240,7 @@ class SimpleBotEngine {
       const barStart = Math.floor(now/tfMs)*tfMs;
       if(!this._curBar[key]){
         this._curBar[key]={open:price,high:price,low:price,close:price,start:barStart};
+        console.log(`[SIMPLE][BAR-NEW] ${key} creado start=${new Date(barStart).toISOString()} candles=${(this._candles[key]||[]).length}`);
       }
       const bar = this._curBar[key];
       if(barStart > bar.start){
@@ -325,6 +331,12 @@ class SimpleBotEngine {
   evaluate(){
     this.tick++;
     if(this.tick%30===0) this.equity.push({v:this.totalValue(),t:Date.now()});
+    // Diagnostic: cada 60 ticks (~10min) mostrar estado de velas
+    if(this.tick%60===0){
+      const bars = Object.entries(this._curBar).map(([k,b])=>`${k}:${new Date(b.start).toISOString().slice(11,16)}`);
+      const candles = Object.entries(this._candles).map(([k,v])=>`${k}:${v.length}`);
+      console.log(`[SIMPLE][DIAG] tick=${this.tick} bars=[${bars.join(",")}] candles=[${candles.join(",")}] prices=${Object.keys(this.prices).length}`);
+    }
     // Manage open positions
     for(const [id,pos] of Object.entries(this.portfolio)){
       const price = this.prices[pos.pair];
