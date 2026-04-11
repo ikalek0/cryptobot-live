@@ -497,6 +497,7 @@ class CryptoBotFinal {
       const posAgeSec = (Date.now() - new Date(pos.ts).getTime()) / 1000;
       const posAgeLimitSec = 8 * 3600;
       const priceMovePct = Math.abs((cp - pos.entryPrice) / pos.entryPrice * 100);
+      const _holdH = posAgeSec / 3600;
       const _mrDeadline = pos.strategy==="MEAN_REVERSION" && _holdH>(this.marketRegime==="LATERAL"?4:6) && pnl>-0.3;
       const timeStop = (_mrDeadline) ||
                        (posAgeSec > posAgeLimitSec && priceMovePct < 0.5 && (pos.profitLocked||0) < 0.3);
