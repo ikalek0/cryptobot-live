@@ -500,10 +500,18 @@ function applyState(data) {
 function httpFetch() {
   fetch('/api/state').then(r => r.json()).then(d => {
     if (d && d.totalValue !== undefined) applyState(d);
-  }).catch(() => {});
+    else console.warn('[POLL] /api/state no tiene totalValue:', JSON.stringify(d).slice(0,200));
+  }).catch(e => console.warn('[POLL] fetch error:', e.message));
 }
 httpFetch(); // carga inmediata al abrir la página
 _pollInterval = setInterval(httpFetch, 10000); // repetir cada 10s siempre
+// Debug: update status text to show polling is active
+setTimeout(() => {
+  if (!state) {
+    const lt = document.getElementById("live-text");
+    if (lt) lt.textContent = "Polling activo, esperando datos...";
+  }
+}, 3000);
 
 // ── WebSocket: plus para actualizaciones rápidas (no reemplaza HTTP) ─────────
 let _ws = null;

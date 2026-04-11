@@ -23,6 +23,7 @@ function startLoop(deps) {
 
   connectBinance();
   let _tickRunning = false;
+  const _sessionStartTs = Date.now(); // track session start for P&L
 
 // ── Capital Alert: aviso de añadir capital cuando condiciones son óptimas ───
 let _lastCapAlertTs = 0;
@@ -86,11 +87,11 @@ setInterval(async()=>{
     S.bot.blacklist=blacklist;
 
     // ── MOMENTUM BOOST: días muy buenos → aumentar tamaño de posiciones ────────
-    // Calcula P&L del día actual desde los trades cerrados hoy
+    // Calcula P&L del día actual desde trades cerrados hoy EN ESTA SESIÓN
+    const todayStart = new Date(); todayStart.setUTCHours(0,0,0,0);
     const todaySells = S.bot.log.filter(l => {
-      if (l.type !== "SELL") return false;
-      const d = new Date(l.ts); const n = new Date();
-      return d.getDate()===n.getDate() && d.getMonth()===n.getMonth() && d.getFullYear()===n.getFullYear();
+      if (l.type !== "SELL" || !l.pnl) return false;
+      return l.ts >= todayStart.getTime() && l.ts >= _sessionStartTs;
     });
     const todayPnlPct = todaySells.reduce((s,l)=>s+(l.pnl||0),0);
     S.bot._dailyPnlPct = todayPnlPct;
