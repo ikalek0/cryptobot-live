@@ -127,8 +127,15 @@ async function prefillSimpleBotCandles() {
       }
       if(S.simpleBot._candles[candleKey].length > 300)
         S.simpleBot._candles[candleKey] = S.simpleBot._candles[candleKey].slice(-300);
+      // Inicializar _curBar con la última vela (bar actual incompleto de Binance)
+      // Así la primera vela cierra al cruzar el siguiente período, sin espera
+      const lastCandle = S.simpleBot._candles[candleKey].pop();
+      if(lastCandle) {
+        if(!S.simpleBot._curBar) S.simpleBot._curBar = {};
+        S.simpleBot._curBar[candleKey] = lastCandle;
+      }
       filled++;
-      console.log(`[SIMPLE-PREFILL] ${candleKey}: ${S.simpleBot._candles[candleKey].length} velas`);
+      console.log(`[SIMPLE-PREFILL] ${candleKey}: ${S.simpleBot._candles[candleKey].length} velas + curBar`);
     } catch(e) { console.warn(`[SIMPLE-PREFILL] Error ${api}/${tf}:`, e.message); }
   }
   console.log(`[SIMPLE-PREFILL] ✅ ${filled} pares prefilled`);
