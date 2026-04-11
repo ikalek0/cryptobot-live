@@ -171,10 +171,7 @@ setInterval(async()=>{
     let signals=[],newTrades=[],circuitBreaker=null,optimizerResult=null,drawdownAlert=null,dailyLimit=50,dailyUsed=0;
     try {
       ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=S.bot.evaluate());
-      // Engine principal desconectado: solo simpleBot opera.
-      // S.bot.evaluate() sigue corriendo para actualizar precios, régimen, F&G, etc.
-      // pero sus trades se descartan.
-      newTrades = [];
+      // evaluate() es no-op: devuelve signals=[], newTrades=[] pero actualiza régimen y equity
       if(S.bot.tick%60===0){try{checkCapitalAlert(S.bot.getState());}catch(e){}}
     } catch(evalErr) {
       console.error("[LIVE] bot.evaluate() error:", evalErr.message);
