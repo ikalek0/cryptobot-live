@@ -241,7 +241,7 @@ function sendEquityToBafir(value) {
 const blacklist   = new Blacklist(4, 4); // Live: 4 pérdidas → 4h ban (no perder oportunidades)
 const marketGuard = new MarketGuard();
 const cryptoPanic = new CryptoPanicDefense();
-cryptoPanic.start();
+// cryptoPanic.start() — disabled: rate-limited, not critical for trading
 
 const app    = express();
 const server = http.createServer(app);
