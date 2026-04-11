@@ -34,6 +34,7 @@ const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
 // Fallback: si LIVE_MODE no viene del env, inferir de las API keys
 const _lm = process.env.LIVE_MODE;
 const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "");
+console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "https://bafir-trading-production.up.railway.app";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
@@ -58,17 +59,9 @@ async function initBot() {
   if (saved?.blacklistData) blacklist.restore(saved.blacklistData);
   if (saved?.syncHistory)   S.syncHistory = saved.syncHistory || [];
 
-  // Solo esperar 1 hora si es el PRIMER arranque (sin estado guardado)
+  // Arranque inmediato — el Kelly Gate protege el capital
   if (!saved) {
-    S.liveReady = false;
-    liveStartTime = Date.now() + LIVE_START_DELAY_MS;
-    console.log(`[LIVE] ⏳ Primer arranque — esperando 1 hora para que el paper acumule datos…`);
-    tg.send && tg.send("✅ <b>LIVE iniciado</b> — Esperando datos del paper.");
-    setTimeout(() => {
-      S.liveReady = true;
-      console.log("[LIVE] ✅ 1 hora transcurrida — bot LIVE listo para operar");
-// live activated - no notification
-    }, LIVE_START_DELAY_MS);
+    console.log(`[LIVE] Primer arranque sin estado guardado — operando inmediatamente`);
   } else {
     console.log(`[LIVE] ♻️ Reinicio detectado — operando inmediatamente (estado restaurado)`);
   }
