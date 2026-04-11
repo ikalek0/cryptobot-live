@@ -19,7 +19,7 @@
 "use strict";
 const https = require("https");
 
-const INITIAL_CAPITAL = parseFloat(process.env.CAPITAL_USDC||"10000");
+const INITIAL_CAPITAL = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const FEE = 0.001;
 
 // Capital split entre capas
@@ -332,8 +332,17 @@ class SimpleBotEngine {
       console.log(`[SIMPLE][FILTER][ATR] ${cfg.pair}/${cfg.tf} bloqueado — volatilidad percentil ${atrPct} (mín:${ATR_MIN_PERCENTILE})`);
       return;
     }
-    const invest = Math.min(availCash*0.33, this.totalValue()*0.15);
-    if(invest < 5) return;
+    // ── Position sizing: basado en capital REAL, no en INITIAL_CAPITAL ────
+    const tv = this.totalValue();
+    const kellyFrac = Math.max(0.05, Math.min(0.5, kelly.kelly || 0.1));
+    let invest = tv * kellyFrac * 0.5; // Half-Kelly conservador
+    if(invest > tv * 0.30) invest = tv * 0.30; // máximo 30% del capital
+    if(invest > availCash) invest = availCash; // no gastar más del cash disponible
+    console.log(`[SIMPLE][SIZING] ${cfg.id} capital=$${tv.toFixed(2)} kelly=${kellyFrac.toFixed(3)} → invest=$${invest.toFixed(2)}`);
+    if(invest < 10){
+      console.log(`[SIMPLE][SIZING] ${cfg.id} invest=$${invest.toFixed(2)} < $10 mínimo — skip`);
+      return;
+    }
     const price = this.prices[cfg.pair];
     if(!price) return;
     const qty = invest*(1-FEE)/price;

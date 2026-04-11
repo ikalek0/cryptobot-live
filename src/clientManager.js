@@ -63,7 +63,7 @@ async function clientPlaceOrder(apiKey, apiSecret, symbol, side, quantity) {
 class ClientBotManager {
   constructor() {
     this.clients = {};      // { clientId: { apiKey, apiSecret, capital, portfolio, log, status } }
-    this.bafirUrl = process.env.BAFIR_URL || "";
+    this.bafirUrl = ""; // BAFIR endpoint removed — disabled
     this.lastSync = 0;
     this.syncInterval = 5 * 60 * 1000; // sync client list every 5min
   }

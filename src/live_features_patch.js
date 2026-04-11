@@ -142,7 +142,7 @@ class NewsDefenseMode {
       const data = await this._fetchCryptoPanic();
       this._processSentiment(data);
     } catch (e) {
-      console.warn('[NewsDefense] Error fetching CryptoPanic:', e.message);
+      // Silent — CryptoPanicDefense in cryptoPanic.js handles this with backoff
     }
   }
 
