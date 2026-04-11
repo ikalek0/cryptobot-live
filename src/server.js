@@ -295,6 +295,18 @@ app.get("/api/simple", (_,res) => res.json(S.simpleBot ? S.simpleBot.getState() 
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
 
+// Reset state — borrar estado guardado para empezar limpio
+app.post("/api/reset-state", async (req, res) => {
+  try {
+    await deleteState();
+    await saveSimpleState({});
+    console.log("[RESET] Estado borrado — reiniciar PM2 para empezar limpio");
+    res.json({ ok: true, message: "State deleted. Restart PM2 to apply." });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Endpoint temporal para obtener IP pública de salida del servidor
 app.get("/api/myip", (_,res)=>{
   const https2=require("https");
