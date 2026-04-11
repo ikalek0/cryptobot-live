@@ -243,6 +243,12 @@ class SimpleBotEngine {
         console.log(`[SIMPLE][BAR-NEW] ${key} creado start=${new Date(barStart).toISOString()} candles=${(this._candles[key]||[]).length}`);
       }
       const bar = this._curBar[key];
+      // Diagnostic: log first comparison per key to verify bar timing
+      if(!this._barCheckLogged) this._barCheckLogged = {};
+      if(!this._barCheckLogged[key]){
+        this._barCheckLogged[key] = true;
+        console.log(`[SIMPLE][BAR-CMP] ${key} barStart=${new Date(barStart).toISOString()} bar.start=${new Date(bar.start).toISOString()} willClose=${barStart > bar.start}`);
+      }
       if(barStart > bar.start){
         // Candle closed — save and evaluate
         if(!this._candles[key]) this._candles[key]=[];
