@@ -96,8 +96,8 @@ async function saveSimpleState(state) {
     const client = await getClient();
     if (client) {
       await client.query(
-        `INSERT INTO bot_state (key, value) VALUES ('simple_state', $1)
-         ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+        `INSERT INTO bot_state (key, value, ts) VALUES ('simple_state', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value=$1, ts=NOW()`,
         [json]
       );
     }
