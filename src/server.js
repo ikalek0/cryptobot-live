@@ -2,6 +2,7 @@
 // Instancia real: opera con dinero real o paper controlado.
 // Recibe parámetros optimizados del bot PAPER solo si cumplen el umbral.
 "use strict";
+require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const express    = require("express");
 const http       = require("http");
