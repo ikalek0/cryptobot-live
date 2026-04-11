@@ -10,7 +10,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
-const { saveState, loadState, deleteState } = require("./database");
+const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -22,16 +22,18 @@ const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fet
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
+const S = require("./trading/state");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
 
 // En LIVE_MODE, el capital real se obtiene de Binance al arrancar
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
-let CAPITAL_USDT = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
-const LIVE_MODE          = BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "";
+// Fallback: si LIVE_MODE no viene del env, inferir de las API keys
+const _lm = process.env.LIVE_MODE;
+const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "");
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "https://bafir-trading-production.up.railway.app";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
@@ -47,24 +49,23 @@ const SYNC_THRESHOLD = {
 // Si hay estado guardado (savedState), el bot ya arrancó antes → no esperar
 // Si es la primera vez → esperar 1 hora para que el paper acumule datos
 const LIVE_START_DELAY_MS = 60 * 60 * 1000;
-let liveReady = true; // por defecto listo (si hay estado guardado)
 let liveStartTime = Date.now(); // para calcular tiempo restante
 
 async function initBot() {
   const saved = await loadState();
-  bot = new CryptoBotFinal(saved);
-  bot.mode = LIVE_MODE ? "LIVE" : "PAPER";
+  S.bot = new CryptoBotFinal(saved);
+  S.bot.mode = LIVE_MODE ? "LIVE" : "PAPER";
   if (saved?.blacklistData) blacklist.restore(saved.blacklistData);
-  if (saved?.syncHistory)   syncHistory = saved.syncHistory || [];
+  if (saved?.syncHistory)   S.syncHistory = saved.syncHistory || [];
 
   // Solo esperar 1 hora si es el PRIMER arranque (sin estado guardado)
   if (!saved) {
-    liveReady = false;
+    S.liveReady = false;
     liveStartTime = Date.now() + LIVE_START_DELAY_MS;
     console.log(`[LIVE] ⏳ Primer arranque — esperando 1 hora para que el paper acumule datos…`);
     tg.send && tg.send("✅ <b>LIVE iniciado</b> — Esperando datos del paper.");
     setTimeout(() => {
-      liveReady = true;
+      S.liveReady = true;
       console.log("[LIVE] ✅ 1 hora transcurrida — bot LIVE listo para operar");
 // live activated - no notification
     }, LIVE_START_DELAY_MS);
@@ -72,45 +73,90 @@ async function initBot() {
     console.log(`[LIVE] ♻️ Reinicio detectado — operando inmediatamente (estado restaurado)`);
   }
 
-  console.log(`\n[LIVE] Modo: ${bot.mode} | Capital: $${CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
+  console.log(`\n[LIVE] Modo: ${S.bot.mode} | Capital: $${S.CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
 
 // ── SimpleBotEngine — 7 estrategias validadas ──────────────────────────
-let simpleBot = null;
 try {
-  const savedSimple = await db.loadSimpleState().catch(()=>null);
-  simpleBot = new SimpleBotEngine(savedSimple || {});
+  const savedSimple = await loadSimpleState().catch(()=>null);
+  S.simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
-  simpleBot.setContext(client, "live", bot?.marketRegime||"UNKNOWN", bot?.fearGreed||50);
-  // Prefill 250 velas históricas por par/tf desde Binance REST API
-  simpleBot.prefill(250).then(()=>{
-    console.log("[SIMPLE][PREFILL] Prefill completado");
-  }).catch(e=>console.warn("[SIMPLE][PREFILL] Error:",e.message));
-  // Verificar sufijos de pares vs streams de Binance
-  const streamSymbols = new Set(PAIRS.map(p=>p.symbol));
-  const simplePairs = [...new Set(simpleBot.getState().strategies.map(s=>s.pair))];
-  for(const sp of simplePairs){
-    if(streamSymbols.has(sp)) console.log(`[SIMPLE][PAIRS] ✓ ${sp} — presente en streams de Binance`);
-    else console.warn(`[SIMPLE][PAIRS] ✗ ${sp} — NO está en streams de Binance, no recibirá ticks`);
-  }
+  S.simpleBot.setContext(null, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
 } catch(e) {
   console.warn("[SIMPLE] Error init:", e.message);
-  simpleBot = new SimpleBotEngine({});
+  S.simpleBot = new SimpleBotEngine({});
 }
-  tg.notifyStartup(bot.mode + " (instancia controlada)");
+
+// ── Prefill velas históricas de Binance para simpleBot ──────────────────
+async function prefillSimpleBotCandles() {
+  // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
+  const PAIRS_TF = [
+    {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1h"},
+    {api:"SOLUSDT",  key:"SOLUSDC",  tf:"1h"},
+    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
+    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
+    {api:"XRPUSDT",  key:"XRPUSDC",  tf:"4h"},
+    {api:"SOLUSDT",  key:"SOLUSDC",  tf:"4h"},
+    {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1d"},
+  ];
+  const seen = new Set();
+  let filled = 0;
+  for(const {api, key, tf} of PAIRS_TF) {
+    const candleKey = `${key}_${tf}`;
+    if(seen.has(candleKey)) continue;
+    seen.add(candleKey);
+    // Skip if already has enough candles (from saved state)
+    if(S.simpleBot._candles?.[candleKey]?.length >= 50) {
+      console.log(`[SIMPLE-PREFILL] ${candleKey}: ya tiene ${S.simpleBot._candles[candleKey].length} velas, skip`);
+      filled++;
+      continue;
+    }
+    try {
+      const limit = 250;
+      const url = `https://api.binance.com/api/v3/klines?symbol=${api}&interval=${tf}&limit=${limit}`;
+      const res = await fetch(url);
+      const klines = await res.json();
+      if(!Array.isArray(klines)) continue;
+      if(!S.simpleBot._candles) S.simpleBot._candles = {};
+      if(!S.simpleBot._candles[candleKey]) S.simpleBot._candles[candleKey] = [];
+      for(const k of klines) {
+        S.simpleBot._candles[candleKey].push({
+          open:parseFloat(k[1]), high:parseFloat(k[2]),
+          low:parseFloat(k[3]), close:parseFloat(k[4]),
+          start:k[0],
+        });
+      }
+      if(S.simpleBot._candles[candleKey].length > 300)
+        S.simpleBot._candles[candleKey] = S.simpleBot._candles[candleKey].slice(-300);
+      filled++;
+      console.log(`[SIMPLE-PREFILL] ${candleKey}: ${S.simpleBot._candles[candleKey].length} velas`);
+    } catch(e) { console.warn(`[SIMPLE-PREFILL] Error ${api}/${tf}:`, e.message); }
+  }
+  console.log(`[SIMPLE-PREFILL] ✅ ${filled} pares prefilled`);
+}
+await prefillSimpleBotCandles();
+// Verificar sufijos de pares vs streams de Binance
+const streamSymbols = new Set(PAIRS.map(p=>p.symbol));
+const simplePairs = [...new Set((S.simpleBot.getState?.()?.strategies||[]).map(s=>s.pair))];
+for(const sp of simplePairs){
+  if(streamSymbols.has(sp)) console.log(`[SIMPLE][PAIRS] ✓ ${sp} — presente en streams de Binance`);
+  else console.warn(`[SIMPLE][PAIRS] ✗ ${sp} — NO está en streams de Binance, no recibirá ticks`);
+}
+
+  tg.notifyStartup(S.bot.mode + " (instancia controlada)");
   tg.testTelegram && tg.testTelegram();
   // Auto reports disabled — use /situacion on demand
-  tgControls = tg.startCommandListener(
-  () => ({...bot.getState(), instance:bot.mode, syncHistory, dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
+  S.tgControls = tg.startCommandListener(
+  () => ({...S.bot.getState(), instance:S.bot.mode, syncHistory: S.syncHistory, dailyPnlPct:S.bot._dailyPnlPct||0, momentumMult:S.bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
   {
     getBalance:    getAccountBalance,
-    setPaused:     (v) => { if(bot) bot._pausedByTelegram=v; },
-    getSimpleState: () => simpleBot?.getState() || null,
+    setPaused:     (v) => { if(S.bot) S.bot._pausedByTelegram=v; },
+    getSimpleState: () => S.simpleBot?.getState() || null,
     setCapital:    (v) => {
-      CAPITAL_USDT = v;
-      if(bot) { if(bot.cash>v) bot.cash=v; }
-      if(simpleBot) {
-        simpleBot.capa1Cash = v*0.60;
-        simpleBot.capa2Cash = v*0.40;
+      S.CAPITAL_USDT = v;
+      if(S.bot) { if(S.bot.cash>v) S.bot.cash=v; }
+      if(S.simpleBot) {
+        S.simpleBot.capa1Cash = v*0.60;
+        S.simpleBot.capa2Cash = v*0.40;
       }
       console.log("[TG] Capital actualizado a $"+v);
     },
@@ -120,7 +166,7 @@ try {
   // Startup historical simulation: teach DQN about crisis before facing real market
   // Live bot gets a condensed version: 2022 crash + recent 30 days only
   setTimeout(async () => {
-    if(!bot || !bot.dqn) return;
+    if(!S.bot || !S.bot.dqn) return;
     console.log("[HistSim-LIVE] Entrenando DQN con datos históricos de crisis...");
     const crisis_pairs = ["BTCUSDC","ETHUSDC","SOLUSDC"];
     const periods = [
@@ -145,16 +191,16 @@ try {
             const isDowntrend = klines[i].close < klines[Math.max(0,i-12)].close * 0.97;
             // In a crisis downtrend, MR entries fail → teach SKIP
             if(isDowntrend && rsiVal < 40) {
-              const state = bot.dqn.encodeState({
+              const state = S.bot.dqn.encodeState({
                 rsi: rsiVal, bbZone:"below_lower", regime:"LATERAL",
                 trend: isDowntrend?"down":"neutral", fearGreed: 20,
                 btcTrend24h: -5, volatilityPct: 80
               });
-              bot.dqn.remember(state, "BUY", pnl5>0?0.5:-0.8, state);
+              S.bot.dqn.remember(state, "BUY", pnl5>0?0.5:-0.8, state);
               simTrades++;
             }
           }
-          if(bot.dqn.replayBuffer.length>=20) bot.dqn.trainBatch(2);
+          if(S.bot.dqn.replayBuffer.length>=20) S.bot.dqn.trainBatch(2);
           console.log("[HistSim-LIVE] "+period.label+" "+pair+" — "+simTrades+" trades sintéticos");
         } catch(e) { /* non-blocking */ }
       }
@@ -162,7 +208,7 @@ try {
     console.log("[HistSim-LIVE] ✅ "+simTrades+" trades de crisis aprendidos por DQN");
   }, 15000); // 15s después del arranque
 
-  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
+  fetchFearGreed().then(fg => { S.bot.fearGreed=fg.value; S.bot.fearGreedPublished=fg.publishedAt; S.bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
 
   // CRÍTICO: limpiar estado huérfano ANTES de empezar el loop
   // Esto evita que el circuit breaker se dispare por estados corruptos de DB
@@ -170,18 +216,22 @@ try {
     await verifyLiveBalance();
     // Resetear el circuit breaker después de limpiar el estado
     // (el CB puede haberse disparado por el estado corrupto)
-    if(bot.breaker) {
-      bot.breaker.reset && bot.breaker.reset();
-      bot._cbResetOnStart = true;
+    if(S.bot.breaker) {
+      S.bot.breaker.reset && S.bot.breaker.reset();
+      S.bot._cbResetOnStart = true;
       console.log("[LIVE] Circuit breaker reseteado tras verificación de balance");
     }
   }
-  startLoop();
+  startLoop({
+    connectBinance, simulatePrices, broadcast, save,
+    placeLiveBuy, placeLiveSell, getAccountBalance, sendEquityToBafir,
+    marketGuard, blacklist, cryptoPanic, clientManager,
+    LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
+    getLiveStartTime: () => liveStartTime,
+  });
 }
 
 // Historial de sincronizaciones recibidas del PAPER
-let syncHistory = [];
-let tgControls = null; // control remoto Telegram
 
 function sendEquityToBafir(value) {
   try {
@@ -217,8 +267,8 @@ function broadcast(msg) {
 
 // ── API REST ──────────────────────────────────────────────────────────────────
 app.get("/api/summary", (_,res) => {
-  if(!bot) return res.json({loading:true, instance:"LIVE"});
-  const s = bot.getState();
+  if(!S.bot) return res.json({loading:true, instance:"LIVE"});
+  const s = S.bot.getState();
   // Lightweight summary for Bafir dashboard — avoids sending full log/history
   res.json({
     instance:   "LIVE",
@@ -230,8 +280,8 @@ app.get("/api/summary", (_,res) => {
     marketRegime:    s.marketRegime||"UNKNOWN",
     fearGreed:       s.fearGreed||50,
     fearGreedSource: s.fearGreedSource||null,
-    dailyPnlPct:     bot._dailyPnlPct||0,
-    momentumMult:    bot.hourMultiplier||1,
+    dailyPnlPct:     S.bot._dailyPnlPct||0,
+    momentumMult:    S.bot.hourMultiplier||1,
     openPositions:   Object.keys(s.portfolio||{}).length,
     recentTrades:    (s.log||[]).filter(l=>l.type==="SELL").slice(0,10),
     circuitBreaker:  s.circuitBreaker||null,
@@ -248,9 +298,9 @@ app.get("/api/summary", (_,res) => {
   });
 });
 
-app.get("/api/simple", (_,res) => res.json(simpleBot ? simpleBot.getState() : {loading:true}));
-app.get("/api/state",  (_,res)=>res.json(bot?{...bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:bot.autoBlacklist.getStatus(),syncHistory,dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
-app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:bot?.tick,uptime:process.uptime(),tv:bot?.totalValue()}));
+app.get("/api/simple", (_,res) => res.json(S.simpleBot ? S.simpleBot.getState() : {loading:true}));
+app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
+app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
 
 // Endpoint temporal para obtener IP pública de salida del servidor
 app.get("/api/myip", (_,res)=>{
@@ -285,14 +335,14 @@ app.get("/api/myip-egress", (_,res)=>{
 
 // ScoreScore de confianza — consumido por BAFIR dashboard
 app.get("/api/confidence", (_,res) => {
-  if(!bot) return res.status(503).json({error:"Bot no iniciado"});
+  if(!S.bot) return res.status(503).json({error:"Bot no iniciado"});
   res.json({
-    score: bot.confidence.get(),
-    label: bot.confidence.getLabel(),
-    color: bot.confidence.getColor(),
-    blacklist: bot.autoBlacklist.getStatus(),
-    winRate: bot.recentWinRate(),
-    drawdown: bot.getState().drawdownPct,
+    score: S.bot.confidence.get(),
+    label: S.bot.confidence.getLabel(),
+    color: S.bot.confidence.getColor(),
+    blacklist: S.bot.autoBlacklist.getStatus(),
+    winRate: S.bot.recentWinRate(),
+    drawdown: S.bot.getState().drawdownPct,
   });
 });
 // Reset endpoint eliminado por seguridad — no exponer esta funcionalidad
@@ -316,12 +366,12 @@ app.post("/api/sync/params", (req,res) => {
 
   console.log(`[SYNC] Recibidos params del PAPER — WR: ${paperStats.winRate}% | ${paperStats.nTrades} ops`);
 
-  const currentLiveStats = bot ? calcSyncStats(bot.log, 1) : { winRate:0, avgPnl:0, nTrades:0 };
-  const result = evaluateIncomingParams({ params, paperStats, exportedAt:req.body.exportedAt }, bot?.optimizer?.getParams()||{}, currentLiveStats, syncHistory);
-  syncHistory = result.syncHistory;
+  const currentLiveStats = S.bot ? calcSyncStats(S.bot.log, 1) : { winRate:0, avgPnl:0, nTrades:0 };
+  const result = evaluateIncomingParams({ params, paperStats, exportedAt:req.body.exportedAt }, S.bot?.optimizer?.getParams()||{}, currentLiveStats, S.syncHistory);
+  S.syncHistory = result.syncHistory;
 
-  if (result.adopted && bot) {
-    Object.assign(bot.optimizer.params, result.newParams);
+  if (result.adopted && S.bot) {
+    Object.assign(S.bot.optimizer.params, result.newParams);
     console.log(`[SYNC] ✅ ${result.bootstrap?"Bootstrap":"Estricto"}: ${result.reason}`);
 
     save().catch(()=>{});
@@ -358,11 +408,11 @@ app.post("/api/sync/daily", (req,res) => {
   // Si día negativo pero hay Q states → adoptar solo params del optimizer, no todo
   const applyFull = positive;
 
-  if (!bot) return res.json({ adopted:false, reason:"Bot no listo" });
+  if (!S.bot) return res.json({ adopted:false, reason:"Bot no listo" });
 
   // Adoptar optimizer params con blending conservador (20% paper, 80% live)
   if (optimizerParams && Object.keys(optimizerParams).length > 0) {
-    const current = bot.optimizer.getParams();
+    const current = S.bot.optimizer.getParams();
     const blended = {};
     for (const [k, v] of Object.entries(optimizerParams)) {
       if (typeof v === "number" && typeof current[k] === "number") {
@@ -372,14 +422,14 @@ app.post("/api/sync/daily", (req,res) => {
       }
     }
     if (Object.keys(blended).length > 0) {
-      Object.assign(bot.optimizer.params, blended);
+      Object.assign(S.bot.optimizer.params, blended);
       console.log(`[SYNC-DAILY] ✅ Params blended 20% paper — régimen:${regime}`);
     }
   }
 
   // Registrar en syncHistory
-  syncHistory.push({ ts:new Date().toISOString(), type:"daily", winRate, avgPnl, nTrades, regime, positive });
-  while (syncHistory.length > 120) syncHistory.shift();
+  S.syncHistory.push({ ts:new Date().toISOString(), type:"daily", winRate, avgPnl, nTrades, regime, positive });
+  while (S.syncHistory.length > 120) S.syncHistory.shift();
   save().catch(()=>{});
 
   // Sync diario notification removed\nWR: ${winRate}% | avgPnl: ${avgPnl}% | ${nTrades} ops | Régimen: ${regime}\n✅ Params actualizados (blend 20%)`);
@@ -427,13 +477,13 @@ app.post("/api/set-capital", (req,res) => {
     return res.status(400).json({error:"Capital inválido"});
 
   // Actualizar capital operativo
-  CAPITAL_USDT = capitalUSD;
-  if (bot) {
+  S.CAPITAL_USDT = capitalUSD;
+  if (S.bot) {
     // Respetar reserva mínima del 15%
     const reserve = capitalUSD * 0.15;
     const maxOperable = capitalUSD - reserve;
     // Si el bot tiene más cash del capital declarado, limitar
-    if (bot.cash > capitalUSD) bot.cash = capitalUSD;
+    if (S.bot.cash > capitalUSD) S.bot.cash = capitalUSD;
     console.log(`[LIVE] Capital operativo actualizado: $${capitalUSD.toFixed(2)} (reserva: $${reserve.toFixed(2)}, máx operable: $${maxOperable.toFixed(2)})`);
   }
   res.json({ok:true, capitalUSD, reserve:+(capitalUSD*0.15).toFixed(2), maxOperable:+(capitalUSD*0.85).toFixed(2)});
@@ -451,7 +501,7 @@ app.post("/api/sync/transfer", (req,res) => {
       return res.status(401).json({error:"Firma inválida"});
   } catch(e) { return res.status(401).json({error:"Firma inválida"}); }
 
-  if(!bot) return res.status(503).json({error:"Bot no listo"});
+  if(!S.bot) return res.status(503).json({error:"Bot no listo"});
   const { dqnWeights, qTable, paperStats } = req.body;
   if(!dqnWeights && !qTable) return res.status(400).json({error:"Sin datos"});
 
@@ -463,11 +513,11 @@ app.post("/api/sync/transfer", (req,res) => {
   if(wr < 30) return res.json({adopted:false, reason:`WR paper ${wr}% muy bajo para transferir`});
 
   // Registrar WR del live ANTES de la transferencia para medir impacto después
-  const liveSells = (bot.log||[]).filter(l=>l.type==="SELL");
+  const liveSells = (S.bot.log||[]).filter(l=>l.type==="SELL");
   const liveWrBefore = liveSells.length >= 10
     ? Math.round(liveSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, liveSells.length) * 100)
     : null;
-  bot._transferHistory = bot._transferHistory || [];
+  S.bot._transferHistory = S.bot._transferHistory || [];
   const transferRecord = {
     ts: new Date().toISOString(),
     paperWR: wr, paperTrades: trades,
@@ -476,11 +526,11 @@ app.post("/api/sync/transfer", (req,res) => {
     blend: Math.min(0.4, trades/500),
     improved: null,
   };
-  bot._transferHistory.push(transferRecord);
-  if(bot._transferHistory.length > 20) bot._transferHistory.shift();
+  S.bot._transferHistory.push(transferRecord);
+  if(S.bot._transferHistory.length > 20) S.bot._transferHistory.shift();
   // Ajustar blend según historial de transferencias anteriores
-  const goodTransfers = (bot._transferHistory||[]).filter(t=>t.improved===true).length;
-  const badTransfers  = (bot._transferHistory||[]).filter(t=>t.improved===false).length;
+  const goodTransfers = (S.bot._transferHistory||[]).filter(t=>t.improved===true).length;
+  const badTransfers  = (S.bot._transferHistory||[]).filter(t=>t.improved===false).length;
   const totalEval = goodTransfers + badTransfers;
   let adaptiveBlend = Math.min(0.4, trades/500);
   if(totalEval >= 3) {
@@ -493,38 +543,38 @@ app.post("/api/sync/transfer", (req,res) => {
   let transferred = [];
 
   // Transferir pesos DQN (blend 30% paper, 70% live para no perder lo aprendido en live)
-  if(dqnWeights && bot.dqn) {
+  if(dqnWeights && S.bot.dqn) {
     try {
       const BLEND = Math.min(0.4, trades/500); // más trades = más confianza en paper
       const blendWeights = (live, paper) => {
         if(!live || !paper || live.length !== paper.length) return live;
         return live.map((v, i) => v * (1-BLEND) + paper[i] * BLEND);
       };
-      if(dqnWeights.W1) bot.dqn.W1 = blendWeights(bot.dqn.W1, dqnWeights.W1);
-      if(dqnWeights.W2) bot.dqn.W2 = blendWeights(bot.dqn.W2, dqnWeights.W2);
-      if(dqnWeights.W3) bot.dqn.W3 = blendWeights(bot.dqn.W3, dqnWeights.W3);
-      if(dqnWeights.b1) bot.dqn.b1 = blendWeights(bot.dqn.b1, dqnWeights.b1);
-      if(dqnWeights.b2) bot.dqn.b2 = blendWeights(bot.dqn.b2, dqnWeights.b2);
-      if(dqnWeights.b3) bot.dqn.b3 = blendWeights(bot.dqn.b3, dqnWeights.b3);
+      if(dqnWeights.W1) S.bot.dqn.W1 = blendWeights(S.bot.dqn.W1, dqnWeights.W1);
+      if(dqnWeights.W2) S.bot.dqn.W2 = blendWeights(S.bot.dqn.W2, dqnWeights.W2);
+      if(dqnWeights.W3) S.bot.dqn.W3 = blendWeights(S.bot.dqn.W3, dqnWeights.W3);
+      if(dqnWeights.b1) S.bot.dqn.b1 = blendWeights(S.bot.dqn.b1, dqnWeights.b1);
+      if(dqnWeights.b2) S.bot.dqn.b2 = blendWeights(S.bot.dqn.b2, dqnWeights.b2);
+      if(dqnWeights.b3) S.bot.dqn.b3 = blendWeights(S.bot.dqn.b3, dqnWeights.b3);
       transferred.push(`DQN (blend ${(BLEND*100).toFixed(0)}%)`);
     } catch(e) { console.warn("[TRANSFER] DQN error:", e.message); }
   }
 
   // Transferir Q-table (merge: mantener lo de live, añadir estados nuevos del paper)
-  if(qTable && bot.qLearning?.q) {
+  if(qTable && S.bot.qLearning?.q) {
     try {
       let newStates = 0;
       for(const [state, actions] of Object.entries(qTable)) {
-        if(!bot.qLearning.q[state]) {
-          bot.qLearning.q[state] = actions; // nuevo estado del paper
+        if(!S.bot.qLearning.q[state]) {
+          S.bot.qLearning.q[state] = actions; // nuevo estado del paper
           newStates++;
         } else {
           // Blend existing states
           for(const [action, val] of Object.entries(actions)) {
-            if(bot.qLearning.q[state][action] != null) {
-              bot.qLearning.q[state][action] = bot.qLearning.q[state][action]*0.7 + val*0.3;
+            if(S.bot.qLearning.q[state][action] != null) {
+              S.bot.qLearning.q[state][action] = S.bot.qLearning.q[state][action]*0.7 + val*0.3;
             } else {
-              bot.qLearning.q[state][action] = val;
+              S.bot.qLearning.q[state][action] = val;
             }
           }
         }
@@ -539,13 +589,13 @@ app.post("/api/sync/transfer", (req,res) => {
 
   // Evaluar impacto 2h después
   setTimeout(() => {
-    if(!bot) return;
-    const afterSells = (bot.log||[]).filter(l=>l.type==="SELL");
+    if(!S.bot) return;
+    const afterSells = (S.bot.log||[]).filter(l=>l.type==="SELL");
     const liveWrAfter = afterSells.length >= 10
       ? Math.round(afterSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, afterSells.length) * 100)
       : null;
     // Buscar el registro de esta transferencia
-    const rec = (bot._transferHistory||[]).find(t=>t.liveWRafter===null && t.liveWRbefore!==null);
+    const rec = (S.bot._transferHistory||[]).find(t=>t.liveWRafter===null && t.liveWRbefore!==null);
     if(rec && liveWrAfter !== null && rec.liveWRbefore !== null) {
       rec.liveWRafter = liveWrAfter;
       rec.improved = liveWrAfter >= rec.liveWRbefore;
@@ -569,30 +619,28 @@ app.post("/api/sync/transfer", (req,res) => {
 });
 
 app.get("/api/sync/history", (_,res) => res.json({
-  syncHistory,
+  syncHistory: S.syncHistory,
   threshold: SYNC_THRESHOLD,
-  currentParams: bot?.optimizer?.getParams(),
+  currentParams: S.bot?.optimizer?.getParams(),
 }));
 
-let bot;
 (async () => { await initBot(); })();
 
 // ── Guardar ───────────────────────────────────────────────────────────────────
-let ticks=0;
 async function save() {
-  if(!bot) return;
-  const s=bot.getState();
+  if(!S.bot) return;
+  const s=S.bot.getState();
   s.blacklistData=blacklist.serialize();
-  s.optimizerHistory=bot.optimizer.history;
-  s.trailingHighs=bot.trailing.highs;
-  s.reentryTs=bot.reentryTs;
-  s.syncHistory=syncHistory;
-  if(bot.multiAgent)    s.multiAgentData = bot.multiAgent.serialize();
-  if(bot.adaptiveStop)   s.adaptiveStop   = bot.adaptiveStop.serialize();
-  if(bot.adaptiveHours)  s.adaptiveHours  = bot.adaptiveHours.serialize();
-  if(bot.newsLearner)    s.newsLearner    = bot.newsLearner.serialize();
-  if(bot.regimeDetector) s.regimeDetector = bot.regimeDetector.serialize();
-  if(bot._transferHistory) s.transferHistory = bot._transferHistory;
+  s.optimizerHistory=S.bot.optimizer.history;
+  s.trailingHighs=S.bot.trailing.highs;
+  s.reentryTs=S.bot.reentryTs;
+  s.syncHistory=S.syncHistory;
+  if(S.bot.multiAgent)    s.multiAgentData = S.bot.multiAgent.serialize();
+  if(S.bot.adaptiveStop)   s.adaptiveStop   = S.bot.adaptiveStop.serialize();
+  if(S.bot.adaptiveHours)  s.adaptiveHours  = S.bot.adaptiveHours.serialize();
+  if(S.bot.newsLearner)    s.newsLearner    = S.bot.newsLearner.serialize();
+  if(S.bot.regimeDetector) s.regimeDetector = S.bot.regimeDetector.serialize();
+  if(S.bot._transferHistory) s.transferHistory = S.bot._transferHistory;
   await saveState(s);
 }
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
@@ -616,23 +664,21 @@ process.on("unhandledRejection", (reason) => {
 // ── Binance WebSocket ─────────────────────────────────────────────────────────
 const symbols   = PAIRS.map(p=>p.symbol.toLowerCase());
 const streamUrl = `wss://stream.binance.com:9443/stream?streams=${symbols.map(s=>`${s}@miniTicker`).join("/")}`;
-let binanceLive=false, lastPriceTs=Date.now();
+let lastPriceTs=Date.now();
 
 function connectBinance() {
   const ws=new WebSocket(streamUrl);
-  ws.on("open",    ()=>{binanceLive=true;console.log("[BINANCE] ✓ Stream en vivo");});
-  ws.on("message", raw=>{try{const{data}=JSON.parse(raw);if(data?.s&&data?.c&&bot){bot.updatePrice(data.s,parseFloat(data.c));lastPriceTs=Date.now();}}catch(e){}});
-  ws.on("close",   ()=>{binanceLive=false;setTimeout(connectBinance,5000);});
+  ws.on("open",    ()=>{S.binanceLive=true;console.log("[BINANCE] ✓ Stream en vivo");});
+  ws.on("message", raw=>{try{const{data}=JSON.parse(raw);if(data?.s&&data?.c&&S.bot){S.bot.updatePrice(data.s,parseFloat(data.c));lastPriceTs=Date.now();}}catch(e){}});
+  ws.on("close",   ()=>{S.binanceLive=false;setTimeout(connectBinance,5000);});
   ws.on("error",   e=>console.error("[BINANCE]",e.message));
 }
 
 const SEEDS={BTCUSDC:67000,ETHUSDC:3500,SOLUSDC:180,BNBUSDC:580,AVAXUSDC:38,ADAUSDC:0.45,DOTUSDC:8.5,LINKUSDC:18,UNIUSDC:10,AAVEUSDC:95,XRPUSDC:0.52,LTCUSDC:82};
 function simulatePrices(){
-  if(!bot||Date.now()-lastPriceTs<10000) return;
-  PAIRS.forEach(p=>{const last=bot.prices[p.symbol]||SEEDS[p.symbol]||100;bot.updatePrice(p.symbol,last*(1+0.007*(Math.random()+Math.random()-1)*1.2+0.00004));});
+  if(!S.bot||Date.now()-lastPriceTs<10000) return;
+  PAIRS.forEach(p=>{const last=S.bot.prices[p.symbol]||SEEDS[p.symbol]||100;S.bot.updatePrice(p.symbol,last*(1+0.007*(Math.random()+Math.random()-1)*1.2+0.00004));});
 }
-
-let wasDefensive=false,cbNotified=false,lastFearGreedCheck=0;
 
 // ── LIVE MODE: órdenes reales ─────────────────────────────────────────────────
 // ── BINANCE REAL API ──────────────────────────────────────────────────────────
@@ -713,7 +759,7 @@ async function placeTWAPBuy(symbol, usdtAmount) {
 async function placeLiveBuy(symbol, usdtAmount) {
   try {
     if (!LIVE_MODE) return null;
-    const maxSafe = (bot?.totalValue()||CAPITAL_USDT) * 0.40;
+    const maxSafe = (S.bot?.totalValue()||S.CAPITAL_USDT) * 0.40;
     const safe = Math.min(usdtAmount, maxSafe);
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
     const orders = await placeTWAPBuy(symbol, safe);
@@ -725,9 +771,9 @@ async function placeLiveBuy(symbol, usdtAmount) {
       const avgPrice = realQty>0 ? realSpent/realQty : safe;
       console.log(`[LIVE][BUY] Real: gastado $${realSpent.toFixed(2)} @ avg $${avgPrice.toFixed(2)}`);
       // Ajustar bot.cash con el precio real (no el estimado)
-      if(bot && Math.abs(realSpent - safe) > 0.01) {
+      if(S.bot && Math.abs(realSpent - safe) > 0.01) {
         const drift = realSpent - safe;
-        bot.cash += drift; // corregir por slippage real
+        S.bot.cash += drift; // corregir por slippage real
         console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
       }
       // BUY notification removed\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
@@ -766,18 +812,18 @@ async function placeLiveSell(symbol, quantity) {
     if (sellQty <= 0) {
       console.log(`[LIVE][SELL] ${symbol} sin balance real → cerrando posición virtual`);
       // Si no hay balance real, la posición es huérfana — cerrarla virtualmente
-      if(bot?.portfolio?.[symbol]) {
-        const orphanPos = bot.portfolio[symbol];
+      if(S.bot?.portfolio?.[symbol]) {
+        const orphanPos = S.bot.portfolio[symbol];
         // Restaurar cash que se gastó en la compra virtual (nunca ejecutada realmente)
         const orphanCost = (orphanPos.qty||0) * (orphanPos.entryPrice||0);
         if(orphanCost > 0) {
-          bot.cash = (bot.cash||0) + orphanCost;
+          S.bot.cash = (S.bot.cash||0) + orphanCost;
           // Eliminar también el log entry de esta posición huérfana
-          bot.log = (bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
+          S.bot.log = (S.bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
             Math.abs(l.price-(orphanPos.entryPrice||0))<0.01));
           console.log(`[LIVE] Posición huérfana ${symbol} eliminada — cash restaurado +$${orphanCost.toFixed(2)}`);
         }
-        delete bot.portfolio[symbol];
+        delete S.bot.portfolio[symbol];
       }
       return null;
     }
@@ -793,8 +839,8 @@ async function placeLiveSell(symbol, quantity) {
       console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
       // -2010 = insufficient balance → position doesn't exist in Binance
       // Close virtual position to stay in sync
-      if(order?.code === -2010 && bot?.portfolio?.[symbol]) {
-        delete bot.portfolio[symbol];
+      if(order?.code === -2010 && S.bot?.portfolio?.[symbol]) {
+        delete S.bot.portfolio[symbol];
         console.log(`[LIVE] Posición virtual ${symbol} cerrada por -2010 (no existe en Binance)`);
       }
     }
@@ -829,41 +875,41 @@ async function verifyLiveBalance() {
     // El bot maneja su propia cuenta de $CAPITAL_USDT (100 USD)
     // NO usa el balance total de Binance (puede tener más dinero de otras ops)
     // Solo verifica que Binance tiene suficiente para ejecutar cada orden
-    const virtualCapital = CAPITAL_USDT; // 100 USD declarados en Railway
+    const virtualCapital = S.CAPITAL_USDT; // 100 USD declarados en Railway
     
-    if (bot) {
+    if (S.bot) {
       // En LIVE real: siempre usar virtualCapital como referencia de cash libre
       // El cash de la DB puede ser incorrecto si el capital declarado cambió
       // Solo respetamos el estado guardado si es menor (el bot ha perdido dinero)
-      if (bot.cash > virtualCapital * 1.05) {
+      if (S.bot.cash > virtualCapital * 1.05) {
         // Cash guardado es mayor que el capital declarado → resetear al declarado
-        console.log(`[LIVE] 💼 Cash DB ($${bot.cash.toFixed(2)}) > capital declarado ($${virtualCapital.toFixed(2)}) → ajustando`);
-        bot.cash = virtualCapital;
-      } else if (bot.cash <= 0) {
-        bot.cash = virtualCapital;
+        console.log(`[LIVE] 💼 Cash DB ($${S.bot.cash.toFixed(2)}) > capital declarado ($${virtualCapital.toFixed(2)}) → ajustando`);
+        S.bot.cash = virtualCapital;
+      } else if (S.bot.cash <= 0) {
+        S.bot.cash = virtualCapital;
         console.log(`[LIVE] 💼 Cash cero → asignando capital: $${virtualCapital.toFixed(2)} USDC`);
       } else {
-        console.log(`[LIVE] 💼 Capital restaurado: $${bot.cash.toFixed(2)} USDC (declarado: $${virtualCapital.toFixed(2)})`);
+        console.log(`[LIVE] 💼 Capital restaurado: $${S.bot.cash.toFixed(2)} USDC (declarado: $${virtualCapital.toFixed(2)})`);
       }
     }
 
     // Sanity check: Binance debe tener AL MENOS el cash libre del bot
-    if (bot && usdtBalance < bot.cash * 0.90) {
-      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${bot.cash.toFixed(2)}`);
+    if (S.bot && usdtBalance < S.bot.cash * 0.90) {
+      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${S.bot.cash.toFixed(2)}`);
     }
 
     // Limpiar portfolio huérfano SIEMPRE en modo LIVE al arrancar
     // Un portfolio huérfano tiene posiciones que no existen en Binance real
-    if (bot && LIVE_MODE) {
-      const tv = bot.totalValue();
-      const posCount = Object.keys(bot.portfolio||{}).length;
+    if (S.bot && LIVE_MODE) {
+      const tv = S.bot.totalValue();
+      const posCount = Object.keys(S.bot.portfolio||{}).length;
       if (tv > virtualCapital * 1.1 && posCount > 0) {
         console.warn(`[LIVE] ⚠️ Estado huérfano: totalValue $${tv.toFixed(2)} con ${posCount} posiciones >> capital $${virtualCapital.toFixed(2)} → limpiando`);
-        bot.portfolio = {};
-        bot.cash = virtualCapital;
+        S.bot.portfolio = {};
+        S.bot.cash = virtualCapital;
         // Resetear equity para evitar drawdown falso
-        bot.maxEquity = virtualCapital;
-        bot.drawdownAlerted = false;
+        S.bot.maxEquity = virtualCapital;
+        S.bot.drawdownAlerted = false;
         console.log(`[LIVE] ✅ Portfolio limpiado. Cash = $${virtualCapital.toFixed(2)}`);
         tg.send && tg.send(`🔧 <b>[LIVE]</b> Estado huérfano limpiado al arrancar.\nCapital: <b>$${virtualCapital.toFixed(2)}</b> USDC\nPosiciones anteriores eliminadas (no existían en Binance real)`);
       }
@@ -874,7 +920,7 @@ async function verifyLiveBalance() {
     const others = balances.filter(b=>b.asset!=="USDC"&&b.asset!=="USDT"&&b.asset!=="BNB"&&parseFloat(b.free)>0.001);
     if (others.length>0) console.log(`[LIVE] Otros activos en Binance: ${others.map(b=>b.asset+":"+parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados por el bot)`);
     
-    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${bot?.cash?.toFixed(2)||virtualCapital} USDC`);
+    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${S.bot?.cash?.toFixed(2)||virtualCapital} USDC`);
 
   } catch(e) {
     console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);
@@ -886,347 +932,8 @@ async function verifyLiveBalance() {
   }
 }
 
-function startLoop(){
-  connectBinance();
-  let _tickRunning = false;
-  
-// ── Capital Alert: aviso de añadir capital cuando condiciones son óptimas ───
-let _lastCapAlertTs = 0;
-let _prevRegime = null;
-function checkCapitalAlert(s) {
-  if(!s||s.loading) return;
-  const now = Date.now();
-  const wr = s.recentWinRate||0;
-  const regime = s.marketRegime;
-  const dd = s.drawdownPct||0;
-  const tv = s.totalValue||0;
-  const regimeToBull = regime==="BULL" && _prevRegime!=="BULL";
-  _prevRegime = regime;
-  const shouldAlert = (regimeToBull || wr>=42) && dd<5 && (now-_lastCapAlertTs)>86400000;
-  if(!shouldAlert) return;
-  _lastCapAlertTs = now;
-  const add = tv<150?100:tv<400?200:tv<800?500:1000;
-  const why = regimeToBull?"🐂 MERCADO CAMBIA A BULL — momentum favorable":`📈 WR ${wr}% sostenido — sistema rentable`;
-  sendTelegram([
-    "🚨🚨🚨 ALERTA DE CAPITAL 🚨🚨🚨",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "",why,"",
-    `💼 Capital: $${tv.toFixed(2)} | WR: ${wr}% | DD: ${dd.toFixed(1)}%`,
-    `📊 Régimen: ${regime} | F&G: ${s.fearGreed||"?"}`,
-    "",
-    `💡 ACCIÓN: Añadir $${add} USDC en Binance`,
-    `   Capital nuevo estimado: $${(tv+add).toFixed(0)}`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    "Máx 1 alerta/día. El bot sigue operando igual sin acción.",
-  ].join("\n"));
-}
-
-setInterval(async()=>{
-    if(!bot) return;
-    if(_tickRunning){ console.warn("[LIVE] Tick overlap - saltando"); return; }
-    _tickRunning = true;
-    try {
-    simulatePrices();
-
-    // Feed current prices to simple engine
-    if(simpleBot && bot.prices) {
-      for(const [sym,price] of Object.entries(bot.prices)) {
-        simpleBot.updatePrice(sym, price);
-      }
-    }
-
-    const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
-    if(marketState?.defensive&&!wasDefensive){
-
-      wasDefensive=true;
-      // Record defensive mode decision for learning
-      if(bot) bot.riskLearning?.recordDecision("DEFENSIVE_MODE","BTCUSDC",bot.prices?.["BTCUSDC"]||0,"block_entry",{drawdown:marketState.btcDrawdown});
-    }
-    if(!marketState?.defensive&&wasDefensive){wasDefensive=false;}
-
-    bot.marketDefensive=marketGuard.isDefensive();
-    bot.hourMultiplier=getTradingScore().score;
-    bot.blacklist=blacklist;
-
-    // ── MOMENTUM BOOST: días muy buenos → aumentar tamaño de posiciones ────────
-    // Calcula P&L del día actual desde los trades cerrados hoy
-    const todaySells = bot.log.filter(l => {
-      if (l.type !== "SELL") return false;
-      const d = new Date(l.ts); const n = new Date();
-      return d.getDate()===n.getDate() && d.getMonth()===n.getMonth() && d.getFullYear()===n.getFullYear();
-    });
-    const todayPnlPct = todaySells.reduce((s,l)=>s+(l.pnl||0),0);
-    bot._dailyPnlPct = todayPnlPct;
-
-    // Escala el multiplicador según el rendimiento del día:
-    // <0%:   0.7x (defensivo)  | 0-3%: 1.0x (normal)
-    // 3-7%:  1.3x (bueno)      | 7-12%: 1.6x (muy bueno)
-    // >12%:  2.0x (excepcional — máximo para no sobreexponer)
-    let momentumMult = 1.0;
-    if      (todayPnlPct < 0)    momentumMult = 0.7;
-    else if (todayPnlPct < 3)    momentumMult = 1.0;
-    else if (todayPnlPct < 7)    momentumMult = 1.3;
-    else if (todayPnlPct < 12)   momentumMult = 1.6;
-    else                          momentumMult = 2.0;
-
-    // También subir el límite diario en días buenos (más oportunidades)
-    if (todayPnlPct >= 7)  bot._dailyLimitBoost = Math.round(todayPnlPct / 5);
-    else                   bot._dailyLimitBoost = 0;
-
-    // CryptoPanic: si hay noticias negativas, reducir tamaño global
-    const cpGlobalMult = cryptoPanic.globalDefensive ? 0.3 : 1.0;
-    bot._newsMultiplier = cpGlobalMult;
-    bot._cryptoPanicStatus = cryptoPanic.getStatus();
-    // Pasar el multiplicador de noticias al engine para usarlo por par
-    // Record CryptoPanic global state for learning
-    if (cryptoPanic.globalDefensive && !bot._wasGlobalDefensive) {
-      // Just became defensive — record decision for each open position
-      for (const sym of Object.keys(bot.portfolio||{})) {
-        bot.riskLearning?.recordDecision("CRYPTOPANIC_GLOBAL", sym, bot.prices[sym]||0, "reduce_size", {global:true});
-      }
-    }
-    bot._wasGlobalDefensive = cryptoPanic.globalDefensive;
-    bot._cryptoPanicFn = (symbol) => cryptoPanic.getSizeMultiplier(symbol);
-
-    bot.hourMultiplier = getTradingScore().score * momentumMult * cpGlobalMult;
-
-    // Alertas Telegram momentum
-    const prevMomentumLevel = bot._prevMomentumLevel || 1.0;
-    // Momentum boost notification removed
-
-    bot._prevMomentumLevel = momentumMult;
-
-    // CryptoPanic state tracking (notifications disabled)
-    const prevCpGlobal = bot._prevCpGlobal || false;
-    const prevCpPairs = bot._prevCpPairs || [];
-    bot._prevCpGlobal = cryptoPanic.globalDefensive;
-    bot._prevCpPairs = [...cryptoPanic.defensivePairs];
-
-    // ── Aplicar parámetros aprendidos a los subsistemas ──────────────────────
-    // Notificar si RiskLearning actualizó parámetros
-    if (bot._rlChanges?.changes?.length && tg.notifyRiskLearningUpdate) {
-      tg.notifyRiskLearningUpdate(bot._rlChanges.changes);
-      bot._rlChanges = null;
-    }
-    if (bot.riskLearning) {
-      // CryptoPanic: ajustar umbral global y expiración
-      cryptoPanic._learnedGlobalThreshold = bot.riskLearning.get("cpGlobalThreshold", 5);
-      cryptoPanic._learnedExpiryHours     = bot.riskLearning.get("cpExpiryHours", 2);
-      // TrailingStop: ajustar activación mínima
-      if (bot.trailing) bot.trailing._learnedTrailingMin = bot.riskLearning.get("trailingMinPct", 2) / 100;
-    }
-
-    if (momentumMult !== 1.0 && ticks % 30 === 0) {
-      console.log(`[LIVE] Momentum x${momentumMult} | CryptoPanic x${cpGlobalMult} | P&L hoy: +${todayPnlPct.toFixed(1)}%`);
-    }
-
-    // No operar hasta que pase 1 hora desde el arranque
-    if (!liveReady) {
-      const remaining = Math.ceil((liveStartTime - Date.now()) / 60000);
-      broadcast({ type:"tick", data:{ ...bot.getState(), instance:LIVE_MODE?"LIVE":"PAPER-LIVE", binanceLive, liveReady:false, liveReadyIn:remaining } });
-      if(ticks%6===0) save().catch(e=>console.error("[SAVE]",e));
-      ticks++;
-      return;
-    }
-
-    if(tgControls?.isPaused()) bot._pausedByTelegram=true; else bot._pausedByTelegram=false;
-    let signals=[],newTrades=[],circuitBreaker=null,optimizerResult=null,drawdownAlert=null,dailyLimit=50,dailyUsed=0;
-    try {
-      ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=bot.evaluate());
-      if(bot.tick%60===0){try{checkCapitalAlert(bot.getState());}catch(e){}}
-    } catch(evalErr) {
-      console.error("[LIVE] bot.evaluate() error:", evalErr.message);
-      console.error(evalErr.stack?.split("\n").slice(0,3).join("\n"));
-      ticks++;
-      return; // skip this tick, don't crash
-    }
-    ticks++;
-
-    // ── Simple engine signals → real orders ──────────────────────────────
-    if(simpleBot && !tgControls?.isPaused() && !bot._pausedByTelegram) {
-      simpleBot.evaluate();
-      // Check for new trades from simple engine
-      const simpleTrades = simpleBot.log.filter(l =>
-        l.ts > (Date.now() - TICK_MS*2) && l.type === "BUY"
-      );
-      if(LIVE_MODE) {
-        for(const st of simpleTrades) {
-          const alreadyOrdered = bot.portfolio?.[st.symbol];
-          if(!alreadyOrdered) {
-            console.log(`[SIMPLE→LIVE] BUY ${st.symbol} $${st.invest?.toFixed(0)}`);
-            placeLiveBuy(st.symbol, st.invest)
-              .catch(e=>console.error("[SIMPLE ORDER] BUY error:", e.message));
-          }
-        }
-      }
-      // Save simple state every 6 ticks
-      if(ticks%6===0) {
-        db.saveSimpleState(simpleBot.saveState()).catch(()=>{});
-      }
-    }
-
-    for(const trade of newTrades){
-      if(trade.type==="SELL"){
-        const liveCfg=global._alertConfig||{winPct:3,lossPct:3};
-
-        // Explicabilidad: notificar trades significativos con explicación
-
-        if(trade.pnl<0){blacklist.recordLoss(trade.symbol);}
-        else blacklist.recordWin(trade.symbol);
-      }
-      // ── ÓRDENES REALES BINANCE ─────────────────────────────────────────────
-      if(LIVE_MODE){
-        // No usamos await aquí — las órdenes se procesan en background
-        // para no bloquear el tick loop (TWAP puede tardar 60s)
-        if(trade.type==="BUY") {
-          placeLiveBuy(trade.symbol, trade.qty*trade.price).catch(e=>console.error("[ORDER] BUY error:",e.message));
-          // Copy trade to clients (proporcionalmente a su capital)
-          clientManager.copyBuy(trade.symbol, trade.qty*trade.price, bot.totalValue())
-            .catch(e=>console.warn("[CLIENT] copyBuy error:", e.message));
-        }
-        if(trade.type==="SELL") {
-          placeLiveSell(trade.symbol, trade.qty).catch(e=>console.error("[ORDER] SELL error:",e.message));
-          // Copy sell to clients
-          clientManager.copySell(trade.symbol, trade.qty)
-            .catch(e=>console.warn("[CLIENT] copySell error:", e.message));
-        }
-      }
-    }
-
-    if(circuitBreaker?.triggered&&!cbNotified){tg.notifyCircuitBreaker(circuitBreaker.drawdown);cbNotified=true;}
-    if(!circuitBreaker?.triggered)cbNotified=false;
-    if(drawdownAlert?.triggered)tg.notifyMaxDrawdown(drawdownAlert);
-    if(!circuitBreaker?.triggered) cbNotified=false;
-
-
-    // Real-time F&G — actualizar cada tick
-    if(bot && bot.history) {
-      const rtFG = calcRealtimeFearGreed(bot, {
-        longShortRatio: bot.longShortRatio,
-        fundingRate: bot.fundingRate,
-        openInterest: bot.openInterest,
-        redditSentiment: bot.redditSentiment,
-        officialFearGreed: bot._officialFearGreed || bot.fearGreed,
-      });
-      bot.fearGreedRealtime = rtFG;
-      bot.fearGreed = rtFG.value;
-      bot.fearGreedSource = rtFG.source;
-    }
-
-    if(Date.now()-lastFearGreedCheck>1800000){
-      lastFearGreedCheck=Date.now();
-      fetchFearGreed().then(fg=>{
-        try {
-          bot._officialFearGreed=fg.value; bot.fearGreed=fg.value;
-          if(bot.fearGreedRealtime?.scores && fg.source !== "fallback" && fgCalibrator?.recordObservation) {
-            fgCalibrator.recordObservation(bot.fearGreedRealtime.scores, bot.fearGreedRealtime.synthetic, fg.value);
-          }
-          bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown";
-          console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`);
-        } catch(e) { console.warn("[F&G] calibration error:", e.message); }
-      }).catch(e=>console.warn("[F&G] fetch failed:", e.message));
-      // Market data for Telegram /mercado command
-      fetchLongShortRatio("BTCUSDT").then(ls=>{bot.longShortRatio=ls;}).catch(()=>{});
-      fetchFundingRate("BTCUSDT").then(fr=>{bot.fundingRate=fr;}).catch(()=>{});
-      fetchOpenInterest("BTCUSDT").then(oi=>{bot.openInterest=oi;}).catch(()=>{});
-      fetchLiquidations().then(liq=>{if(liq) bot.liquidations=liq;}).catch(()=>{});
-      fetchBTCDominance().then(dom=>{if(dom) bot.btcDominance=dom;}).catch(()=>{});
-      fetchCoinbasePremium().then(cp=>{if(cp){bot.coinbasePremium=cp;
-        if(cp.signal==="INSTITUTIONAL_BUY") console.log(`[CB-PREMIUM] 🏦 Institucionales USA comprando: ${cp.premium.toFixed(3)}%`);
-        if(cp.signal==="INSTITUTIONAL_SELL") console.log(`[CB-PREMIUM] 🏦 Institucionales USA vendiendo: ${cp.premium.toFixed(3)}%`);
-      }}).catch(()=>{});
-      fetchExchangeFlow().then(ef=>{if(ef) bot.exchangeFlow=ef;}).catch(()=>{});
-      fetchBinanceReserve().then(br=>{if(br) bot.binanceReserve=br;}).catch(()=>{});
-      if(Date.now()-(bot._lastRedditFetch||0)>7200000){
-        bot._lastRedditFetch=Date.now();
-        fetchRedditSentiment().then(rs=>{bot.redditSentiment=rs;}).catch(()=>{});
-      }
-    }
-
-
-
-    // Enviar equity a BAFIR
-    if(ticks%60===0) sendEquityToBafir(bot.totalValue());
-    // WF intradía cada 30min en live (sin API, usa historial en RAM)
-    if(ticks%180===0 && ticks>0) {
-      try {
-        const wf = runIntradayWalkForward(bot);
-        if(wf) {
-          bot._intradayWF = wf;
-          if(wf.verdict==="SOBREAJUSTE") {
-            console.warn(`[WF-LIVE] ⚠️ Ratio ${wf.avgRatio} — posible sobreajuste intradía`);
-          } else {
-            console.log(`[WF-LIVE] Ratio ${wf.avgRatio} — ${wf.verdict}`);
-          }
-        }
-      } catch(e) {}
-    }
-    // Reconciliación periódica cada 30 ticks: comparar cash virtual vs Binance real
-    if(LIVE_MODE && ticks%180===0) {
-      getAccountBalance().then(balances => {
-        if(!balances||!bot) return;
-        const realUSDC = parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0);
-        const virtualFree = bot.cash;
-        const openPositions = Object.keys(bot.portfolio||{}).length;
-
-        if(virtualFree > CAPITAL_USDT * 2) {
-          // cash virtual corrupto → corregir
-          console.warn(`[RECONCILE] cash virtual $${virtualFree.toFixed(2)} >> capital $${CAPITAL_USDT} → corrigiendo`);
-          bot.cash = CAPITAL_USDT;
-          bot.portfolio = {};
-          bot.maxEquity = CAPITAL_USDT;
-          bot.breaker?.reset && bot.breaker.reset(CAPITAL_USDT);
-        } else if(realUSDC < 1 && openPositions === 0 && virtualFree > 10) {
-          // Puede ser problema de IP (API key restringida) o falta de fondos
-          // Solo avisar, no pausar automáticamente (la IP puede causar $0 falso)
-          bot._reconcileZeroCount = (bot._reconcileZeroCount||0) + 1;
-          if(bot._reconcileZeroCount === 1) {
-            console.warn(`[RECONCILE] ⚠️ Binance USDC=$0 pero virtual=$${virtualFree.toFixed(2)} — puede ser restricción de IP`);
-            // periodic $0 warning removed //\nPuede ser restricción de IP en API key.\nEl bot continúa operando. Si persiste más de 30min, verifica en Binance.`);
-          }
-        } else {
-          const drift = realUSDC - virtualFree;
-          if(Math.abs(drift) > 2 && Math.abs(drift) < 15) {
-            console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
-            bot.cash += drift * 0.1; // corrección suave 10%
-          }
-        }
-      }).catch(()=>{});
-    }
-
-    // Guardar
-    if(ticks%6===0) save().catch(e=>console.error("[SAVE]",e));
-
-    broadcast({
-      type:"tick",
-      data:{
-        ...bot.getState(),signals,newTrades,circuitBreaker,optimizerResult,
-        binanceLive,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",
-        marketDefensive:marketGuard.isDefensive(),
-        tradingHour:getTradingScore(),
-        blacklistStatus:blacklist.getStatus(),
-        fearGreed:bot.fearGreed,marketRegime:bot.marketRegime,
-        dailyLimit,dailyUsed,
-        dailyPnlPct:bot._dailyPnlPct||0,
-        momentumMult:bot.hourMultiplier,
-        cryptoPanic:bot._cryptoPanicStatus||null,
-        riskLearning:bot._rlChanges||null,
-        riskLearningStats:bot.riskLearning?.getStats()||{},
-        syncHistory:syncHistory.slice(-7),
-        syncThreshold:SYNC_THRESHOLD,
-        clientStatus:clientManager.getStatus(),
-      }
-    });
-
-    } catch(loopErr) {
-      console.error("[LIVE] Loop error:", loopErr.message);
-    } finally {
-      _tickRunning = false;
-    }
-  },TICK_MS);
-
-}
+// ── Trading Loop (extraído a trading/loop.js) ────────────────────────────────
+const { startLoop } = require("./trading/loop");
 
 // Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
 scheduleWeeklyReport(tg, null, "live", null);
@@ -1237,7 +944,7 @@ server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${
 wss.on("connection", ws=>{
   // Enviar estado inicial
   try {
-    if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:bot.mode,syncHistory}}));
+    if(S.bot) ws.send(JSON.stringify({type:"state",data:{...S.bot.getState(),instance:S.bot.mode,syncHistory: S.syncHistory}}));
     else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"LIVE",totalValue:0}}));
   } catch(e) {}
   // Heartbeat: ping cada 25s para evitar que Railway cierre la conexión idle
