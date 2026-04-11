@@ -291,26 +291,20 @@ class SimpleBotEngine {
   }
 
   _onCandleClose(cfg, key){
+    try {
     const candles = this._candles[key]||[];
     const last = candles[candles.length-1];
-    console.log(`[SIMPLE][CANDLE] ${cfg.pair}/${cfg.tf} cerrada — O:${last?.open?.toFixed(2)} H:${last?.high?.toFixed(2)} L:${last?.low?.toFixed(2)} C:${last?.close?.toFixed(2)} (${candles.length} velas)`);
-    if(candles.length < CANDLE_MIN[cfg.tf]){
-      console.log(`[SIMPLE][FILTER] ${cfg.pair}/${cfg.tf} bloqueado — solo ${candles.length}/${CANDLE_MIN[cfg.tf]} velas`);
-      return;
-    }
+    console.log(`[SIMPLE][CANDLE] ${cfg.pair}/${cfg.tf} cerrada — O:${last?.open?.toFixed(2)} H:${last?.high?.toFixed(2)} L:${last?.low?.toFixed(2)} C:${last?.close?.toFixed(2)} (${candles.length}/${CANDLE_MIN[cfg.tf]} velas)`);
+    if(candles.length < CANDLE_MIN[cfg.tf]) return;
     console.log(`[SIMPLE][EVAL-START] ${cfg.id} ${cfg.pair}/${cfg.tf}/${cfg.type}`);
-    // Already have open position for this strategy
     if(this.portfolio[cfg.id]){
-      console.log(`[SIMPLE][EVAL] ${cfg.id} — ya tiene posición abierta, skip`);
+      console.log(`[SIMPLE][EVAL] ${cfg.id} — posición abierta, skip`);
       return;
     }
-    // Kelly gate
     const stratTrades = this._stratTrades[cfg.id]||[];
     const kelly = calcKelly(stratTrades);
     console.log(`[SIMPLE][KELLY] ${cfg.id} kelly=${kelly.kelly} WR=${kelly.wr}% n=${kelly.n} → ${kelly.negative && kelly.n >= 10 ? "BLOQUEADO" : "OK"}`);
-    if(kelly.negative && kelly.n >= 10){
-      return;
-    }
+    if(kelly.negative && kelly.n >= 10) return;
     const signal = evalSignal(cfg.type, candles);
     console.log(`[SIMPLE][EVAL] ${cfg.id} signal=${signal || "HOLD"}`);
     if(signal !== "BUY") return;
@@ -351,7 +345,11 @@ class SimpleBotEngine {
       openTs:Date.now(),invest,
     };
     this.log.push({type:"BUY",symbol:cfg.pair,strategy:cfg.id,price,invest,ts:Date.now()});
-    console.log(`[SIMPLE][${cfg.tf}][${cfg.type}] BUY ${cfg.pair} @ $${price.toFixed(4)} $${invest.toFixed(0)} [Capa${cfg.capa}]`);
+    console.log(`[SIMPLE][BUY] ${cfg.pair} @ $${price.toFixed(4)} $${invest.toFixed(0)} [Capa${cfg.capa}] ${cfg.id}`);
+    } catch(e) {
+      console.error(`[SIMPLE][ERROR] _onCandleClose ${cfg?.id}: ${e.message}`);
+      console.error(e.stack?.split("\n").slice(0,3).join("\n"));
+    }
   }
 
   setContext(db, botName, regime, fearGreed) {
