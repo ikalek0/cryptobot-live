@@ -202,6 +202,10 @@ setInterval(async()=>{
       if(ticks%6===0) {
         S.simpleBot.saveState && saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
       }
+      // Auto-alerts every 60 ticks (~10min)
+      if(ticks%60===0) {
+        tg.checkAlerts?.(() => S.simpleBot?.getState?.());
+      }
     }
 
     for(const trade of newTrades){
