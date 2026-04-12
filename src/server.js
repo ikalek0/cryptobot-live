@@ -770,7 +770,7 @@ const { startLoop } = require("./trading/loop");
 scheduleWeeklyReport(tg, null, "live", null);
 scheduleTradeAnalysisReminder(tg, null, "live");
 
-server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🔴 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
+server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🎯 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
 
 wss.on("connection", ws=>{
   // Enviar estado inicial
