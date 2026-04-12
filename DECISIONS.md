@@ -86,3 +86,26 @@
 **Decision:** B + C combinadas — Circuit breaker en memoria + lista de hosts muertos (`DEAD_HOSTS = ["railway.internal", "railway.app"]`).
 **Razon:** (1) Mantiene la opción de configurar PostgreSQL local en Hetzner más adelante sin tocar código. (2) Un solo mensaje `[DB] PostgreSQL desactivado — usando disco` al primer fallo, luego silencio total hasta el próximo restart. (3) Detección inmediata de URLs Railway sin esperar timeout de DNS. Validado: 2000 operaciones → 1 sola línea de log. Tests: 64/64 pasan.
 
+## D016: Limitación reconocida — BAFIR v1 es bull-only
+**Contexto:** Las 7 estrategias actuales (RSI_MR_ADX, EMA_CROSS, TREND_200) son todas long-only y diseñadas para mercados alcistas o laterales. En bear markets con tendencia bajista, los filtros bloquean correctamente las señales (no cazar cuchillos), pero el bot queda dormido sin generar oportunidades. Observación: RSI_MR requiere ADX<25 (ausencia de tendencia), EMA_CROSS requiere golden crosses (raros en bear), TREND_200 requiere precio > EMA200 (imposible en bear).
+**Validación empírica (abril 2026):** Script `scripts/diagnose_signals.js` confirma 0/7 señales en el estado de mercado actual. BNB_1h_RSI: RSI=22.4 ✓ pero ADX=35.6 ✗. BTC_30m_RSI: RSI=32.9 ✓ pero ADX=74.1 ✗ (downtrend extremo). Las 4 EMA_CROSS: EMA9<EMA21 sin posibilidad de golden cross. BNB_1d_T200: precio $594 vs EMA200 $796 (25% debajo). Filtros funcionan exactamente como fueron diseñados.
+**Opciones:** A) Añadir estrategias short ahora para v1. B) Aceptar la limitación, validar v1 y diseñar v2 multi-régimen más adelante.
+**Decision:** B — Aceptar la limitación en v1. Validar el sistema actual con poco capital. Después del primer mes en LIVE, diseñar BAFIR v2 que opera en todos los regímenes.
+**Razon:** La arquitectura v1 ya está construida y validada. Añadir estrategias short ahora añadiría complejidad (futuros/puts/inverse, detector de régimen, rotación) que retrasaría LIVE. Mejor validar v1 primero, generar primeros datos reales, y después expandir. Un bot que sólo gana en bull sigue siendo útil como validación del pipeline end-to-end y del Kelly Gate adaptativo.
+**Pendiente post-LIVE [PRIORIDAD ALTA]:** Diseñar BAFIR v2 con:
+- Estrategias short (futuros, puts, inverse ETFs)
+- Detector de régimen robusto (no sólo F&G)
+- Sistema de rotación de estrategias según régimen
+- Backtesting riguroso de cada nueva estrategia antes de promocionar a live
+
+## D017: Camino híbrido v1 + v2
+**Contexto:** D016 reconoce que v1 es bull-only por diseño. El estado de mercado actual (F&G=16, ADX BTC=74, BNB -25% vs EMA200) confirma que v1 está dormido correctamente pero no entrega valor en este régimen. La pregunta es si esperamos a v2 para activar LIVE o avanzamos ya con v1.
+**Opciones:** A) Esperar a v2 antes de LIVE. B) Activar v1 ya en LIVE con capital pequeño + desarrollar v2 en paralelo. C) Quedarse en PAPER-LIVE hasta v2.
+**Decision:** B — Camino híbrido. Activar v1 en LIVE con $100 para validación operacional + datos reales. En paralelo diseñar y backtest v2 con estrategias short/contrarian para regímenes bear. Integrar cuando v2 esté validada.
+**Razon:** v1 está construido y validado en backtest. Activarlo da datos reales y aprendizaje operacional sin riesgo significativo — el riesgo máximo en bear es quedarse en cash (no perder capital). v2 es trabajo mayor (estrategias short, detector de régimen, rotación) que no debe bloquear LIVE de v1. El capital pequeño ($100) permite aprender sobre ejecución real, slippage, latencia de orden, Kelly Gate adaptativo con datos frescos.
+**Plan de próximos pasos:**
+- Semana 1: Deploy workflow validado, activación LIVE con $100, monitoreo
+- Semanas 2-3: Sesión dedicada a diseñar v2 (estrategias short, backtest, detector de régimen)
+- Mes 1: v2 en PAPER-LIVE para validar
+- Mes 2: v2 en LIVE complementando v1
+
