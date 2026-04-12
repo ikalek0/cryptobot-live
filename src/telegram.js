@@ -64,10 +64,11 @@ function buildWeekly(state) {
 function notifyDailySummary(state)  { send(buildDaily(state)); }
 function notifyWeeklySummary(state) { send(buildWeekly(state)); }
 
-// ── Comando /estado ───────────────────────────────────────────────────────────
+// ── Comandos Telegram ────────────────────────────────────────────────────────
 let lastUpdateId=0;
-function startCommandListener(getState) {
-  if(!TOKEN) return;
+let paused = false;
+function startCommandListener(getState, botControls) {
+  if(!TOKEN) return { isPaused: () => paused };
   function poll() {
     const req=https.get(`https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId+1}&timeout=20`,res=>{
       let d="";res.on("data",c=>d+=c);
@@ -84,17 +85,17 @@ function startCommandListener(getState) {
                 const tv = s.totalValue||0;
                 const ret = s.returnPct||0;
                 const wr = s.winRate||0;
-                const kelly = s.kellyGate||s._kellyGate||{};
-                const kellyIcon = kelly.negative?"🔴":"🟢";
                 const trades = (s.log||[]).filter(l=>l.type==="SELL").length;
+                const simple = botControls?.getSimpleState?.();
+                const simpleKellys = simple?.kellyByStrategy||{};
+                const firstKelly = Object.values(simpleKellys)[0]||{};
                 send(
                   `📊 <b>BAFIR LIVE — Estado actual</b>\n` +
                   `Capital: <b>$${tv.toFixed(2)}</b> (${ret>=0?"+":""}${ret.toFixed(2)}%)\n` +
                   `Win Rate: <b>${wr}%</b> | Trades: ${trades}\n` +
-                  `Kelly: ${kellyIcon} ${kelly.raw?.toFixed?.(3)||"—"} (WR rolling: ${kelly.wr||"—"}%)\n` +
                   `Régimen: ${s.marketRegime||"—"} | F&G: ${s.fearGreed||"—"}\n` +
-                  `Posiciones abiertas: ${Object.keys(s.portfolio||{}).length}\n` +
-                  `P&L hoy: ${s.dailyPnlPct>=0?"+":""}${(s.dailyPnlPct||0).toFixed(2)}%`
+                  `Posiciones: ${Object.keys(s.portfolio||{}).length} | Pausa: ${paused?"SÍ":"NO"}\n` +
+                  `Uptime: ${Math.round(process.uptime()/3600)}h`
                 );
               }
               else if(text==="/posiciones") {
@@ -111,7 +112,6 @@ function startCommandListener(getState) {
                 }
               }
               else if(text==="/estrategias") {
-                // Simple engine state
                 const simple = botControls?.getSimpleState?.();
                 if(!simple?.strategies) { send("⏳ Engine simple arrancando..."); }
                 else {
@@ -128,15 +128,59 @@ function startCommandListener(getState) {
                 }
               }
               else if(text==="/kelly") {
-                const kelly = s.kellyGate||s._kellyGate||{};
-                const icon = kelly.negative?"🔴 BLOQUEADO":"🟢 ACTIVO";
+                const simple = botControls?.getSimpleState?.();
+                if(!simple?.kellyByStrategy) { send("⏳ Calculando Kelly..."); }
+                else {
+                  const lines = Object.entries(simple.kellyByStrategy).map(([id, k])=>{
+                    const icon = k.negative?"🔴":"🟢";
+                    return `${icon} <b>${id}</b> kelly=${k.kelly} WR=${k.wr||"—"}% n=${k.n}`;
+                  }).join("\n");
+                  send(`📐 <b>Kelly Gate por estrategia</b>\n\n${lines}`);
+                }
+              }
+              else if(text==="/sizing") {
+                const simple = botControls?.getSimpleState?.();
+                if(!simple) { send("⏳ Engine simple arrancando..."); }
+                else {
+                  const tv = simple.totalValue||100;
+                  const lines = (simple.strategies||[]).map(st=>{
+                    const k = st.kelly||{};
+                    const kellyFrac = Math.max(0.05, Math.min(0.5, k.kelly||0.1));
+                    let invest = tv * kellyFrac * 0.5;
+                    if(invest > tv*0.30) invest = tv*0.30;
+                    const avail = st.capa===1 ? simple.capa1Cash : simple.capa2Cash;
+                    if(invest > avail) invest = avail;
+                    const skip = invest < 10;
+                    const icon = skip?"⛔":st.active?"🟡":"✅";
+                    return `${icon} <b>${st.id}</b>\n   Kelly=${kellyFrac.toFixed(3)} → $${invest.toFixed(1)} ${skip?"(< $10 min)":""}`;
+                  }).join("\n");
+                  send(
+                    `💰 <b>Sizing actual</b> (capital: $${tv.toFixed(0)})\n` +
+                    `Capa1: $${simple.capa1Cash?.toFixed?.(0)||"—"} | Capa2: $${simple.capa2Cash?.toFixed?.(0)||"—"}\n\n${lines}\n\n` +
+                    `Half-Kelly · Cap 30% · Min $10`
+                  );
+                }
+              }
+              else if(text==="/health") {
+                const uptimeH = Math.round(process.uptime()/3600);
+                const uptimeM = Math.round((process.uptime()%3600)/60);
+                const mem = process.memoryUsage();
+                const heapMB = (mem.heapUsed/1024/1024).toFixed(1);
+                const rssMB = (mem.rss/1024/1024).toFixed(1);
+                const simple = botControls?.getSimpleState?.();
+                const candleStatus = (simple?.strategies||[]).map(st=>{
+                  const icon = st.candles >= 50 ? "✅" : "⏳";
+                  return `${icon} ${st.id}: ${st.candles} velas`;
+                }).join("\n");
                 send(
-                  `📐 <b>Kelly Gate</b>\n` +
-                  `Estado: ${icon}\n` +
-                  `Kelly: ${kelly.raw?.toFixed?.(3)||"—"}\n` +
-                  `WR rolling (30 trades): ${kelly.wr||"—"}%\n` +
-                  `Trades en ventana: ${kelly.n||0}\n` +
-                  `${kelly.negative?"❌ No se abren posiciones nuevas":"✅ Engine operando normalmente"}`
+                  `🏥 <b>Health Check</b>\n\n` +
+                  `Uptime: ${uptimeH}h ${uptimeM}m\n` +
+                  `Memoria: ${heapMB}MB heap / ${rssMB}MB RSS\n` +
+                  `Precios activos: ${Object.keys(s.prices||{}).length}\n` +
+                  `Tick: #${s.tick||0}\n` +
+                  `LIVE_MODE: ${process.env.LIVE_MODE||"false"}\n` +
+                  `Pausa: ${paused?"SÍ":"NO"}\n\n` +
+                  `<b>Velas por estrategia:</b>\n${candleStatus}`
                 );
               }
               else if(text.startsWith("/capital ")) {
@@ -151,7 +195,6 @@ function startCommandListener(getState) {
               else if(text==="/pausa") {
                 paused = true;
                 if(botControls?.setPaused) botControls.setPaused(true);
-                if(typeof _pauseTimer !== "undefined" && _pauseTimer) clearTimeout(_pauseTimer);
                 send("⏸ <b>Bot pausado indefinidamente</b>\nNo se abrirán nuevas posiciones\nLos stops siguen activos\nEscribe /reanudar para volver a operar");
               }
               else if(text==="/reanudar") {
@@ -161,10 +204,12 @@ function startCommandListener(getState) {
               }
               else if(text==="/ayuda") send(
                 `📖 <b>Comandos disponibles:</b>\n\n` +
-                `/estado — capital, WR, Kelly, régimen\n` +
+                `/estado — capital, WR, régimen, uptime\n` +
                 `/posiciones — qué está abierto ahora\n` +
                 `/estrategias — estado de las 7 estrategias\n` +
-                `/kelly — estado del Kelly gate\n` +
+                `/kelly — Kelly gate por estrategia\n` +
+                `/sizing — sizing actual por estrategia\n` +
+                `/health — health check del sistema\n` +
                 `/capital [n] — cambiar capital (ej: /capital 110)\n` +
                 `/semana — resumen de los últimos 7 días\n` +
                 `/pausa — pausar entradas (stops siguen activos)\n` +
@@ -181,7 +226,8 @@ function startCommandListener(getState) {
     req.setTimeout(25000,()=>{req.destroy();setTimeout(poll,1000);});
   }
   poll();
-  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /capital /semana /pausa /reanudar /ayuda");
+  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /sizing /health /capital /semana /pausa /reanudar /ayuda");
+  return { isPaused: () => paused };
 }
 
 // ── Programar resúmenes ───────────────────────────────────────────────────────
@@ -277,3 +323,65 @@ function notifyRiskLearningUpdate(changes) {
   send(`🧠 <b>RISK LEARNING — Parámetros ajustados</b>\n${lines}\n\nEl bot ha aprendido que sus reglas de riesgo necesitaban ajuste.`);
 }
 module.exports.notifyRiskLearningUpdate = notifyRiskLearningUpdate;
+
+// ── Alertas automáticas ─────────────────────────────────────────────────────
+// Llamar checkAlerts() cada ~60 ticks desde el loop principal
+const _alertState = {
+  capitalHistory: [],      // [{v, t}] — snapshots cada 10min
+  lastCapitalAlertTs: 0,   // max 1 alerta por hora
+  positionAlertedAt: {},   // {strategyId: timestamp} — max 1 por posición por día
+};
+
+function checkAlerts(getSimpleState) {
+  const simple = getSimpleState?.();
+  if(!simple) return;
+  const now = Date.now();
+  const tv = simple.totalValue||0;
+
+  // ── Capital drop alert: >5% en 1 hora ─────────────────────────────────
+  _alertState.capitalHistory.push({v:tv, t:now});
+  // Mantener solo ultima hora
+  _alertState.capitalHistory = _alertState.capitalHistory.filter(h => now - h.t < 3600000);
+  if(_alertState.capitalHistory.length >= 2) {
+    const oldest = _alertState.capitalHistory[0];
+    const dropPct = (oldest.v - tv) / oldest.v * 100;
+    if(dropPct >= 5 && now - _alertState.lastCapitalAlertTs > 3600000) {
+      _alertState.lastCapitalAlertTs = now;
+      send(
+        `🚨 <b>ALERTA: Capital cayó ${dropPct.toFixed(1)}% en 1h</b>\n` +
+        `Hace 1h: $${oldest.v.toFixed(2)} → Ahora: $${tv.toFixed(2)}\n` +
+        `Revisa posiciones o usa /pausa si es necesario.`
+      );
+    }
+  }
+
+  // ── Position age alert: >24h warning, >44h time-stop inminente ────────
+  for(const [id, pos] of Object.entries(simple.portfolio||{})) {
+    const ageH = (now - (pos.openTs||now)) / 3600000;
+    const lastAlert = _alertState.positionAlertedAt[id] || 0;
+    if(ageH >= 44 && now - lastAlert > 4*3600000) {
+      _alertState.positionAlertedAt[id] = now;
+      const pnl = pos.entryPrice ? ((simple.prices?.[pos.pair]||pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100 : 0;
+      send(
+        `⏰ <b>TIME STOP INMINENTE</b>\n` +
+        `<b>${pos.pair}</b> (${id}) abierta hace ${Math.round(ageH)}h\n` +
+        `P&L actual: ${pnl>=0?"+":""}${pnl.toFixed(2)}%\n` +
+        `Se cerrará automáticamente a las 48h.`
+      );
+    } else if(ageH >= 24 && now - lastAlert > 12*3600000) {
+      _alertState.positionAlertedAt[id] = now;
+      const pnl = pos.entryPrice ? ((simple.prices?.[pos.pair]||pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100 : 0;
+      send(
+        `⚠️ <b>Posición abierta >24h</b>\n` +
+        `<b>${pos.pair}</b> (${id}) — ${Math.round(ageH)}h\n` +
+        `P&L actual: ${pnl>=0?"+":""}${pnl.toFixed(2)}%\n` +
+        `Time stop a las 48h.`
+      );
+    }
+  }
+  // Limpiar alertas de posiciones cerradas
+  for(const id of Object.keys(_alertState.positionAlertedAt)) {
+    if(!simple.portfolio?.[id]) delete _alertState.positionAlertedAt[id];
+  }
+}
+module.exports.checkAlerts = checkAlerts;

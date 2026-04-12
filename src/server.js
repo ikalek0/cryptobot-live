@@ -19,7 +19,7 @@ const { ClientBotManager } = require("./clientManager");
 const clientManager = new ClientBotManager();
 const { runIntradayWalkForward } = require("./backtest");
 const shadow = new PaperShadow();
-const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment, fetchLiquidations, fetchBTCDominance, fetchCoinbasePremium, fetchExchangeFlow, fetchBinanceReserve } = require("./feeds");
+const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchTakerVolume, fetchRedditSentiment, fetchLiquidations, fetchBTCDominance, fetchCoinbasePremium, fetchExchangeFlow, fetchBinanceReserve } = require("./feeds");
 const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
@@ -37,7 +37,7 @@ const _lm = process.env.LIVE_MODE;
 const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "");
 console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
-const BAFIR_URL          = process.env.BAFIR_URL   || "https://bafir-trading-production.up.railway.app";
+const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
 
 // Umbral para adoptar parámetros del PAPER
@@ -164,51 +164,6 @@ for(const sp of simplePairs){
   }
 );
 
-  // Startup historical simulation: teach DQN about crisis before facing real market
-  // Live bot gets a condensed version: 2022 crash + recent 30 days only
-  setTimeout(async () => {
-    if(!S.bot || !S.bot.dqn) return;
-    console.log("[HistSim-LIVE] Entrenando DQN con datos históricos de crisis...");
-    const crisis_pairs = ["BTCUSDC","ETHUSDC","SOLUSDC"];
-    const periods = [
-      { start:"2022-05-01", end:"2022-06-30", label:"Crash LUNA/2022" },
-      { start:"2022-11-01", end:"2022-12-31", label:"Crash FTX/2022" },
-    ];
-    let simTrades = 0;
-    for(const pair of crisis_pairs) {
-      for(const period of periods) {
-        try {
-          const klines = await fetchAllKlines(pair, "5m", period.start, period.end);
-          if(!klines || klines.length < 50) continue;
-          // Simulate simplified learning: treat each 5% drop as a failed MR signal
-          for(let i=20; i<klines.length-5; i++) {
-            const window = klines.slice(i-20,i).map(k=>k.close);
-            const rsiVal = window.length>=14 ? (()=>{
-              let gains=0,losses=0;
-              for(let j=1;j<14;j++){const d=window[j]-window[j-1];d>0?gains+=d:losses+=-d;}
-              return 100-100/(1+gains/14/(losses/14||0.001));
-            })() : 50;
-            const pnl5 = (klines[i+5].close - klines[i].close) / klines[i].close * 100;
-            const isDowntrend = klines[i].close < klines[Math.max(0,i-12)].close * 0.97;
-            // In a crisis downtrend, MR entries fail → teach SKIP
-            if(isDowntrend && rsiVal < 40) {
-              const state = S.bot.dqn.encodeState({
-                rsi: rsiVal, bbZone:"below_lower", regime:"LATERAL",
-                trend: isDowntrend?"down":"neutral", fearGreed: 20,
-                btcTrend24h: -5, volatilityPct: 80
-              });
-              S.bot.dqn.remember(state, "BUY", pnl5>0?0.5:-0.8, state);
-              simTrades++;
-            }
-          }
-          if(S.bot.dqn.replayBuffer.length>=20) S.bot.dqn.trainBatch(2);
-          console.log("[HistSim-LIVE] "+period.label+" "+pair+" — "+simTrades+" trades sintéticos");
-        } catch(e) { /* non-blocking */ }
-      }
-    }
-    console.log("[HistSim-LIVE] ✅ "+simTrades+" trades de crisis aprendidos por DQN");
-  }, 15000); // 15s después del arranque
-
   fetchFearGreed().then(fg => { S.bot.fearGreed=fg.value; S.bot.fearGreedPublished=fg.publishedAt; S.bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });
 
   // CRÍTICO: limpiar estado huérfano ANTES de empezar el loop
@@ -331,7 +286,7 @@ app.get("/api/myip-egress", (_,res)=>{
       res.json({
         ipify_v4: ipify?.ip || ipify,
         ipify_v64: ipify64?.ip || ipify64,
-        note: "These are the egress IPs Railway uses for outbound HTTPS requests",
+        note: "These are the server egress IPs for outbound HTTPS requests",
         binanceNote: "Add ALL of these to your Binance API whitelist"
       });
     });
@@ -495,133 +450,6 @@ app.post("/api/set-capital", (req,res) => {
 });
 
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
-// ── Transfer learning: recibe pesos DQN y Q-table del paper ─────────────────
-app.post("/api/sync/transfer", (req,res) => {
-  const sig = req.headers["x-signature"];
-  const body = JSON.stringify(req.body);
-  if(!sig) return res.status(401).json({error:"Firma requerida"});
-  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
-  try {
-    if(!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex")))
-      return res.status(401).json({error:"Firma inválida"});
-  } catch(e) { return res.status(401).json({error:"Firma inválida"}); }
-
-  if(!S.bot) return res.status(503).json({error:"Bot no listo"});
-  const { dqnWeights, qTable, paperStats } = req.body;
-  if(!dqnWeights && !qTable) return res.status(400).json({error:"Sin datos"});
-
-  const wr = paperStats?.winRate||0;
-  const trades = paperStats?.nTrades||0;
-
-  // Solo transferir si paper tiene suficiente experiencia y buen WR
-  if(trades < 50) return res.json({adopted:false, reason:`Paper solo tiene ${trades} trades (mínimo 50)`});
-  if(wr < 30) return res.json({adopted:false, reason:`WR paper ${wr}% muy bajo para transferir`});
-
-  // Registrar WR del live ANTES de la transferencia para medir impacto después
-  const liveSells = (S.bot.log||[]).filter(l=>l.type==="SELL");
-  const liveWrBefore = liveSells.length >= 10
-    ? Math.round(liveSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, liveSells.length) * 100)
-    : null;
-  S.bot._transferHistory = S.bot._transferHistory || [];
-  const transferRecord = {
-    ts: new Date().toISOString(),
-    paperWR: wr, paperTrades: trades,
-    liveWRbefore: liveWrBefore,
-    liveWRafter: null,  // se rellena 2h después
-    blend: Math.min(0.4, trades/500),
-    improved: null,
-  };
-  S.bot._transferHistory.push(transferRecord);
-  if(S.bot._transferHistory.length > 20) S.bot._transferHistory.shift();
-  // Ajustar blend según historial de transferencias anteriores
-  const goodTransfers = (S.bot._transferHistory||[]).filter(t=>t.improved===true).length;
-  const badTransfers  = (S.bot._transferHistory||[]).filter(t=>t.improved===false).length;
-  const totalEval = goodTransfers + badTransfers;
-  let adaptiveBlend = Math.min(0.4, trades/500);
-  if(totalEval >= 3) {
-    const successRate = goodTransfers / totalEval;
-    adaptiveBlend = Math.max(0.05, Math.min(0.50, adaptiveBlend * successRate * 2));
-    console.log(`[TRANSFER] Blend adaptativo: ${(adaptiveBlend*100).toFixed(0)}% (${goodTransfers}/${totalEval} transferencias mejoraron)`);
-  }
-  transferRecord.blend = adaptiveBlend;
-
-  let transferred = [];
-
-  // Transferir pesos DQN (blend 30% paper, 70% live para no perder lo aprendido en live)
-  if(dqnWeights && S.bot.dqn) {
-    try {
-      const BLEND = Math.min(0.4, trades/500); // más trades = más confianza en paper
-      const blendWeights = (live, paper) => {
-        if(!live || !paper || live.length !== paper.length) return live;
-        return live.map((v, i) => v * (1-BLEND) + paper[i] * BLEND);
-      };
-      if(dqnWeights.W1) S.bot.dqn.W1 = blendWeights(S.bot.dqn.W1, dqnWeights.W1);
-      if(dqnWeights.W2) S.bot.dqn.W2 = blendWeights(S.bot.dqn.W2, dqnWeights.W2);
-      if(dqnWeights.W3) S.bot.dqn.W3 = blendWeights(S.bot.dqn.W3, dqnWeights.W3);
-      if(dqnWeights.b1) S.bot.dqn.b1 = blendWeights(S.bot.dqn.b1, dqnWeights.b1);
-      if(dqnWeights.b2) S.bot.dqn.b2 = blendWeights(S.bot.dqn.b2, dqnWeights.b2);
-      if(dqnWeights.b3) S.bot.dqn.b3 = blendWeights(S.bot.dqn.b3, dqnWeights.b3);
-      transferred.push(`DQN (blend ${(BLEND*100).toFixed(0)}%)`);
-    } catch(e) { console.warn("[TRANSFER] DQN error:", e.message); }
-  }
-
-  // Transferir Q-table (merge: mantener lo de live, añadir estados nuevos del paper)
-  if(qTable && S.bot.qLearning?.q) {
-    try {
-      let newStates = 0;
-      for(const [state, actions] of Object.entries(qTable)) {
-        if(!S.bot.qLearning.q[state]) {
-          S.bot.qLearning.q[state] = actions; // nuevo estado del paper
-          newStates++;
-        } else {
-          // Blend existing states
-          for(const [action, val] of Object.entries(actions)) {
-            if(S.bot.qLearning.q[state][action] != null) {
-              S.bot.qLearning.q[state][action] = S.bot.qLearning.q[state][action]*0.7 + val*0.3;
-            } else {
-              S.bot.qLearning.q[state][action] = val;
-            }
-          }
-        }
-      }
-      transferred.push(`Q-table (+${newStates} estados nuevos)`);
-    } catch(e) { console.warn("[TRANSFER] Q-table error:", e.message); }
-  }
-
-  const msg = `✅ Transfer learning: ${transferred.join(", ")} | paper WR:${wr}% trades:${trades} | blend:${(adaptiveBlend*100).toFixed(0)}%`;
-  console.log(`[TRANSFER] ${msg}`);
-  // Transfer learning notification removed\n${msg}\n<i>Midiendo impacto en 2h...</i>`);
-
-  // Evaluar impacto 2h después
-  setTimeout(() => {
-    if(!S.bot) return;
-    const afterSells = (S.bot.log||[]).filter(l=>l.type==="SELL");
-    const liveWrAfter = afterSells.length >= 10
-      ? Math.round(afterSells.slice(-20).filter(l=>l.pnl>0).length / Math.min(20, afterSells.length) * 100)
-      : null;
-    // Buscar el registro de esta transferencia
-    const rec = (S.bot._transferHistory||[]).find(t=>t.liveWRafter===null && t.liveWRbefore!==null);
-    if(rec && liveWrAfter !== null && rec.liveWRbefore !== null) {
-      rec.liveWRafter = liveWrAfter;
-      rec.improved = liveWrAfter >= rec.liveWRbefore;
-      const delta = liveWrAfter - rec.liveWRbefore;
-      const verdict = rec.improved ? `✅ Mejoró +${delta}%` : `❌ Empeoró ${delta}%`;
-      console.log(`[TRANSFER] Evaluación 2h: WR antes=${rec.liveWRbefore}% después=${liveWrAfter}% → ${verdict}`);
-      tg.send && tg.send(
-        `📊 <b>[LIVE] Evaluación transfer learning</b>\n` +
-        `WR antes: ${rec.liveWRbefore}% → después: ${liveWrAfter}%\n` +
-        `${verdict}\n` +
-        (rec.improved
-          ? `El blend del paper aumentará en la próxima transferencia`
-          : `El blend del paper se reducirá — el live confía menos en estos pesos`)
-      );
-      save().catch(()=>{});
-    }
-  }, 2 * 60 * 60 * 1000); // 2 horas
-
-  save().catch(()=>{});
-  res.json({adopted:true, transferred, blend: adaptiveBlend});
-});
 
 app.get("/api/sync/history", (_,res) => res.json({
   syncHistory: S.syncHistory,
@@ -640,12 +468,11 @@ async function save() {
   s.trailingHighs=S.bot.trailing.highs;
   s.reentryTs=S.bot.reentryTs;
   s.syncHistory=S.syncHistory;
-  if(S.bot.multiAgent)    s.multiAgentData = S.bot.multiAgent.serialize();
+  // Engine viejo modules — se serializan para no perder estado entre restarts
+  // pero no afectan trading (evaluate() es no-op)
   if(S.bot.adaptiveStop)   s.adaptiveStop   = S.bot.adaptiveStop.serialize();
   if(S.bot.adaptiveHours)  s.adaptiveHours  = S.bot.adaptiveHours.serialize();
-  if(S.bot.newsLearner)    s.newsLearner    = S.bot.newsLearner.serialize();
   if(S.bot.regimeDetector) s.regimeDetector = S.bot.regimeDetector.serialize();
-  if(S.bot._transferHistory) s.transferHistory = S.bot._transferHistory;
   await saveState(s);
 }
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
@@ -657,8 +484,7 @@ process.on("uncaughtException", (err) => {
   console.error(err.stack);
   // Guardar estado antes de reiniciar
   save().catch(()=>{}).finally(()=>{
-    // No salimos - Railway reiniciará si el proceso muere
-    // pero intentamos seguir corriendo
+    // No salimos — PM2 reiniciará si el proceso muere
   });
 });
 process.on("unhandledRejection", (reason) => {
@@ -688,7 +514,7 @@ function simulatePrices(){
 // ── LIVE MODE: órdenes reales ─────────────────────────────────────────────────
 // ── BINANCE REAL API ──────────────────────────────────────────────────────────
 // Se activa automáticamente cuando BINANCE_API_KEY y BINANCE_API_SECRET
-// están configuradas en Railway. Sin keys → opera en modo simulado.
+// están configuradas en .env. Sin keys → opera en modo simulado.
 const crypto2 = require("crypto");
 const https2   = require("https");
 
@@ -880,7 +706,7 @@ async function verifyLiveBalance() {
     // El bot maneja su propia cuenta de $CAPITAL_USDT (100 USD)
     // NO usa el balance total de Binance (puede tener más dinero de otras ops)
     // Solo verifica que Binance tiene suficiente para ejecutar cada orden
-    const virtualCapital = S.CAPITAL_USDT; // 100 USD declarados en Railway
+    const virtualCapital = S.CAPITAL_USDT; // 100 USD declarados en .env
     
     if (S.bot) {
       // En LIVE real: siempre usar virtualCapital como referencia de cash libre
@@ -952,7 +778,7 @@ wss.on("connection", ws=>{
     if(S.bot) ws.send(JSON.stringify({type:"state",data:{...S.bot.getState(),instance:S.bot.mode,syncHistory: S.syncHistory}}));
     else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"LIVE",totalValue:0}}));
   } catch(e) {}
-  // Heartbeat: ping cada 25s para evitar que Railway cierre la conexión idle
+  // Heartbeat: ping cada 25s para mantener la conexión WebSocket activa
   const hb = setInterval(()=>{ if(ws.readyState===WebSocket.OPEN) ws.ping(); else clearInterval(hb); }, 25000);
   ws.on("pong", ()=>{});
   ws.on("close", ()=>clearInterval(hb));
