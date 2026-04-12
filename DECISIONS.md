@@ -86,3 +86,14 @@
 **Decision:** B + C combinadas — Circuit breaker en memoria + lista de hosts muertos (`DEAD_HOSTS = ["railway.internal", "railway.app"]`).
 **Razon:** (1) Mantiene la opción de configurar PostgreSQL local en Hetzner más adelante sin tocar código. (2) Un solo mensaje `[DB] PostgreSQL desactivado — usando disco` al primer fallo, luego silencio total hasta el próximo restart. (3) Detección inmediata de URLs Railway sin esperar timeout de DNS. Validado: 2000 operaciones → 1 sola línea de log. Tests: 64/64 pasan.
 
+## D016: Limitación reconocida — BAFIR v1 es bull-only
+**Contexto:** Las 7 estrategias actuales (RSI_MR_ADX, EMA_CROSS, TREND_200) son todas long-only y diseñadas para mercados alcistas o laterales. En bear markets con tendencia bajista, los filtros bloquean correctamente las señales (no cazar cuchillos), pero el bot queda dormido sin generar oportunidades. Observación: RSI_MR requiere ADX<25 (ausencia de tendencia), EMA_CROSS requiere golden crosses (raros en bear), TREND_200 requiere precio > EMA200 (imposible en bear).
+**Opciones:** A) Añadir estrategias short ahora para v1. B) Aceptar la limitación, validar v1 y diseñar v2 multi-régimen más adelante.
+**Decision:** B — Aceptar la limitación en v1. Validar el sistema actual con poco capital. Después del primer mes en LIVE, diseñar BAFIR v2 que opera en todos los regímenes.
+**Razon:** La arquitectura v1 ya está construida y validada. Añadir estrategias short ahora añadiría complejidad (futuros/puts/inverse, detector de régimen, rotación) que retrasaría LIVE. Mejor validar v1 primero, generar primeros datos reales, y después expandir. Un bot que sólo gana en bull sigue siendo útil como validación del pipeline end-to-end y del Kelly Gate adaptativo.
+**Pendiente post-LIVE [PRIORIDAD ALTA]:** Diseñar BAFIR v2 con:
+- Estrategias short (futuros, puts, inverse ETFs)
+- Detector de régimen robusto (no sólo F&G)
+- Sistema de rotación de estrategias según régimen
+- Backtesting riguroso de cada nueva estrategia antes de promocionar a live
+
