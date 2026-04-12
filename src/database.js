@@ -1,5 +1,5 @@
 // ─── DATABASE MODULE ─────────────────────────────────────────────────────────
-// Usa PostgreSQL si está disponible (Railway), sino guarda en disco (local)
+// Usa PostgreSQL si está disponible, sino guarda en disco (data/state.json)
 "use strict";
 
 const fs   = require("fs");
