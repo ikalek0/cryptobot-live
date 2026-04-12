@@ -1,5 +1,7 @@
 // ─── DATABASE MODULE ─────────────────────────────────────────────────────────
-// Usa PostgreSQL si está disponible, sino guarda en disco (data/state.json)
+// Usa PostgreSQL si está disponible, sino guarda en disco (data/state.json).
+// Circuit breaker: si PG falla una vez (DNS, timeout, conexión cerrada), queda
+// DESACTIVADO hasta el próximo restart — evita spam de reintentos en el log.
 "use strict";
 
 const fs   = require("fs");
@@ -8,12 +10,36 @@ const path = require("path");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const STATE_FILE   = path.join(__dirname, "../data/state.json");
 
-// ── PostgreSQL client (lazy load) ─────────────────────────────────────────────
-let pgClient = null;
+// Hosts conocidos como muertos: bail out sin esperar al timeout de DNS
+const DEAD_HOSTS = ["railway.internal", "railway.app"];
+
+// ── PostgreSQL client (lazy load + circuit breaker) ──────────────────────────
+let pgClient        = null;
+let pgDisabled      = false; // true tras el primer fallo — no reintentar
+let pgMessageLogged = false; // garantiza que el aviso sólo se loguea una vez
+
+function disablePg(reason) {
+  pgDisabled = true;
+  pgClient = null;
+  if (!pgMessageLogged) {
+    console.log(`[DB] PostgreSQL desactivado — usando disco. Motivo: ${reason}`);
+    pgMessageLogged = true;
+  }
+}
 
 async function getClient() {
-  if (!DATABASE_URL) return null;
-  if (pgClient) return pgClient;
+  if (pgDisabled) return null;
+  if (pgClient)   return pgClient;
+
+  if (!DATABASE_URL) {
+    disablePg("DATABASE_URL no configurada");
+    return null;
+  }
+  if (DEAD_HOSTS.some(h => DATABASE_URL.includes(h))) {
+    disablePg("DATABASE_URL apunta a host abandonado (Railway)");
+    return null;
+  }
+
   try {
     const { Client } = require("pg");
     pgClient = new Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
@@ -29,8 +55,7 @@ async function getClient() {
     console.log("[DB] PostgreSQL conectado ✓");
     return pgClient;
   } catch(e) {
-    console.warn("[DB] PostgreSQL no disponible, usando disco:", e.message);
-    pgClient = null;
+    disablePg(`connect falló: ${e.message}`);
     return null;
   }
 }
@@ -49,7 +74,7 @@ async function saveState(state) {
       return;
     }
   } catch(e) {
-    console.warn("[DB] Error guardando en PG, usando disco:", e.message);
+    disablePg(`saveState query falló: ${e.message}`);
   }
   // Fallback a disco
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
@@ -68,7 +93,7 @@ async function loadState() {
       }
     }
   } catch(e) {
-    console.warn("[DB] Error leyendo PG:", e.message);
+    disablePg(`loadState query falló: ${e.message}`);
   }
   // Fallback a disco
   if (fs.existsSync(STATE_FILE)) {
@@ -85,7 +110,7 @@ async function deleteState() {
   try {
     const client = await getClient();
     if (client) await client.query(`DELETE FROM bot_state WHERE key = 'live_main'`);
-  } catch(e) {}
+  } catch(e) { disablePg(`deleteState query falló: ${e.message}`); }
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 }
 
@@ -101,7 +126,7 @@ async function saveSimpleState(state) {
         [json]
       );
     }
-  } catch(e) { console.warn("[DB] saveSimpleState error:", e.message); }
+  } catch(e) { disablePg(`saveSimpleState query falló: ${e.message}`); }
 }
 
 async function loadSimpleState() {
@@ -110,7 +135,7 @@ async function loadSimpleState() {
     if (!client) return null;
     const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
     return r.rows[0] ? JSON.parse(r.rows[0].value) : null;
-  } catch(e) { return null; }
+  } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); return null; }
 }
 
 module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState };
