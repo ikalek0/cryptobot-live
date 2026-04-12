@@ -73,3 +73,16 @@
 **Contexto:** CryptoPanic API gratuita rate-limited. Devuelve HTML en vez de JSON. Habia 3 fetchers distintos en el codigo.
 **Decision:** Desactivar cryptoPanic.start() en server.js. El objeto sigue existiendo para compatibilidad.
 **Razon:** No es critico para trading. Las estrategias backtestadas no usan noticias como input.
+
+## D014: Cushion de capital ($10 USDC entre balance real y declarado)
+**Contexto:** Balance real en spot Binance $110 USDC, pero `CAPITAL_USDC=100` en `.env`. Discrepancia detectada durante setup del workflow de deploy.
+**Opciones:** A) Reconciliar a 1:1 ($110 declarado). B) Mantener $10 de cushion permanente.
+**Decision:** B — Mantener $10 de diferencia como cushion permanente.
+**Razon:** Margen de seguridad para fees, slippage, mínimos Binance (10 USDC) y discrepancias menores entre balance reportado y real. El bot opera sobre $100: sizing, Kelly y caps se calculan sobre ese valor. Si una orden intenta dejar el balance por debajo de $100, hay $10 de margen para que no falle por insuficiencia. Para usar capital completo → cambiar `CAPITAL_USDC` en `.env`.
+
+## D015: PostgreSQL circuit breaker en database.js
+**Contexto:** El bot live spam-eaba cientos de mensajes `[DB] PostgreSQL no disponible...getaddrinfo ENOTFOUND postgres.railway.internal` en el error log. `database.js` reintentaba conectar en cada `save*State()` / `load*State()` sin cachear el fallo, inundando los logs y ocultando errores reales.
+**Opciones:** A) Eliminar todo el código de PostgreSQL. B) Cachear fallos (circuit breaker). C) Detectar Railway URL y hacer bail-out instantáneo.
+**Decision:** B + C combinadas — Circuit breaker en memoria + lista de hosts muertos (`DEAD_HOSTS = ["railway.internal", "railway.app"]`).
+**Razon:** (1) Mantiene la opción de configurar PostgreSQL local en Hetzner más adelante sin tocar código. (2) Un solo mensaje `[DB] PostgreSQL desactivado — usando disco` al primer fallo, luego silencio total hasta el próximo restart. (3) Detección inmediata de URLs Railway sin esperar timeout de DNS. Validado: 2000 operaciones → 1 sola línea de log. Tests: 64/64 pasan.
+
