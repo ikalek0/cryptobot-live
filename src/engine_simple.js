@@ -493,4 +493,4 @@ class SimpleBotEngine {
   }
 }
 
-module.exports={SimpleBotEngine};
+module.exports={SimpleBotEngine, calcKelly, evalSignal, STRATEGIES};
