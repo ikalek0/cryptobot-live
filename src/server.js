@@ -604,7 +604,7 @@ async function placeLiveBuy(symbol, usdtAmount) {
       // Ajustar bot.cash con el precio real (no el estimado)
       if(S.bot && Math.abs(realSpent - safe) > 0.01) {
         const drift = realSpent - safe;
-        S.bot.cash += drift; // corregir por slippage real
+        // [DISABLED 2026-04] drift correction: signo invertido Y variable incorrecta — S.bot.cash nunca se decrementa en BUY (SimpleBot usa capa1Cash/capa2Cash). Mutar aquí inflaba el ledger con dinero fantasma.
         console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
       }
       // BUY notification removed\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
@@ -648,7 +648,7 @@ async function placeLiveSell(symbol, quantity) {
         // Restaurar cash que se gastó en la compra virtual (nunca ejecutada realmente)
         const orphanCost = (orphanPos.qty||0) * (orphanPos.entryPrice||0);
         if(orphanCost > 0) {
-          S.bot.cash = (S.bot.cash||0) + orphanCost;
+          // [DISABLED 2026-04-12] orphan cash inflation: mismo defecto que L607 — escribe a S.bot zombie. Solo el delete del portfolio es seguro.
           // Eliminar también el log entry de esta posición huérfana
           S.bot.log = (S.bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
             Math.abs(l.price-(orphanPos.entryPrice||0))<0.01));

@@ -331,7 +331,7 @@ setInterval(async()=>{
           const drift = realUSDC - virtualFree;
           if(Math.abs(drift) > 2 && Math.abs(drift) < 15) {
             console.warn(`[RECONCILE] Drift: real=$${realUSDC.toFixed(2)} virtual=$${virtualFree.toFixed(2)} diff=${drift>0?"+":""}${drift.toFixed(2)}`);
-            S.bot.cash += drift * 0.1; // corrección suave 10%
+            // DISABLED [iñigo cap estricto]: S.bot.cash += drift * 0.1; (drift hacia balance real Binance violaba cap virtual)
           }
         }
       }).catch(()=>{});
