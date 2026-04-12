@@ -1,0 +1,148 @@
+name: Deploy to production
+
+# Manual-only deploy. No auto-deploy on push to main.
+# Run from: Actions tab → "Deploy to production" → "Run workflow"
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip tests on the runner (NOT recommended)"
+        type: boolean
+        default: false
+      skip_remote_tests:
+        description: "Skip tests on the server (faster, but less safe)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy live bot to Hetzner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 10
+
+      - name: Show commits being deployed
+        run: |
+          echo "Deploying the following commit:"
+          git log -1 --oneline
+          echo
+          echo "Recent history:"
+          git log --oneline -5
+
+      - name: Set up Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+
+      - name: Install dependencies (runner)
+        run: npm ci
+
+      - name: Run tests (runner)
+        if: ${{ !inputs.skip_tests }}
+        run: npm test
+
+      - name: Set up SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Write remote deploy script
+        env:
+          SKIP_REMOTE_TESTS: ${{ inputs.skip_remote_tests }}
+        run: |
+          cat > /tmp/deploy.sh <<'REMOTE_SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          SERVER_PATH="$1"
+          SKIP_TESTS="${2:-false}"
+
+          # Ensure pm2/node on PATH for non-interactive shells
+          export PATH="/usr/local/bin:/usr/bin:/bin:/root/.nvm/versions/node/v18/bin:$PATH"
+          command -v pm2 >/dev/null || { echo "[DEPLOY] ERROR: pm2 not found on PATH"; exit 1; }
+          command -v node >/dev/null || { echo "[DEPLOY] ERROR: node not found on PATH"; exit 1; }
+          echo "[DEPLOY] node $(node -v) | pm2 $(pm2 -v)"
+
+          cd "$SERVER_PATH"
+
+          echo "[DEPLOY] Before: $(git log -1 --oneline)"
+          git fetch origin main
+          git reset --hard origin/main
+          echo "[DEPLOY] After:  $(git log -1 --oneline)"
+
+          echo "[DEPLOY] npm ci"
+          npm ci --silent
+
+          if [ "$SKIP_TESTS" != "true" ]; then
+            echo "[DEPLOY] Running tests on server"
+            npm test
+          else
+            echo "[DEPLOY] ⚠️  Skipping remote tests (skip_remote_tests=true)"
+          fi
+
+          echo "[DEPLOY] PM2 delete + start (to reload .env)"
+          pm2 delete live 2>/dev/null || true
+          pm2 start src/server.js --name live --update-env
+
+          echo "[DEPLOY] Waiting 5s for boot..."
+          sleep 5
+
+          echo "[DEPLOY] Health check:"
+          if curl -sf http://localhost:3001/api/health; then
+            echo
+            echo "[DEPLOY] ✅ Health check OK"
+          else
+            echo "[DEPLOY] ❌ Health check FAILED"
+            pm2 logs live --lines 30 --nostream 2>&1 | tail -50 || true
+            exit 1
+          fi
+
+          echo "[DEPLOY] Last 20 lines of PM2 logs:"
+          pm2 logs live --lines 20 --nostream 2>&1 | tail -30 || true
+
+          echo "[DEPLOY] ✅ Done"
+          REMOTE_SCRIPT
+          chmod +x /tmp/deploy.sh
+
+      - name: Deploy to server via SSH
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PATH: ${{ secrets.SERVER_PATH }}
+          SKIP_REMOTE_TESTS: ${{ inputs.skip_remote_tests }}
+        run: |
+          scp -i ~/.ssh/deploy_key /tmp/deploy.sh "$SERVER_USER@$SERVER_HOST:/tmp/cryptobot-deploy.sh"
+          ssh -i ~/.ssh/deploy_key "$SERVER_USER@$SERVER_HOST" \
+            "bash /tmp/cryptobot-deploy.sh '$SERVER_PATH' '$SKIP_REMOTE_TESTS'"
+
+      - name: Post-deploy state summary
+        if: success()
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          echo "### Post-deploy summary"
+          ssh -i ~/.ssh/deploy_key "$SERVER_USER@$SERVER_HOST" \
+            "curl -sf http://localhost:3001/api/health && echo && pm2 list 2>&1 | grep -E 'live|App name' || true"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key /tmp/deploy.sh
