@@ -338,7 +338,15 @@ class SimpleBotEngine {
     let invest = tv * kellyFrac * 0.5; // Half-Kelly conservador
     if(invest > tv * 0.30) invest = tv * 0.30; // máximo 30% del capital
     if(invest > availCash) invest = availCash; // no gastar más del cash disponible
-    console.log(`[SIMPLE][SIZING] ${cfg.id} capital=$${tv.toFixed(2)} kelly=${kellyFrac.toFixed(3)} → invest=$${invest.toFixed(2)}`);
+    // ── STRICT CAP $100 (Iñigo abril 2026): jamás superar INITIAL_CAPITAL ─
+    // Invariante: sum(portfolio.invest) + new_invest ≤ INITIAL_CAPITAL * 1.005
+    const committedAcrossAll = Object.values(this.portfolio).reduce((a,p)=>a+(p.invest||0),0);
+    const capRemaining = Math.max(0, INITIAL_CAPITAL - committedAcrossAll);
+    if(invest > capRemaining) {
+      console.log(`[SIMPLE][CAP-STRICT] ${cfg.id} invest=$${invest.toFixed(2)} > remaining=$${capRemaining.toFixed(2)} (committed=$${committedAcrossAll.toFixed(2)}/cap=$${INITIAL_CAPITAL}) — recortado`);
+      invest = capRemaining;
+    }
+    console.log(`[SIMPLE][SIZING] ${cfg.id} capital=$${tv.toFixed(2)} kelly=${kellyFrac.toFixed(3)} committed=$${committedAcrossAll.toFixed(2)} → invest=$${invest.toFixed(2)}`);
     if(invest < 10){
       console.log(`[SIMPLE][SIZING] ${cfg.id} invest=$${invest.toFixed(2)} < $10 mínimo — skip`);
       return;

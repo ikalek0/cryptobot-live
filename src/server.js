@@ -587,11 +587,33 @@ async function placeTWAPBuy(symbol, usdtAmount) {
   return orders;
 }
 
-async function placeLiveBuy(symbol, usdtAmount) {
+async function placeLiveBuy(symbol, usdtAmount, strategyId) {
   try {
     if (!LIVE_MODE) return null;
-    const maxSafe = (S.bot?.totalValue()||S.CAPITAL_USDT) * 0.40;
-    const safe = Math.min(usdtAmount, maxSafe);
+    // ── STRICT CAP $100 (Iñigo abril 2026): verificar invariante virtual ─
+    // Invariante: capa1Cash + capa2Cash + sum(portfolio.invest) ≤ CAPITAL_USDT * 1.005
+    // Aunque Binance tenga $1000 libres, el bot jamás opera > CAPITAL_USDT declarado.
+    const sb = S.simpleBot;
+    const cap = S.CAPITAL_USDT;
+    if (sb) {
+      const committed = Object.values(sb.portfolio||{}).reduce((a,p)=>a+(p.invest||0),0);
+      const totalLedger = (sb.capa1Cash||0) + (sb.capa2Cash||0) + committed;
+      if (totalLedger > cap * 1.005) {
+        console.error(`[LIVE][CAP] ❌ INVARIANTE ROTA: ledger=$${totalLedger.toFixed(2)} > cap*1.005=$${(cap*1.005).toFixed(2)} — ${symbol} $${usdtAmount?.toFixed?.(2)||usdtAmount} RECHAZADA`);
+        tg.send && tg.send(`⚠️ <b>[LIVE] ORDEN RECHAZADA</b>\nCap strict violado\n${symbol} $${(+usdtAmount||0).toFixed(2)}\nLedger: $${totalLedger.toFixed(2)} / cap $${cap}`);
+        return null;
+      }
+      if (committed > cap * 1.005) {
+        console.error(`[LIVE][CAP] ❌ committed=$${committed.toFixed(2)} > cap=$${cap} — ${symbol} RECHAZADA`);
+        return null;
+      }
+      if (usdtAmount > cap) {
+        console.error(`[LIVE][CAP] ❌ ${symbol} pide $${usdtAmount.toFixed(2)} > cap total $${cap} — RECHAZADA`);
+        return null;
+      }
+    }
+    // safe = min(solicitado, cap) — jamás operar > CAPITAL_USDT en una orden
+    const safe = Math.min(usdtAmount, cap);
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
     const orders = await placeTWAPBuy(symbol, safe);
     if(orders?.length) {
