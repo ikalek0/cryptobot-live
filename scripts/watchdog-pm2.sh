@@ -50,11 +50,16 @@ check_pm2() {
 import json,sys
 try:
     d=json.load(sys.stdin)
+    found=False
     for a in d:
         if a.get('name')=='$app':
-            print(a.get('pm2_env',{}).get('status','unknown')); sys.exit(0)
-    print('missing')
-except: print('error')
+            print(a.get('pm2_env',{}).get('status','unknown'))
+            found=True
+            break
+    if not found:
+        print('missing')
+except Exception:
+    print('error')
 ")
     case "$status" in
       online) ;;  # OK
