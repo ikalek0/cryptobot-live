@@ -488,6 +488,10 @@ class SimpleBotEngine {
   // ── FIX-A reconciliation: real BUY fill → marca filled + ajusta slippage ──
   // ctx.strategyId, ctx.realSpent (USDC gastado real), ctx.realQty (asset recibido real)
   // Ejecutado DESPUÉS de que placeLiveBuy complete en Binance.
+  // FIX-M2: también recomputa entryPrice/stop/target usando el precio real
+  // manteniendo los mismos porcentajes originales de stop/target. Sin esto,
+  // un slippage de +1% deja el stop anclado al precio estimado y el riesgo
+  // real de la posición no coincide con el backtest.
   applyRealBuyFill(strategyId, {realSpent, realQty}){
     const pos = this.portfolio[strategyId];
     if(!pos){
@@ -500,11 +504,21 @@ class SimpleBotEngine {
     const drift = realSpent - expectedSpent;
     if(pos.capa===1) this.capa1Cash -= drift;
     else             this.capa2Cash -= drift;
-    // Ajustar qty/invest al real para stop/target/pnl correcto
-    pos.qty    = realQty || pos.qty;
+    // FIX-M2: recomputar entryPrice/stop/target con precio real.
+    // Derivamos los % originales desde el par (estimado) stop/target/entryPrice:
+    //   stopPct   = 1 - stop/entryPrice
+    //   targetPct = target/entryPrice - 1
+    // y los reaplicamos contra el nuevo entryPrice real.
+    const realPrice = (realQty > 0 && realSpent > 0) ? (realSpent / realQty) : pos.entryPrice;
+    const stopPct   = 1 - (pos.stop   / pos.entryPrice);
+    const targetPct = (pos.target / pos.entryPrice) - 1;
+    pos.entryPrice = realPrice;
+    pos.stop       = realPrice * (1 - stopPct);
+    pos.target     = realPrice * (1 + targetPct);
+    pos.qty    = realQty  || pos.qty;
     pos.invest = realSpent || pos.invest;
     pos.status = "filled";
-    console.log(`[SIMPLE][RECONCILE-BUY] ${strategyId} expected=$${expectedSpent.toFixed(2)} real=$${realSpent.toFixed(2)} drift=${drift>=0?"+":""}${drift.toFixed(4)} qty=${pos.qty.toFixed(6)}`);
+    console.log(`[SIMPLE][RECONCILE-BUY] ${strategyId} expected=$${expectedSpent.toFixed(2)} real=$${realSpent.toFixed(2)} drift=${drift>=0?"+":""}${drift.toFixed(4)} entry=$${realPrice.toFixed(4)} stop=$${pos.stop.toFixed(4)} target=$${pos.target.toFixed(4)} qty=${pos.qty.toFixed(6)}`);
   }
 
   // ── FIX-D reconciliation: real SELL fill → ajusta capa cash por slippage ──
@@ -574,4 +588,4 @@ class SimpleBotEngine {
   }
 }
 
-module.exports={SimpleBotEngine, calcKelly, evalSignal, STRATEGIES};
+module.exports={SimpleBotEngine, calcKelly, evalSignal, STRATEGIES, INITIAL_CAPITAL, FEE};

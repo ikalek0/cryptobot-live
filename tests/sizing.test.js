@@ -5,11 +5,24 @@
 const { describe, it, before } = require("node:test");
 const assert = require("node:assert/strict");
 
-// Set env BEFORE requiring engine_simple (INITIAL_CAPITAL reads at module load)
-process.env.CAPITAL_USDC = "100";
-process.env.CAPITAL_USDT = "100";
+// FIX-M3: respetar CAPITAL_USDT/USDC del entorno si está set; default $100.
+// Así los tests escalan automáticamente si Iñigo cambia .env sin tocar código.
+// Todos los números hardcodeados (phantoms, asserts) se derivan de CAP.
+const CAP = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
+process.env.CAPITAL_USDC = String(CAP);
+process.env.CAPITAL_USDT = String(CAP);
 
-const { SimpleBotEngine, calcKelly, STRATEGIES, evalSignal } = require("../src/engine_simple");
+const { SimpleBotEngine, calcKelly, STRATEGIES, evalSignal, INITIAL_CAPITAL, FEE } = require("../src/engine_simple");
+
+// Sanity: el módulo debe haber leído la env que acabamos de poner
+assert.equal(INITIAL_CAPITAL, CAP,
+  `INITIAL_CAPITAL=${INITIAL_CAPITAL} should match test CAP=${CAP} (env leak?)`);
+
+const CAP_LIMIT = INITIAL_CAPITAL * 1.005; // = cap del engine
+const CAPA1_CAP = INITIAL_CAPITAL * 0.60;
+const CAPA2_CAP = INITIAL_CAPITAL * 0.40;
+// Scale factor para reescribir escenarios calibrados a $100 → cualquier CAP
+const K = CAP / 100;
 
 // Replicate the sizing formula from engine_simple.js _onCandleClose (lines 336-345)
 // to test it in isolation with various inputs
@@ -22,48 +35,54 @@ function calcInvest(totalValue, kellyRaw, availCash) {
 }
 
 describe("Sizing formula", () => {
-  it("Half-Kelly: $100 capital, kelly=0.4 -> invest=$20", () => {
-    const invest = calcInvest(100, 0.4, 60);
-    assert.equal(invest, 20, `Expected $20, got $${invest}`);
+  it(`Half-Kelly: $${CAP} capital, kelly=0.4 -> invest=${(CAP*0.2).toFixed(2)}`, () => {
+    const invest = calcInvest(CAP, 0.4, CAPA1_CAP);
+    // kellyFrac=0.4, half-kelly → invest = CAP * 0.4 * 0.5 = CAP * 0.20
+    assert.ok(Math.abs(invest - CAP*0.20) < 1e-9, `Expected $${CAP*0.20}, got $${invest}`);
   });
 
-  it("Half-Kelly: $100 capital, kelly=0.164 -> invest=$8.20 (below $10 minimum)", () => {
-    const invest = calcInvest(100, 0.164, 60);
-    assert.ok(invest < 10, `invest=$${invest} should be below $10 minimum -> trade skipped`);
+  it(`Half-Kelly: kelly=0.164 -> invest=${(CAP*0.082).toFixed(2)} (below $10 if CAP=100)`, () => {
+    const invest = calcInvest(CAP, 0.164, CAPA1_CAP);
+    // invest = CAP * 0.164 * 0.5 = CAP * 0.082
+    assert.ok(Math.abs(invest - CAP*0.082) < 1e-9,
+      `invest should be CAP*0.082 = ${CAP*0.082}, got ${invest}`);
+    if (CAP <= 121) {
+      assert.ok(invest < 10, `CAP=${CAP} with kelly=0.164 should be below $10 min -> trade skipped`);
+    }
   });
 
   it("Cap 30%: high kelly doesn't exceed 30% of capital", () => {
-    const invest = calcInvest(100, 0.95, 100);
-    assert.ok(invest <= 30, `invest=$${invest} should not exceed $30 (30% of $100)`);
-    // kelly=0.5 (capped), half-kelly = 0.25, invest = $25
-    assert.equal(invest, 25);
+    const invest = calcInvest(CAP, 0.95, CAP);
+    assert.ok(invest <= CAP*0.30 + 1e-9, `invest=$${invest} should not exceed 30% of CAP=$${CAP}`);
+    // kelly=0.5 (capped), half-kelly = 0.25, invest = CAP * 0.25
+    assert.ok(Math.abs(invest - CAP*0.25) < 1e-9);
   });
 
-  it("NEVER $1500 on $100 capital", () => {
-    // The old bug: capital was $10000 instead of $100 due to missing dotenv
-    // With correct capital=$100, even extreme kelly can't produce $1500
-    const invest = calcInvest(100, 1.0, 100);
-    assert.ok(invest <= 30, `invest=$${invest} must never be $1500 on $100 capital`);
+  it("NEVER exceeds 30% of CAP (the $1500-on-$100 bug regression)", () => {
+    // The old bug: capital was $10000 instead of $100 due to missing dotenv.
+    // With correct capital, even extreme kelly can't produce >30% of CAP.
+    const invest = calcInvest(CAP, 1.0, CAP);
+    assert.ok(invest <= CAP*0.30 + 1e-9, `invest=$${invest} must never exceed 30% of CAP=$${CAP}`);
   });
 
   it("Kelly fraction floor: negative kelly uses 0.05 minimum", () => {
-    const invest = calcInvest(100, -0.5, 100);
-    // kellyFrac = max(0.05, min(0.5, -0.5)) = max(0.05, -0.5) = 0.05
-    // invest = 100 * 0.05 * 0.5 = $2.50
-    assert.equal(invest, 2.5);
-    assert.ok(invest < 10, "Negative kelly -> invest below $10 -> trade skipped");
+    const invest = calcInvest(CAP, -0.5, CAP);
+    // kellyFrac = max(0.05, min(0.5, -0.5)) = 0.05; invest = CAP * 0.05 * 0.5 = CAP * 0.025
+    assert.ok(Math.abs(invest - CAP*0.025) < 1e-9);
+    if (CAP < 400) {
+      assert.ok(invest < 10, "Negative kelly -> invest below $10 -> trade skipped");
+    }
   });
 
   it("Kelly fraction ceiling: extreme kelly capped at 0.5", () => {
-    const invest = calcInvest(100, 2.0, 100);
-    // kellyFrac = max(0.05, min(0.5, 2.0)) = 0.5
-    // invest = 100 * 0.5 * 0.5 = $25
-    assert.equal(invest, 25);
+    const invest = calcInvest(CAP, 2.0, CAP);
+    // kellyFrac = max(0.05, min(0.5, 2.0)) = 0.5; invest = CAP * 0.5 * 0.5 = CAP * 0.25
+    assert.ok(Math.abs(invest - CAP*0.25) < 1e-9);
   });
 
   it("Available cash constraint: can't exceed available cash", () => {
-    const invest = calcInvest(100, 0.4, 5);
-    // Half-Kelly wants $20 but only $5 available
+    const invest = calcInvest(CAP, 0.4, 5);
+    // Half-Kelly wants CAP*0.20 but only $5 available
     assert.equal(invest, 5);
   });
 
@@ -72,38 +91,42 @@ describe("Sizing formula", () => {
     const buggyInvest = calcInvest(10000, 0.4, 10000);
     // kellyFrac=0.4, invest = 10000 * 0.4 * 0.5 = $2000
     assert.equal(buggyInvest, 2000);
-    assert.ok(buggyInvest > 100, "Buggy capital produces >$100 invest on $100 account");
+    assert.ok(buggyInvest > CAP, `Buggy capital produces >$${CAP} invest on $${CAP} account`);
   });
 });
 
 describe("Sizing through SimpleBotEngine", () => {
-  it("INITIAL_CAPITAL is $100 from env", () => {
+  it(`INITIAL_CAPITAL is $${CAP} from env`, () => {
     const bot = new SimpleBotEngine({});
     const tv = bot.totalValue();
-    assert.equal(tv, 100, `totalValue should be $100, got $${tv}`);
+    assert.equal(tv, CAP, `totalValue should be $${CAP}, got $${tv}`);
   });
 
   it("Capa1 gets 60% and Capa2 gets 40%", () => {
     const bot = new SimpleBotEngine({});
-    assert.equal(bot.capa1Cash, 60, `capa1Cash should be $60, got $${bot.capa1Cash}`);
-    assert.equal(bot.capa2Cash, 40, `capa2Cash should be $40, got $${bot.capa2Cash}`);
+    assert.ok(Math.abs(bot.capa1Cash - CAPA1_CAP) < 1e-9,
+      `capa1Cash should be $${CAPA1_CAP}, got $${bot.capa1Cash}`);
+    assert.ok(Math.abs(bot.capa2Cash - CAPA2_CAP) < 1e-9,
+      `capa2Cash should be $${CAPA2_CAP}, got $${bot.capa2Cash}`);
   });
 
   it("After a BUY, invest is deducted from correct capa cash", () => {
     const bot = new SimpleBotEngine({});
     const initialCapa1 = bot.capa1Cash;
     // Simulate a BUY by directly manipulating portfolio like _onCandleClose does
-    const invest = 20;
+    const invest = CAP * 0.20;
     const price = 600;
-    const qty = invest * (1 - 0.001) / price;
+    const qty = invest * (1 - FEE) / price;
     bot.capa1Cash -= invest;
     bot.portfolio["BNB_1h_RSI"] = {
       pair: "BNBUSDC", capa: 1, entryPrice: price, qty, invest,
       stop: price * 0.992, target: price * 1.016, openTs: Date.now()
     };
-    assert.equal(bot.capa1Cash, initialCapa1 - invest);
-    assert.ok(bot.totalValue() > 99 && bot.totalValue() < 101,
-      "Total value should be ~$100 after BUY (fees aside)");
+    assert.ok(Math.abs(bot.capa1Cash - (initialCapa1 - invest)) < 1e-9);
+    // Fees aside, total value should be approximately CAP (minus fee on the invest)
+    const tv = bot.totalValue();
+    assert.ok(Math.abs(tv - CAP) < invest * FEE * 2,
+      `Total value should be ~$${CAP} after BUY (fees aside), got ${tv}`);
   });
 });
 
@@ -137,40 +160,36 @@ describe("FIX-A: atomic committed cap check", () => {
 
   it("blocks new BUY when committed + invest would exceed cap * 1.005", () => {
     const bot = new SimpleBotEngine({});
-    // Pre-populate portfolio with $92 committed across 3 phantom positions.
-    // Any real new trade wanting > $8.50 should be shrunk or rejected.
-    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 32, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
-    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 1, invest: 30, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
-    bot.portfolio["PHANTOM_C"] = { pair: "X3", capa: 2, invest: 30, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
-    // Adjust cash to reflect the phantoms (capa1 used $62, capa2 used $30)
-    bot.capa1Cash = 60 - 62; // may go negative, we don't care — test is about global cap
-    bot.capa2Cash = 40 - 30;
+    // Pre-populate portfolio with 92% of CAP committed across 3 phantom positions.
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 32*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
+    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 1, invest: 30*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
+    bot.portfolio["PHANTOM_C"] = { pair: "X3", capa: 2, invest: 30*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
 
     // Force candles and price for BNB_1h_RSI
-    const candles = buyCandlesRSI();
-    bot._candles["BNBUSDC_1h"] = candles;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
     bot.prices["BNBUSDC"] = 95.5;
 
     // Make capa1Cash enough to not block via availCash path (force global cap to bite)
-    bot.capa1Cash = 50;  // plenty of capa1 cash — but global cap should still win
+    bot.capa1Cash = 50*K;  // plenty of capa1 cash — but global cap should still win
+    bot.capa2Cash = CAPA2_CAP - 30*K;
 
     const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
     bot._onCandleClose(cfg, "BNBUSDC_1h");
 
     const committedAfter = Object.values(bot.portfolio)
       .reduce((s, p) => s + (p.invest || 0), 0);
-    // cap = INITIAL_CAPITAL * 1.005 = $100.5
-    assert.ok(committedAfter <= 100.5 + 0.01,  // float tolerance
-      `committed=$${committedAfter.toFixed(2)} must be ≤ $100.50 (cap*1.005)`);
+    // cap = INITIAL_CAPITAL * 1.005 = CAP_LIMIT
+    assert.ok(committedAfter <= CAP_LIMIT + 0.01,  // float tolerance
+      `committed=$${committedAfter.toFixed(2)} must be ≤ $${CAP_LIMIT.toFixed(2)} (cap*1.005)`);
   });
 
   it("shrinks new invest to headroom when committed near cap", () => {
     const bot = new SimpleBotEngine({});
-    // Commit $85 → headroom = $100.5 - $85 = $15.50
-    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 55, qty: 0.5, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
-    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 2, invest: 30, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
-    bot.capa1Cash = 50;
-    bot.capa2Cash = 50;
+    // Commit 85% of CAP → headroom = CAP_LIMIT - 85% of CAP = 15.5% of CAP
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 55*K, qty: 0.5, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
+    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 2, invest: 30*K, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
+    bot.capa1Cash = 50*K;
+    bot.capa2Cash = 50*K;
 
     bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
     bot.prices["BNBUSDC"] = 95.5;
@@ -178,19 +197,20 @@ describe("FIX-A: atomic committed cap check", () => {
     const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
     bot._onCandleClose(cfg, "BNBUSDC_1h");
 
+    const headroom = CAP_LIMIT - 85*K;
     const pos = bot.portfolio["BNB_1h_RSI"];
     if (pos) {
-      // Position accepted: must be ≤ headroom ($15.50)
-      assert.ok(pos.invest <= 15.5 + 0.01,
-        `New position invest=$${pos.invest} must be ≤ $15.50 headroom`);
+      // Position accepted: must be ≤ headroom
+      assert.ok(pos.invest <= headroom + 0.01,
+        `New position invest=$${pos.invest} must be ≤ $${headroom.toFixed(2)} headroom`);
       assert.ok(pos.invest >= 10,
         `Accepted positions must be ≥ $10 minimum`);
     }
     // Whether accepted, shrunk, or rejected: committed must never exceed cap
     const committedAfter = Object.values(bot.portfolio)
       .reduce((s, p) => s + (p.invest || 0), 0);
-    assert.ok(committedAfter <= 100.5 + 0.01,
-      `After trade: committed=$${committedAfter.toFixed(2)} must be ≤ $100.50`);
+    assert.ok(committedAfter <= CAP_LIMIT + 0.01,
+      `After trade: committed=$${committedAfter.toFixed(2)} must be ≤ $${CAP_LIMIT.toFixed(2)}`);
   });
 
   it("new position has status='pending' marker (FIX-A + FASE 3 contract)", () => {
@@ -251,22 +271,22 @@ describe("FIX-C: placeLiveBuy committed+new cap guard + rollback", () => {
     const bot = new SimpleBotEngine({});
     // Simular estado post-FIX-A: 2 phantoms pre-existentes + reserva optimista
     // de la estrategia que está intentando ejecutar placeLiveBuy.
-    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 50, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
-    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 2, invest: 40, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 50*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 2, invest: 40*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
     // Estrategia candidata (FIX-A ya la insertó como pending + decrementó capa1Cash)
-    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 15, qty: 0.15, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
-    bot.capa1Cash = 60 - 50 - 15; // 50 phantom + 15 reservado = -5 pero no importa para test
+    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 15*K, qty: 0.15, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
+    bot.capa1Cash = CAPA1_CAP - 50*K - 15*K; // puede ir negativo, no importa para el test
 
     const before = bot.capa1Cash;
     const res = simulatePlaceLiveBuyCapGuard(
-      bot, "BNBUSDC", 15,
+      bot, "BNBUSDC", 15*K,
       { strategyId: "BNB_1h_RSI", capa: 1, expectedPrice: 100 },
-      100.5 // cap = CAPITAL * 1.005
+      CAP_LIMIT // cap = CAPITAL * 1.005
     );
 
-    assert.equal(res.rejected, true, "committed(90)+new(15)=105 > cap(100.5) → reject");
+    assert.equal(res.rejected, true, `committed(${(90*K).toFixed(2)})+new(${(15*K).toFixed(2)})=${(105*K).toFixed(2)} > cap(${CAP_LIMIT.toFixed(2)}) → reject`);
     assert.ok(!bot.portfolio["BNB_1h_RSI"], "Pending reserve must be rolled back from portfolio");
-    assert.equal(bot.capa1Cash, before + 15, "capa1Cash must be restored by rollback");
+    assert.ok(Math.abs(bot.capa1Cash - (before + 15*K)) < 1e-9, "capa1Cash must be restored by rollback");
     // Phantoms intact
     assert.ok(bot.portfolio["PHANTOM_A"]);
     assert.ok(bot.portfolio["PHANTOM_B"]);
@@ -274,34 +294,29 @@ describe("FIX-C: placeLiveBuy committed+new cap guard + rollback", () => {
 
   it("accepts when committed (excluding self) + new ≤ cap", () => {
     const bot = new SimpleBotEngine({});
-    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 30, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
-    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 20, qty: 0.2, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 30*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
 
     const res = simulatePlaceLiveBuyCapGuard(
-      bot, "BNBUSDC", 20,
+      bot, "BNBUSDC", 20*K,
       { strategyId: "BNB_1h_RSI", capa: 1, expectedPrice: 100 },
-      100.5
+      CAP_LIMIT
     );
 
-    assert.equal(res.rejected, false, "committed_excl_self(30)+new(20)=50 ≤ cap(100.5) → accept");
+    assert.equal(res.rejected, false, `committed_excl_self(${(30*K).toFixed(2)})+new(${(20*K).toFixed(2)})=${(50*K).toFixed(2)} ≤ cap(${CAP_LIMIT.toFixed(2)}) → accept`);
     assert.ok(bot.portfolio["BNB_1h_RSI"], "Pending reserve must remain intact on accept");
   });
 
   it("excludes self from committed sum (critical: self is already in portfolio per FIX-A)", () => {
-    // Sin el filter id!==strategyId, committed contaría la propia reserva 2 veces:
-    //   committed_raw = 30 (phantom) + 50 (self) = 80
-    //   + new (50) = 130 > cap → falso positivo
-    // Con el filter:
-    //   committed_excl = 30
-    //   + new (50) = 80 ≤ cap → accept
+    // Sin el filter id!==strategyId, committed contaría la propia reserva 2 veces.
     const bot = new SimpleBotEngine({});
-    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 30, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
-    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 50, qty: 0.5, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 30*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 50*K, qty: 0.5, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
 
     const res = simulatePlaceLiveBuyCapGuard(
-      bot, "BNBUSDC", 50,
+      bot, "BNBUSDC", 50*K,
       { strategyId: "BNB_1h_RSI", capa: 1, expectedPrice: 100 },
-      100.5
+      CAP_LIMIT
     );
     assert.equal(res.rejected, false,
       "Double-counting bug regression: self must be excluded from committed sum");
@@ -311,44 +326,78 @@ describe("FIX-C: placeLiveBuy committed+new cap guard + rollback", () => {
 describe("FIX-A closing loop: applyRealBuyFill", () => {
   it("reconciles drift (realSpent > expected) by deducting extra from correct capa", () => {
     const bot = new SimpleBotEngine({});
-    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 20, qty: 0.2, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
-    bot.capa1Cash = 40; // 60 - 20 reserved
-    bot.capa2Cash = 40;
+    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
+    bot.capa1Cash = CAPA1_CAP - 20*K;
+    bot.capa2Cash = CAPA2_CAP;
 
-    // Real: gastamos $20.15 (slippage +0.15)
-    bot.applyRealBuyFill("BNB_1h_RSI", { realSpent: 20.15, realQty: 0.1998 });
+    // Real: slippage +0.15 (escala con K)
+    const realSpent = 20*K + 0.15*K;
+    bot.applyRealBuyFill("BNB_1h_RSI", { realSpent, realQty: 0.1998 });
 
     const pos = bot.portfolio["BNB_1h_RSI"];
     assert.equal(pos.status, "filled", "Position must transition pending→filled");
-    assert.ok(Math.abs(pos.invest - 20.15) < 1e-9, "invest updated to real");
+    assert.ok(Math.abs(pos.invest - realSpent) < 1e-9, "invest updated to real");
     assert.ok(Math.abs(pos.qty - 0.1998) < 1e-9, "qty updated to real");
-    assert.ok(Math.abs(bot.capa1Cash - (40 - 0.15)) < 1e-9,
-      `capa1Cash must deduct drift: expected ${(40-0.15).toFixed(4)}, got ${bot.capa1Cash.toFixed(4)}`);
+    assert.ok(Math.abs(bot.capa1Cash - (CAPA1_CAP - 20*K - 0.15*K)) < 1e-9,
+      `capa1Cash must deduct drift: got ${bot.capa1Cash.toFixed(4)}`);
     // capa2 untouched
-    assert.equal(bot.capa2Cash, 40);
+    assert.equal(bot.capa2Cash, CAPA2_CAP);
   });
 
   it("reconciles drift (realSpent < expected) by returning surplus to capa", () => {
     const bot = new SimpleBotEngine({});
-    bot.portfolio["XRP_4h_EMA"] = { pair: "XRPUSDC", capa: 2, invest: 18, qty: 30, entryPrice: 0.6, stop: 0.58, target: 0.64, openTs: Date.now(), status: "pending" };
-    bot.capa1Cash = 60;
-    bot.capa2Cash = 40 - 18; // 22
+    bot.portfolio["XRP_4h_EMA"] = { pair: "XRPUSDC", capa: 2, invest: 18*K, qty: 30, entryPrice: 0.6, stop: 0.58, target: 0.64, openTs: Date.now(), status: "pending" };
+    bot.capa1Cash = CAPA1_CAP;
+    bot.capa2Cash = CAPA2_CAP - 18*K;
 
-    // Real: gastamos solo $17.90 (slippage favorable -0.10)
-    bot.applyRealBuyFill("XRP_4h_EMA", { realSpent: 17.90, realQty: 29.833 });
+    // Real: slippage favorable -0.10
+    const realSpent = 18*K - 0.10*K;
+    bot.applyRealBuyFill("XRP_4h_EMA", { realSpent, realQty: 29.833 });
 
     assert.equal(bot.portfolio["XRP_4h_EMA"].status, "filled");
-    assert.ok(Math.abs(bot.capa2Cash - (22 + 0.10)) < 1e-9,
-      "capa2Cash must regain surplus: 22 + 0.10 = 22.10");
-    assert.equal(bot.capa1Cash, 60, "capa1 untouched");
+    assert.ok(Math.abs(bot.capa2Cash - (CAPA2_CAP - 18*K + 0.10*K)) < 1e-9,
+      "capa2Cash must regain surplus");
+    assert.equal(bot.capa1Cash, CAPA1_CAP, "capa1 untouched");
   });
 
   it("no-op safely when strategyId not in portfolio", () => {
     const bot = new SimpleBotEngine({});
     const before1 = bot.capa1Cash, before2 = bot.capa2Cash;
-    bot.applyRealBuyFill("GHOST", { realSpent: 20, realQty: 0.2 });
+    bot.applyRealBuyFill("GHOST", { realSpent: 20*K, realQty: 0.2 });
     assert.equal(bot.capa1Cash, before1);
     assert.equal(bot.capa2Cash, before2);
+  });
+
+  // M2: applyRealBuyFill recomputes entryPrice/stop/target with real price
+  it("M2: recomputes entryPrice/stop/target with real price preserving original %", () => {
+    const bot = new SimpleBotEngine({});
+    // Posición con entry=100, stop=99 (-1%), target=102 (+2%)
+    bot.portfolio["BNB_1h_RSI"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 99, target: 102,
+      openTs: Date.now(), status: "pending"
+    };
+    bot.capa1Cash = CAPA1_CAP - 20*K;
+    bot.capa2Cash = CAPA2_CAP;
+
+    // Fill real: precio ejecutado = 101 (1% slippage adverso en BUY)
+    // realSpent=20*K, realQty = 20*K / 101
+    const realPrice = 101;
+    const realSpent = 20*K;
+    const realQty = realSpent / realPrice;
+    bot.applyRealBuyFill("BNB_1h_RSI", { realSpent, realQty });
+
+    const pos = bot.portfolio["BNB_1h_RSI"];
+    assert.equal(pos.status, "filled");
+    // entryPrice debe ser el real, no el esperado
+    assert.ok(Math.abs(pos.entryPrice - realPrice) < 1e-9,
+      `entryPrice should be real=${realPrice}, got ${pos.entryPrice}`);
+    // stop% original = -1% → nuevo stop = 101 * 0.99 = 99.99
+    assert.ok(Math.abs(pos.stop - realPrice * 0.99) < 1e-9,
+      `stop should preserve -1% from real price: ${realPrice*0.99}, got ${pos.stop}`);
+    // target% original = +2% → nuevo target = 101 * 1.02 = 103.02
+    assert.ok(Math.abs(pos.target - realPrice * 1.02) < 1e-9,
+      `target should preserve +2% from real price: ${realPrice*1.02}, got ${pos.target}`);
   });
 });
 
@@ -356,39 +405,37 @@ describe("FIX-A closing loop: applyRealBuyFill", () => {
 describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", () => {
   it("delta = realNet - expectedNet → credited to ctx.capa", () => {
     const bot = new SimpleBotEngine({});
-    const FEE = 0.001;
-    // Escenario: SELL Capa1 con expectedNet=$19.98 (gross 20 * 0.999)
-    // pre-acreditado virtualmente; real gross = $20.20 (slippage favorable +1%).
-    bot.capa1Cash = 50; // estado post SELL virtual
-    bot.capa2Cash = 30;
-    const expectedNet = 19.98;
-    const realGross = 20.20;
-    const realNet = realGross * (1-FEE); // 20.1798
-    const delta = realNet - expectedNet;   // +0.1998
+    // Escenario: SELL Capa1 con expectedNet virtual pre-acreditado,
+    // real gross = 20.20 * K (slippage favorable +1%).
+    bot.capa1Cash = 50*K; // estado post SELL virtual
+    bot.capa2Cash = 30*K;
+    const expectedNet = 19.98*K;
+    const realGross = 20.20*K;
+    const realNet = realGross * (1-FEE);
+    const delta = realNet - expectedNet;
 
     bot.applyRealSellFill("BNB_1h_RSI", { realGross, capa: 1, expectedNet });
 
-    assert.ok(Math.abs(bot.capa1Cash - (50 + delta)) < 1e-9,
-      `capa1Cash expected ${(50+delta).toFixed(4)}, got ${bot.capa1Cash.toFixed(4)}`);
-    assert.equal(bot.capa2Cash, 30, "capa2 untouched");
+    assert.ok(Math.abs(bot.capa1Cash - (50*K + delta)) < 1e-9,
+      `capa1Cash expected ${(50*K+delta).toFixed(4)}, got ${bot.capa1Cash.toFixed(4)}`);
+    assert.ok(Math.abs(bot.capa2Cash - 30*K) < 1e-9, "capa2 untouched");
   });
 
   it("negative slippage (real < expected) debits the capa correctly", () => {
     const bot = new SimpleBotEngine({});
-    const FEE = 0.001;
-    bot.capa1Cash = 40;
-    bot.capa2Cash = 55;
-    // Capa 2 SELL: expected $50 gross * 0.999 = 49.95; real $49.50 gross
-    const expectedNet = 49.95;
-    const realGross = 49.50;
+    bot.capa1Cash = 40*K;
+    bot.capa2Cash = 55*K;
+    // Capa 2 SELL: expected gross 50*K * 0.999; real gross 49.50*K
+    const expectedNet = 49.95*K;
+    const realGross = 49.50*K;
     const realNet = realGross * (1-FEE);
     const delta = realNet - expectedNet; // negative
 
     bot.applyRealSellFill("XRP_4h_EMA", { realGross, capa: 2, expectedNet });
 
-    assert.ok(Math.abs(bot.capa2Cash - (55 + delta)) < 1e-9,
-      `capa2Cash expected ${(55+delta).toFixed(4)}, got ${bot.capa2Cash.toFixed(4)}`);
-    assert.equal(bot.capa1Cash, 40, "capa1 untouched");
+    assert.ok(Math.abs(bot.capa2Cash - (55*K + delta)) < 1e-9,
+      `capa2Cash expected ${(55*K+delta).toFixed(4)}, got ${bot.capa2Cash.toFixed(4)}`);
+    assert.ok(Math.abs(bot.capa1Cash - 40*K) < 1e-9, "capa1 untouched");
     assert.ok(delta < 0, "sanity: this scenario requires negative delta");
   });
 
@@ -398,7 +445,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
     bot.portfolio["BNB_1d_T200"] = {
       pair: "BNBUSDC", capa: 2, type: "TREND_200", tf: "1d",
       entryPrice: 100, qty: 0.5, stop: 97, target: 106,
-      openTs: Date.now(), invest: 50, status: "filled",
+      openTs: Date.now(), invest: 50*K, status: "filled",
     };
     bot.capa2Cash = 0;
     bot.prices["BNBUSDC"] = 106.5; // hit target
@@ -425,15 +472,13 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
   it("roundtrip: SELL virtual credit + applyRealSellFill = real final balance", () => {
     // Simula el flujo completo: evaluate() acredita expectedNet a capa,
     // luego placeLiveSell→applyRealSellFill ajusta por slippage real.
-    // El total debe ser equivalente a acreditar directamente realNet.
     const bot = new SimpleBotEngine({});
-    const FEE = 0.001;
     bot.portfolio["SOL_4h_EMA"] = {
       pair: "SOLUSDC", capa: 2, type: "EMA_CROSS", tf: "4h",
       entryPrice: 100, qty: 0.5, stop: 97, target: 106,
-      openTs: Date.now(), invest: 50, status: "filled",
+      openTs: Date.now(), invest: 50*K, status: "filled",
     };
-    const capa2Before = 30;
+    const capa2Before = 30*K;
     bot.capa2Cash = capa2Before;
     bot.prices["SOLUSDC"] = 106.5;
 
@@ -463,46 +508,193 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
 
 // ── FIX-B: Sizing uses min(totalValue, INITIAL_CAPITAL) ─────────────────────
 describe("FIX-B: sizing base is min(tv, INITIAL_CAPITAL)", () => {
-  it("blocks mark-to-market inflation: tv=$200 from open profit, sizingBase=$100", () => {
+  it("blocks mark-to-market inflation: tv inflated, sizingBase=INITIAL_CAPITAL", () => {
     const bot = new SimpleBotEngine({});
-    // Inflate an existing position: entry $100, qty 1.0, current price $200 → mark-to-market = $200
+    // Inflate an existing position: entry 100, qty 1.0, current price 200 → mark-to-market = 200
     bot.portfolio["INFLATED"] = {
-      pair: "BNBUSDC", capa: 1, invest: 20, qty: 1.0,
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 1.0,
       entryPrice: 100, stop: 99, target: 101, openTs: Date.now()
     };
-    bot.capa1Cash = 40;  // $60 original - $20 invest
-    bot.capa2Cash = 40;
-    bot.prices["BNBUSDC"] = 200; // mark-to-market: qty*price = 1*200 = $200
-    // tv = 40 + 40 + 200 = $280
-    assert.equal(bot.totalValue(), 280, "tv should reflect mark-to-market inflation");
+    bot.capa1Cash = 40*K;
+    bot.capa2Cash = 40*K;
+    bot.prices["BNBUSDC"] = 200;
+    const inflatedTV = 40*K + 40*K + 200; // cash + qty*price
+    assert.ok(Math.abs(bot.totalValue() - inflatedTV) < 1e-9,
+      "tv should reflect mark-to-market inflation");
 
     // Now trigger BUY for BTC_30m_RSI (different pair so correlation doesn't block)
     bot._candles["BTCUSDC_30m"] = buyCandlesRSI();
     bot.prices["BTCUSDC"] = 95.5;
-    // capa2Cash=40, so it fits without cap issue. But sizing base should be $100 not $280.
     const cfg = STRATEGIES.find(s => s.id === "BTC_30m_RSI");
     bot._onCandleClose(cfg, "BTCUSDC_30m");
 
     const pos = bot.portfolio["BTC_30m_RSI"];
     if (pos) {
-      // With FIX-B: invest ≤ sizingBase * 0.30 = $100 * 0.30 = $30
-      // Without FIX-B (bug): invest could be up to $280 * 0.30 = $84
-      assert.ok(pos.invest <= 30 + 0.01,
-        `FIX-B: invest=$${pos.invest} must be ≤ $30 (30% of $100 sizingBase, NOT 30% of $280 tv)`);
+      // With FIX-B: invest ≤ INITIAL_CAPITAL * 0.30
+      // Without FIX-B (bug): invest could be up to inflatedTV * 0.30 (much larger)
+      const sizingCap = INITIAL_CAPITAL * 0.30;
+      assert.ok(pos.invest <= sizingCap + 0.01,
+        `FIX-B: invest=$${pos.invest} must be ≤ $${sizingCap.toFixed(2)} (30% of sizingBase=INITIAL_CAPITAL, NOT 30% of inflated tv=$${inflatedTV.toFixed(2)})`);
     }
   });
 
-  it("sizingBase = $100 when tv > $100 (mark-to-market up)", () => {
-    // Quick standalone check of the sizing formula using tv > INITIAL_CAPITAL
-    const tv = 150;
-    const sizingBase = Math.min(tv, 100); // mimics the FIX-B line in engine_simple
-    assert.equal(sizingBase, 100);
+  it("sizingBase = INITIAL_CAPITAL when tv > INITIAL_CAPITAL (mark-to-market up)", () => {
+    const tv = INITIAL_CAPITAL * 1.5;
+    const sizingBase = Math.min(tv, INITIAL_CAPITAL);
+    assert.equal(sizingBase, INITIAL_CAPITAL);
   });
 
-  it("sizingBase = tv when tv < $100 (drawdown)", () => {
-    // After a loss, sizing should shrink with the account
-    const tv = 85;
-    const sizingBase = Math.min(tv, 100);
-    assert.equal(sizingBase, 85, "In drawdown, use actual tv (not INITIAL_CAPITAL)");
+  it("sizingBase = tv when tv < INITIAL_CAPITAL (drawdown)", () => {
+    const tv = INITIAL_CAPITAL * 0.85;
+    const sizingBase = Math.min(tv, INITIAL_CAPITAL);
+    assert.equal(sizingBase, tv, "In drawdown, use actual tv (not INITIAL_CAPITAL)");
+  });
+});
+
+// ── M7: Cumulative drift across many BUY/SELL cycles ────────────────────────
+// Propósito: garantizar que applyRealBuyFill/applyRealSellFill NO introducen
+// error contable más allá de la física esperada (fees + slippage). Un bug de
+// reconciliation (doble-débito, capa errónea, delta invertido) se manifestaría
+// como drift del orden de $invest * cycles, no céntimos.
+describe("M7: accumulated drift over 100 BUY/SELL cycles stays bounded", () => {
+  it("no-slippage cycles: drift matches fee-only model within floating-point tolerance", () => {
+    // Escenario sin slippage — aísla la corrección de reconciliation.
+    // Cada ciclo BUY+SELL al mismo precio paga 2×FEE → drag determinista.
+    const bot = new SimpleBotEngine({});
+    const tvBefore = bot.totalValue();
+    const invest = 10*K;
+    const entryPrice = 100;
+    const cycles = 100;
+
+    for (let i = 0; i < cycles; i++) {
+      // Reserve (FIX-A atomicity)
+      const qty = invest * (1 - FEE) / entryPrice;
+      bot.portfolio["CYC"] = {
+        pair: "BNBUSDC", capa: 1, type: "RSI_MR_ADX", tf: "1h",
+        entryPrice, qty, invest,
+        stop: entryPrice * 0.992, target: entryPrice * 1.016,
+        openTs: Date.now(), status: "pending"
+      };
+      bot.capa1Cash -= invest;
+
+      // BUY reconcile con precio exacto (no slippage)
+      bot.applyRealBuyFill("CYC", { realSpent: invest, realQty: qty });
+
+      // SELL virtual credit + real reconcile (ambos a entryPrice exacto)
+      const pos = bot.portfolio["CYC"];
+      const expectedGross = pos.qty * entryPrice;
+      const expectedNet = expectedGross * (1 - FEE);
+      bot.capa1Cash += expectedNet;
+      delete bot.portfolio["CYC"];
+      bot.applyRealSellFill("CYC", { realGross: expectedGross, capa: 1, expectedNet });
+    }
+
+    // Física esperada: cada ciclo pierde invest*(1 - (1-FEE)^2) por fees round-trip
+    const perCycleDrag = invest * (1 - Math.pow(1 - FEE, 2));
+    const expectedDrag = perCycleDrag * cycles;
+    const tvAfter = bot.totalValue();
+    const actualDrag = tvBefore - tvAfter;
+    const reconciliationError = Math.abs(actualDrag - expectedDrag);
+
+    // Si reconciliation funciona: error ~ floating-point residual (1e-9 range)
+    // Un bug contable real (capa equivocada, doble-débito) mostraría error >> $0.01
+    assert.ok(reconciliationError < 0.01,
+      `Reconciliation drift beyond physics: expected drag=${expectedDrag.toFixed(6)}, actual drag=${actualDrag.toFixed(6)}, error=${reconciliationError.toFixed(6)}`);
+    // Sanity: portfolio limpio
+    assert.equal(Object.keys(bot.portfolio).length, 0,
+      "Portfolio should be empty after 100 full BUY/SELL cycles");
+  });
+
+  it("random symmetric slippage: drift stays within physics-derived tolerance", () => {
+    // Con slippage simétrico [-0.3%, +0.3%], el drift debe ser aproximadamente
+    // el drag de fees (determinista) más ruido de variance (~sqrt(N)).
+    const bot = new SimpleBotEngine({});
+    const tvBefore = bot.totalValue();
+    const invest = 10*K;
+    const entryPrice = 100;
+    const cycles = 100;
+
+    // PRNG determinista (Mulberry32) para reproducibilidad
+    let seed = 0xdeadbeef;
+    const rand = () => {
+      seed = (seed + 0x6D2B79F5) >>> 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const slip = () => (rand() - 0.5) * 0.006; // ±0.3%
+
+    for (let i = 0; i < cycles; i++) {
+      const qty_est = invest * (1 - FEE) / entryPrice;
+      bot.portfolio["CYC"] = {
+        pair: "BNBUSDC", capa: 1, type: "RSI_MR_ADX", tf: "1h",
+        entryPrice, qty: qty_est, invest,
+        stop: entryPrice * 0.992, target: entryPrice * 1.016,
+        openTs: Date.now(), status: "pending"
+      };
+      bot.capa1Cash -= invest;
+
+      // BUY real con slippage en el precio; quoteOrderQty = invest fijo
+      const realBuyPrice = entryPrice * (1 + slip());
+      const realQty = invest * (1 - FEE) / realBuyPrice;
+      bot.applyRealBuyFill("CYC", { realSpent: invest, realQty });
+
+      // SELL virtual a exitPrice con slippage; real = exitPrice exacto
+      const pos = bot.portfolio["CYC"];
+      const exitPrice = entryPrice * (1 + slip());
+      const expectedGross = pos.qty * exitPrice;
+      const expectedNet = expectedGross * (1 - FEE);
+      bot.capa1Cash += expectedNet;
+      delete bot.portfolio["CYC"];
+      bot.applyRealSellFill("CYC", { realGross: expectedGross, capa: 1, expectedNet });
+    }
+
+    const tvAfter = bot.totalValue();
+    const drift = Math.abs(tvAfter - tvBefore);
+
+    // Física: fee drag determinista + variance de slippage simétrico.
+    // Cota superior generosa: 2 * invest * cycles * (FEE + maxSlip)
+    //   = 2 * 10 * 100 * (0.001 + 0.003) * K = 8 * K
+    const upperBound = 8 * K;
+    assert.ok(drift < upperBound,
+      `After 100 cycles drift=${drift.toFixed(4)} must be < physics upper bound ${upperBound.toFixed(4)}`);
+    assert.equal(Object.keys(bot.portfolio).length, 0);
+  });
+
+  it("capa isolation: drift in capa1 doesn't leak into capa2", () => {
+    // Si un bug de reconciliation asignara delta a la capa equivocada,
+    // capa2 cambiaría aunque solo tradeamos en capa1. Este test lo caza.
+    const bot = new SimpleBotEngine({});
+    const capa2Before = bot.capa2Cash;
+    const invest = 10*K;
+    const entryPrice = 100;
+
+    for (let i = 0; i < 50; i++) {
+      const qty = invest * (1 - FEE) / entryPrice;
+      bot.portfolio["CAPA1_ONLY"] = {
+        pair: "BNBUSDC", capa: 1, type: "RSI_MR_ADX", tf: "1h",
+        entryPrice, qty, invest,
+        stop: entryPrice * 0.992, target: entryPrice * 1.016,
+        openTs: Date.now(), status: "pending"
+      };
+      bot.capa1Cash -= invest;
+
+      const realBuyPrice = entryPrice * 1.002; // adverse
+      const realQty = invest * (1 - FEE) / realBuyPrice;
+      bot.applyRealBuyFill("CAPA1_ONLY", { realSpent: invest, realQty });
+
+      const pos = bot.portfolio["CAPA1_ONLY"];
+      const expectedGross = pos.qty * entryPrice;
+      const expectedNet = expectedGross * (1 - FEE);
+      bot.capa1Cash += expectedNet;
+      delete bot.portfolio["CAPA1_ONLY"];
+      const realGross = pos.qty * (entryPrice * 0.998); // adverse
+      bot.applyRealSellFill("CAPA1_ONLY", { realGross, capa: 1, expectedNet });
+    }
+
+    // Capa2 NUNCA debe cambiar (floating-point puro)
+    assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9,
+      `Capa isolation broken: capa2Cash ${capa2Before} → ${bot.capa2Cash}`);
   });
 });

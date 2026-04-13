@@ -85,12 +85,20 @@ try {
 // portfolio (status="pending") y antes de que cualquier otra estrategia cierre
 // vela. placeLiveBuy valida el cap global, ejecuta TWAP y reconcilia vía
 // applyRealBuyFill. Análogo para _onSell / applyRealSellFill.
+// FIX-M1: en paper-live (LIVE_MODE=false) no hay fill real, así que marcamos
+// la posición como filled inmediatamente para que no quede stuck en pending.
 S.simpleBot._onBuy = (pair, invest, ctx) => {
-  if (!LIVE_MODE) return;
+  if (!LIVE_MODE) {
+    const pos = S.simpleBot.portfolio[ctx?.strategyId];
+    if (pos && pos.status === "pending") pos.status = "filled";
+    return;
+  }
   placeLiveBuy(pair, invest, ctx)
     .catch(e => console.error(`[LIVE][onBuy] ${ctx?.strategyId} error:`, e.message));
 };
 S.simpleBot._onSell = (pair, qty, ctx) => {
+  // En paper-live la reconciliación ya la hizo evaluate() (expectedNet acreditado);
+  // sin fill real no hay slippage que ajustar, así que no hace nada extra.
   if (!LIVE_MODE) return;
   placeLiveSell(pair, qty, ctx)
     .catch(e => console.error(`[LIVE][onSell] ${ctx?.strategyId} error:`, e.message));
@@ -494,18 +502,30 @@ async function save() {
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
 process.on("SIGINT", async()=>{await save();process.exit(0);});
 
-// ── Capturar errores no manejados para evitar crashes silenciosos ─────────────
-process.on("uncaughtException", (err) => {
-  console.error("[CRASH] uncaughtException:", err.message);
-  console.error(err.stack);
-  // Guardar estado antes de reiniciar
-  save().catch(()=>{}).finally(()=>{
-    // No salimos — PM2 reiniciará si el proceso muere
-  });
+// ── Capturar errores no manejados — FIX-M5: persistir + morir limpiamente ───
+// Antes de M5 este handler solo logueaba y seguía, lo que dejaba el proceso
+// con estado posiblemente corrupto (p.ej. portfolio mid-mutation). Ahora:
+// 1. persistimos state vía save() (capa1/capa2, portfolio, stratTrades, curBar…),
+// 2. también guardamos simpleBot.saveState() para que el ledger virtual no pierda
+//    el tick parcial cuando PM2 reinicie el proceso,
+// 3. exit(1) para que PM2 levante una instancia limpia.
+process.on("uncaughtException", async (err) => {
+  console.error("[CRASH] uncaughtException:", err?.message||err);
+  console.error(err?.stack);
+  try { await save(); } catch(e) { console.error("[CRASH-SAVE]", e.message); }
+  try {
+    if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
+  } catch(e) { console.error("[CRASH-SIMPLE-SAVE]", e.message); }
+  process.exit(1);
 });
-process.on("unhandledRejection", (reason) => {
+process.on("unhandledRejection", async (reason) => {
   console.error("[CRASH] unhandledRejection:", reason?.message||reason);
-  // No salimos - solo logueamos
+  // Menos agresivo que uncaughtException: muchas unhandled rejections vienen de
+  // fetches opcionales (F&G, news, etc). Solo persistimos por seguridad, sin exit.
+  try { await save(); } catch(e) {}
+  try {
+    if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
+  } catch(e) {}
 });
 
 // ── Binance WebSocket ─────────────────────────────────────────────────────────
