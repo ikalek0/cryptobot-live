@@ -475,8 +475,18 @@ async function save() {
   if(S.bot.regimeDetector) s.regimeDetector = S.bot.regimeDetector.serialize();
   await saveState(s);
 }
-process.on("SIGTERM",async()=>{await save();process.exit(0);});
-process.on("SIGINT", async()=>{await save();process.exit(0);});
+// Persist both main + simpleBot state on graceful shutdown
+async function saveAll() {
+  try { await save(); } catch(e) { console.error("[SAVE-MAIN]", e.message); }
+  try {
+    if (S.simpleBot?.saveState) {
+      await saveSimpleState(S.simpleBot.saveState());
+      console.log("[SAVE-SIMPLE] Estado simpleBot persistido antes de shutdown");
+    }
+  } catch(e) { console.error("[SAVE-SIMPLE]", e.message); }
+}
+process.on("SIGTERM",async()=>{await saveAll();process.exit(0);});
+process.on("SIGINT", async()=>{await saveAll();process.exit(0);});
 
 // ── Capturar errores no manejados para evitar crashes silenciosos ─────────────
 process.on("uncaughtException", (err) => {

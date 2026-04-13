@@ -8,7 +8,8 @@ const fs   = require("fs");
 const path = require("path");
 
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const STATE_FILE   = path.join(__dirname, "../data/state.json");
+const STATE_FILE        = path.join(__dirname, "../data/state.json");
+const SIMPLE_STATE_FILE = path.join(__dirname, "../data/simple_state.json");
 
 // Hosts conocidos como muertos: bail out sin esperar al timeout de DNS
 const DEAD_HOSTS = ["railway.internal", "railway.app"];
@@ -125,17 +126,39 @@ async function saveSimpleState(state) {
          ON CONFLICT (key) DO UPDATE SET value=$1, ts=NOW()`,
         [json]
       );
+      return;
     }
   } catch(e) { disablePg(`saveSimpleState query falló: ${e.message}`); }
+  // Fallback a disco con escritura atómica (tmpfile + rename)
+  // Garantiza que un crash a mitad de write no deje el archivo corrupto.
+  try {
+    fs.mkdirSync(path.dirname(SIMPLE_STATE_FILE), { recursive: true });
+    const tmp = `${SIMPLE_STATE_FILE}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, json, "utf8");
+    fs.renameSync(tmp, SIMPLE_STATE_FILE);
+  } catch(e) { console.error("[DB] saveSimpleState disk falló:", e.message); }
 }
 
 async function loadSimpleState() {
   try {
     const client = await getClient();
-    if (!client) return null;
-    const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
-    return r.rows[0] ? JSON.parse(r.rows[0].value) : null;
-  } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); return null; }
+    if (client) {
+      const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
+      if (r.rows[0]) {
+        console.log("[DB] SimpleState cargado desde PostgreSQL ✓");
+        return JSON.parse(r.rows[0].value);
+      }
+    }
+  } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); }
+  // Fallback a disco
+  if (fs.existsSync(SIMPLE_STATE_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(SIMPLE_STATE_FILE, "utf8"));
+      console.log("[DB] SimpleState cargado desde disco ✓");
+      return data;
+    } catch(e) { console.warn("[DB] loadSimpleState parse error:", e.message); }
+  }
+  return null;
 }
 
 module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState };
