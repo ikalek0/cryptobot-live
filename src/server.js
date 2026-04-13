@@ -266,6 +266,40 @@ app.get("/api/summary", (_,res) => {
 });
 
 app.get("/api/simple", (_,res) => res.json(S.simpleBot ? S.simpleBot.getState() : {loading:true}));
+
+// ── Endpoint compacto orientado a watchdog/invariantes ─────────────────
+// Devuelve el estado real del SimpleBotEngine (no el zombie ledger de S.bot),
+// incluyendo el invariante del cap estricto $100 para alertas externas.
+app.get("/api/simpleBot/state", (_,res) => {
+  const sb = S.simpleBot;
+  if (!sb) return res.status(503).json({ loading: true, instance: LIVE_MODE?"LIVE":"PAPER-LIVE" });
+  const s          = sb.getState();
+  const committed  = Object.values(sb.portfolio||{}).reduce((a,p)=>a+(p.invest||0), 0);
+  const capa1Cash  = sb.capa1Cash || 0;
+  const capa2Cash  = sb.capa2Cash || 0;
+  const totalLedger = capa1Cash + capa2Cash + committed;
+  const cap        = S.CAPITAL_USDT;
+  const tv         = s.totalValue || 0;
+  const drawdownPct = tv < cap ? +(((cap - tv) / cap) * 100).toFixed(3) : 0;
+  res.json({
+    instance:     LIVE_MODE ? "LIVE" : "PAPER-LIVE",
+    mode:         s.mode,
+    tick:         s.tick,
+    cap:          cap,
+    totalValue:   +tv.toFixed(4),
+    capa1Cash:    +capa1Cash.toFixed(4),
+    capa2Cash:    +capa2Cash.toFixed(4),
+    committed:    +committed.toFixed(4),
+    totalLedger:  +totalLedger.toFixed(4),
+    capViolation: totalLedger > cap * 1.005,
+    drawdownPct:  drawdownPct,
+    openPositions: Object.keys(sb.portfolio||{}).length,
+    portfolio:    sb.portfolio || {},
+    trades:       s.trades,
+    winRate:      s.winRate,
+    returnPct:    s.returnPct,
+  });
+});
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
 
