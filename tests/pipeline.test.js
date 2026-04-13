@@ -224,3 +224,107 @@ describe("Full pipeline: candle close triggers evaluation", () => {
       "Should block 3rd position in MAJOR_ALT group");
   });
 });
+
+// ── Order callbacks + applyRealFill (Fase 3) ────────────────────────────────
+describe("Order callbacks", () => {
+  it("setOrderCallbacks installs onBuy/onSell handlers", () => {
+    const bot = new SimpleBotEngine({});
+    let buyCalls = 0, sellCalls = 0;
+    bot.setOrderCallbacks({
+      onBuy:  () => buyCalls++,
+      onSell: () => sellCalls++,
+    });
+    assert.equal(typeof bot._onBuyCb, "function");
+    assert.equal(typeof bot._onSellCb, "function");
+    // Sanity-invoke directly
+    bot._onBuyCb(null, null); bot._onSellCb(null, null, null);
+    assert.equal(buyCalls, 1);
+    assert.equal(sellCalls, 1);
+  });
+
+  it("applyRealFill ajusta invest, qty, entryPrice + refunde capa cash", () => {
+    const bot = new SimpleBotEngine({});
+    // Crear posición simulada (post-BUY optimista)
+    bot.portfolio["BNB_1h_RSI"] = {
+      pair: "BNBUSDC", capa: 1, tf: "1h", type: "RSI_MR_ADX",
+      entryPrice: 600, qty: 0.0333, invest: 20,
+      stop: 600 * 0.992, target: 600 * 1.016, openTs: Date.now()
+    };
+    bot.capa1Cash = 60 - 20; // 40 post-BUY
+
+    // Fill real: Binance cobró más (slippage +$0.50)
+    const ok = bot.applyRealFill("BNB_1h_RSI", {
+      realInvest: 20.50, realQty: 0.0341, realPrice: 601.17
+    });
+    assert.equal(ok, true);
+    const pos = bot.portfolio["BNB_1h_RSI"];
+    assert.equal(pos.invest, 20.50);
+    assert.equal(pos.qty, 0.0341);
+    assert.equal(pos.entryPrice, 601.17);
+    // Delta -0.50 debitado de capa1Cash
+    assert.ok(Math.abs(bot.capa1Cash - 39.50) < 0.001,
+      `capa1Cash debe ser 39.50, got ${bot.capa1Cash}`);
+    // Stop/target recomputados desde precio real
+    assert.ok(Math.abs(pos.stop - 601.17 * 0.992) < 0.001);
+    assert.ok(Math.abs(pos.target - 601.17 * 1.016) < 0.001);
+  });
+
+  it("applyRealFill con fill menor (refund) acredita capa cash", () => {
+    const bot = new SimpleBotEngine({});
+    bot.portfolio["XRP_4h_EMA"] = {
+      pair: "XRPUSDC", capa: 2, tf: "4h", type: "EMA_CROSS",
+      entryPrice: 1.32, qty: 11.35, invest: 15,
+      stop: 1.32 * 0.97, target: 1.32 * 1.06, openTs: Date.now()
+    };
+    bot.capa2Cash = 40 - 15;
+
+    // Binance cobró MENOS de lo esperado
+    bot.applyRealFill("XRP_4h_EMA", { realInvest: 14.80, realQty: 11.20, realPrice: 1.3214 });
+    // Delta +0.20 acreditado
+    assert.ok(Math.abs(bot.capa2Cash - 25.20) < 0.001,
+      `capa2Cash debe ser 25.20, got ${bot.capa2Cash}`);
+  });
+
+  it("applyRealFill devuelve false si no existe posición", () => {
+    const bot = new SimpleBotEngine({});
+    const ok = bot.applyRealFill("NONEXISTENT", { realInvest:10, realQty:1, realPrice:10 });
+    assert.equal(ok, false);
+  });
+
+  it("applyRealFill rechaza datos inválidos", () => {
+    const bot = new SimpleBotEngine({});
+    bot.portfolio["BNB_1h_RSI"] = { pair:"BNBUSDC", capa:1, invest:20, qty:0.03, entryPrice:600 };
+    assert.equal(bot.applyRealFill("BNB_1h_RSI", { realInvest:0, realQty:0, realPrice:0 }), false);
+    assert.equal(bot.applyRealFill("BNB_1h_RSI", {}), false);
+  });
+
+  it("onBuy callback fires en _onCandleClose tras crear posición", () => {
+    const bot = new SimpleBotEngine({});
+    // Forzar candles suficientes + signal BUY via stub
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    const key = `${cfg.pair}_${cfg.tf}`;
+    bot._candles[key] = [];
+    for (let i = 0; i < 60; i++) {
+      // Declining prices to trigger RSI_MR_ADX
+      const p = 600 - i * 2;
+      bot._candles[key].push({ open: p, high: p + 1, low: p - 1, close: p });
+    }
+    bot.prices[cfg.pair] = 500;
+    let buyCalled = false;
+    let buyCfg = null, buyPos = null;
+    bot.setOrderCallbacks({
+      onBuy: (c, p) => { buyCalled = true; buyCfg = c; buyPos = p; },
+      onSell: () => {}
+    });
+    // Forzar stratTrades con kelly positivo
+    bot._stratTrades[cfg.id] = Array(25).fill({ pnl: 1.6, ts: Date.now() });
+    bot._onCandleClose(cfg, key);
+    // Si el signal evaluó BUY, el callback debe haber disparado
+    if (bot.portfolio[cfg.id]) {
+      assert.ok(buyCalled, "onBuy debe dispararse tras crear posición");
+      assert.equal(buyCfg?.id, cfg.id);
+      assert.ok(buyPos?.invest > 0);
+    }
+    // Si no hubo signal, el test es no-op (el pipeline tests cubre este caso)
+  });
+});

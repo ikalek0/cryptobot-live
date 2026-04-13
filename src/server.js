@@ -80,6 +80,25 @@ try {
   S.simpleBot = new SimpleBotEngine({});
 }
 
+// ── Wire order callbacks: engine_simple → Binance real orders ──────────
+// Reemplaza el bloque zombie de loop.js:184-209 que solo manejaba BUYs
+// (los SELLs del simpleBot nunca llegaban a Binance — causa de las 6
+// posiciones abiertas anoche que no se pudieron cerrar automáticamente).
+S.simpleBot.setOrderCallbacks({
+  onBuy: (cfg, pos) => {
+    if (!LIVE_MODE) return;
+    console.log(`[SIMPLE→LIVE][BUY] ${cfg.pair} $${pos.invest.toFixed(2)} [${cfg.id}]`);
+    placeLiveBuy(cfg.pair, pos.invest, cfg.id)
+      .catch(e => console.error(`[SIMPLE→LIVE][BUY] ${cfg.id}:`, e.message));
+  },
+  onSell: (strategyId, pos, reason) => {
+    if (!LIVE_MODE) return;
+    console.log(`[SIMPLE→LIVE][SELL] ${pos.pair} qty=${pos.qty.toFixed(5)} (${reason}) [${strategyId}]`);
+    placeLiveSell(pos.pair, pos.qty, strategyId)
+      .catch(e => console.error(`[SIMPLE→LIVE][SELL] ${strategyId}:`, e.message));
+  }
+});
+
 // ── Prefill velas históricas de Binance para simpleBot ──────────────────
 async function prefillSimpleBotCandles() {
   // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
@@ -627,19 +646,20 @@ async function placeLiveBuy(symbol, usdtAmount, strategyId) {
     if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
     const orders = await placeTWAPBuy(symbol, safe);
     if(orders?.length) {
-      // Registrar precio real de ejecución para ajustar cash virtual
+      // Registrar precio real de ejecución
       const fills = orders.flatMap(o=>o.fills||[]);
       const realSpent = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0) || safe;
       const realQty = fills.reduce((s,f)=>s+parseFloat(f.qty),0);
       const avgPrice = realQty>0 ? realSpent/realQty : safe;
       console.log(`[LIVE][BUY] Real: gastado $${realSpent.toFixed(2)} @ avg $${avgPrice.toFixed(2)}`);
-      // Ajustar bot.cash con el precio real (no el estimado)
-      if(S.bot && Math.abs(realSpent - safe) > 0.01) {
-        const drift = realSpent - safe;
-        // [DISABLED 2026-04] drift correction: signo invertido Y variable incorrecta — S.bot.cash nunca se decrementa en BUY (SimpleBot usa capa1Cash/capa2Cash). Mutar aquí inflaba el ledger con dinero fantasma.
-        console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
+      // ── Aplicar fill real al ledger del simpleBot (reconciliación slippage) ──
+      // Solo si hay strategyId (llamada via callback) — garantiza que el cash
+      // virtual refleja exactamente lo que gastamos en Binance, sin drift.
+      if (strategyId && S.simpleBot?.applyRealFill) {
+        S.simpleBot.applyRealFill(strategyId, { realInvest: realSpent, realQty, realPrice: avgPrice });
+        // Persistir inmediatamente tras fill real — evita perder el ajuste en un crash
+        try { saveSimpleState(S.simpleBot.saveState()).catch(()=>{}); } catch(_) {}
       }
-      // BUY notification removed\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
     }
     return orders?.[0]||null;
   } catch(e) {
@@ -665,7 +685,7 @@ async function getActualBinanceQty(symbol) {
   } catch(e) { return 0; }
 }
 
-async function placeLiveSell(symbol, quantity) {
+async function placeLiveSell(symbol, quantity, strategyId) {
   try {
     if (!LIVE_MODE) return null;
     if (quantity <= 0) return null;
@@ -673,21 +693,9 @@ async function placeLiveSell(symbol, quantity) {
     const realQty = await getActualBinanceQty(symbol);
     const sellQty = Math.min(quantity, realQty);
     if (sellQty <= 0) {
-      console.log(`[LIVE][SELL] ${symbol} sin balance real → cerrando posición virtual`);
-      // Si no hay balance real, la posición es huérfana — cerrarla virtualmente
-      if(S.bot?.portfolio?.[symbol]) {
-        const orphanPos = S.bot.portfolio[symbol];
-        // Restaurar cash que se gastó en la compra virtual (nunca ejecutada realmente)
-        const orphanCost = (orphanPos.qty||0) * (orphanPos.entryPrice||0);
-        if(orphanCost > 0) {
-          // [DISABLED 2026-04-12] orphan cash inflation: mismo defecto que L607 — escribe a S.bot zombie. Solo el delete del portfolio es seguro.
-          // Eliminar también el log entry de esta posición huérfana
-          S.bot.log = (S.bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
-            Math.abs(l.price-(orphanPos.entryPrice||0))<0.01));
-          console.log(`[LIVE] Posición huérfana ${symbol} eliminada — cash restaurado +$${orphanCost.toFixed(2)}`);
-        }
-        delete S.bot.portfolio[symbol];
-      }
+      console.log(`[LIVE][SELL] ${symbol} sin balance real — posición virtual ya cerrada por simpleBot`);
+      // simpleBot.evaluate() ya eliminó la entry del portfolio antes del callback.
+      // Aquí solo logueamos: no hay nada real que vender (ni huérfano que limpiar).
       return null;
     }
     const prec = QTY_PRECISION[symbol] || 4;
@@ -696,20 +704,20 @@ async function placeLiveSell(symbol, quantity) {
       symbol, side:"SELL", type:"MARKET", quantity: qtyStr
     });
     if (order?.orderId) {
-      console.log(`[LIVE][SELL] ✅ ${symbol} qty:${quantity} → orderId:${order.orderId}`);
-      // SELL notification removed\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
+      const fills = order.fills||[];
+      const realSold = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0);
+      const avgPrice = fills.length ? realSold / fills.reduce((s,f)=>s+parseFloat(f.qty),0) : 0;
+      console.log(`[LIVE][SELL] ✅ ${symbol} qty:${qtyStr} @ avg $${avgPrice.toFixed(4)} → orderId:${order.orderId} [${strategyId||"?"}]`);
     } else {
-      console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
-      // -2010 = insufficient balance → position doesn't exist in Binance
-      // Close virtual position to stay in sync
-      if(order?.code === -2010 && S.bot?.portfolio?.[symbol]) {
-        delete S.bot.portfolio[symbol];
-        console.log(`[LIVE] Posición virtual ${symbol} cerrada por -2010 (no existe en Binance)`);
+      console.error(`[LIVE][SELL] ❌ ${symbol} [${strategyId||"?"}]`, JSON.stringify(order));
+      // -2010 = insufficient balance → ya no hay nada que cerrar
+      if (order?.code === -2010) {
+        console.log(`[LIVE][SELL] ${symbol} sin balance real — nada que hacer (simpleBot ya cerró virtual)`);
       }
     }
     return order;
   } catch(e) {
-    console.error(`[LIVE][SELL] Error ${symbol}:`, e.message);
+    console.error(`[LIVE][SELL] Error ${symbol} [${strategyId||"?"}]:`, e.message);
     return null;
   }
 }

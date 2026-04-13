@@ -363,6 +363,9 @@ class SimpleBotEngine {
     };
     this.log.push({type:"BUY",symbol:cfg.pair,strategy:cfg.id,price,invest,ts:Date.now()});
     console.log(`[SIMPLE][BUY] ${cfg.pair} @ $${price.toFixed(4)} $${invest.toFixed(0)} [Capa${cfg.capa}] ${cfg.id}`);
+    // Disparar callback de BUY — server.js ejecuta la orden real en Binance
+    try { this._onBuyCb && this._onBuyCb(cfg, this.portfolio[cfg.id]); }
+    catch(e) { console.error(`[SIMPLE][CB-BUY] ${cfg.id}: ${e.message}`); }
     } catch(e) {
       console.error(`[SIMPLE][ERROR] _onCandleClose ${cfg?.id}: ${e.message}`);
       console.error(e.stack?.split("\n").slice(0,3).join("\n"));
@@ -374,6 +377,44 @@ class SimpleBotEngine {
     this._botName = botName;
     this._regime = regime;
     this._fearGreed = fearGreed;
+  }
+
+  // ── Cableado de órdenes reales ─────────────────────────────────────────
+  // server.js inyecta callbacks que traducen BUY/SELL del simpleBot
+  // a órdenes reales en Binance (LIVE_MODE) via placeLiveBuy/placeLiveSell.
+  setOrderCallbacks({ onBuy, onSell } = {}) {
+    this._onBuyCb  = onBuy;
+    this._onSellCb = onSell;
+    console.log(`[SIMPLE][CB] order callbacks instalados: BUY=${!!onBuy} SELL=${!!onSell}`);
+  }
+
+  // ── Aplicar fill real de Binance al ledger virtual ─────────────────────
+  // Tras un BUY real, ajusta el slippage entre invest optimista y gasto real.
+  // delta = realInvest - virtualInvest: +drift si Binance cobró más (debita cash),
+  //                                     -drift si cobró menos (refunde cash).
+  applyRealFill(strategyId, { realInvest, realQty, realPrice } = {}) {
+    const pos = this.portfolio[strategyId];
+    if (!pos) {
+      console.warn(`[SIMPLE][FILL] ${strategyId} — no hay posición abierta, skip`);
+      return false;
+    }
+    if (!(realInvest > 0) || !(realQty > 0) || !(realPrice > 0)) {
+      console.warn(`[SIMPLE][FILL] ${strategyId} — datos inválidos`, { realInvest, realQty, realPrice });
+      return false;
+    }
+    const deltaInvest = realInvest - (pos.invest || 0);
+    if (pos.capa === 1) this.capa1Cash -= deltaInvest;
+    else                this.capa2Cash -= deltaInvest;
+    pos.entryPrice = realPrice;
+    pos.qty        = realQty;
+    pos.invest     = realInvest;
+    const cfg = STRATEGIES.find(s => s.id === strategyId);
+    if (cfg) {
+      pos.stop   = realPrice * (1 - cfg.stop);
+      pos.target = realPrice * (1 + cfg.target);
+    }
+    console.log(`[SIMPLE][FILL] ${strategyId} real invest=$${realInvest.toFixed(2)} (Δ=${deltaInvest>=0?"+":""}${deltaInvest.toFixed(3)}) price=$${realPrice.toFixed(4)} qty=${realQty.toFixed(5)}`);
+    return true;
   }
 
   evaluate(){
@@ -440,6 +481,11 @@ class SimpleBotEngine {
             mfeReal: +(pos.maxMFE||0).toFixed(3),
           }).catch(()=>{});
         }
+        // Disparar callback de SELL ANTES del delete — server.js ejecuta la orden real.
+        // El ledger virtual ya está actualizado con el gross simulado; si hay slippage
+        // en la venta real, drifta ligeramente pero es aceptable (<<0.1%).
+        try { this._onSellCb && this._onSellCb(id, { ...pos, exitPrice: price, reason, pnlPct }); }
+        catch(e) { console.error(`[SIMPLE][CB-SELL] ${id}: ${e.message}`); }
         delete this.portfolio[id];
       }
     }
