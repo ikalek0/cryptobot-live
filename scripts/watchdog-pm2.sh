@@ -19,13 +19,64 @@ CAP="${CAPITAL_USDT:-100}"
 CAP_LIMIT=$(awk -v c="$CAP" 'BEGIN{printf "%.4f", c*1.005}')
 PM2_APPS=("live" "paper" "test" "bafir" "sentiment" "arbitrage" "deals")
 STATE_FILE="/tmp/bafir-watchdog.state"
+DEDUP_WINDOW_SEC=1800   # 30 minutes — FIX-M6
 LOG_PREFIX="[WATCHDOG $(date -u +%Y-%m-%dT%H:%M:%SZ)]"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log() { echo "${LOG_PREFIX} $*"; }
 
+# FIX-M6: Dedup de alertas con ventana de 30 min por tipo.
+# Sin esto, cada cron tick (cada 5 min) re-envía la misma alerta si el
+# problema persiste — spam Telegram insostenible. Con dedup: la primera
+# alerta para un key se envía, las siguientes dentro de 30 min se descartan.
+# State file: /tmp/bafir-watchdog.state con líneas "key timestamp".
+# Fail-safe: si la escritura del state file falla por cualquier razón,
+# dejamos pasar la alerta (prefer occasional spam a silencio total).
+should_alert() {
+  local key="$1"
+  local now last age
+  now=$(date +%s)
+  last=""
+  if [ -f "$STATE_FILE" ]; then
+    last=$(awk -v k="$key" '$1==k {print $2}' "$STATE_FILE" 2>/dev/null | tail -1)
+  fi
+  if [ -n "$last" ]; then
+    age=$((now - last))
+    if [ "$age" -lt "$DEDUP_WINDOW_SEC" ]; then
+      return 1   # dentro de ventana → deduplicar
+    fi
+  fi
+  # Actualizar state file atómicamente: borrar línea previa del key, añadir nueva
+  local tmp="${STATE_FILE}.tmp.$$"
+  {
+    if [ -f "$STATE_FILE" ]; then
+      grep -v "^${key} " "$STATE_FILE" 2>/dev/null || true
+    fi
+    echo "${key} ${now}"
+  } > "$tmp" 2>/dev/null || {
+    log "should_alert: no pude escribir ${tmp} — fail-safe allow alert"
+    return 0
+  }
+  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || {
+    log "should_alert: mv ${tmp} → ${STATE_FILE} falló — fail-safe allow alert"
+    return 0
+  }
+  return 0
+}
+
+# alert_tg <dedup_key> <msg>
+# Si key es cadena vacía, se omite la dedup (alerta siempre). En uso normal
+# pasar un key único por tipo de condición: pm2_down_${app}, cap_breach,
+# totalvalue_over_cap, drawdown_crit, live_api_down, health_api_down, etc.
 alert_tg() {
-  local msg="$1"
+  local key="$1"
+  local msg="$2"
+  if [ -n "$key" ]; then
+    if ! should_alert "$key"; then
+      log "DEDUP: ${key} (within ${DEDUP_WINDOW_SEC}s window) — alert skipped"
+      return 0
+    fi
+  fi
   log "ALERT: $msg"
   if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     curl -sS --max-time 10 \
@@ -64,7 +115,7 @@ except Exception:
     case "$status" in
       online) ;;  # OK
       missing) log "service $app no registrado en pm2 (ignorar si es intencional)" ;;
-      *)       alert_tg "PM2 app <b>$app</b> estado: <code>$status</code>" ;;
+      *)       alert_tg "pm2_down_${app}" "PM2 app <b>$app</b> estado: <code>$status</code>" ;;
     esac
   done
 }
@@ -74,7 +125,7 @@ check_live_cap() {
   local body
   body=$(curl -sS --max-time 5 "${LIVE_HOST}/api/simpleBot/state" 2>/dev/null || echo "")
   if [ -z "$body" ]; then
-    alert_tg "cryptobot-live no responde en ${LIVE_HOST}/api/simpleBot/state"
+    alert_tg "live_api_down" "cryptobot-live no responde en ${LIVE_HOST}/api/simpleBot/state"
     return
   fi
 
@@ -102,7 +153,7 @@ except Exception as e:
       return
       ;;
     PARSE_ERR*)
-      alert_tg "cryptobot-live /api/simpleBot/state devolvió JSON inválido: ${parse_out#PARSE_ERR|}"
+      alert_tg "live_parse_err" "cryptobot-live /api/simpleBot/state devolvió JSON inválido: ${parse_out#PARSE_ERR|}"
       return
       ;;
   esac
@@ -113,19 +164,19 @@ except Exception as e:
   local tv_over
   tv_over=$(awk -v t="$tv" -v l="$CAP_LIMIT" 'BEGIN{print (t>l)?"1":"0"}')
   if [ "$tv_over" = "1" ]; then
-    alert_tg "totalValue <b>\$${tv}</b> > cap*1.005 <b>\$${CAP_LIMIT}</b> (positions=${op}, dd=${dd}%)"
+    alert_tg "totalvalue_over_cap" "totalValue <b>\$${tv}</b> > cap*1.005 <b>\$${CAP_LIMIT}</b> (positions=${op}, dd=${dd}%)"
   fi
 
   # 2b. Invariante duro: capViolation=true (ledger > cap)
   if [ "$viol" = "True" ]; then
-    alert_tg "INVARIANTE CAP ROTA: totalLedger=\$${tl} > cap \$${cap} (positions=${op})"
+    alert_tg "cap_breach" "INVARIANTE CAP ROTA: totalLedger=\$${tl} > cap \$${cap} (positions=${op})"
   fi
 
   # 2c. Drawdown crítico (>15%)
   local dd_crit
   dd_crit=$(awk -v d="$dd" 'BEGIN{print (d>15)?"1":"0"}')
   if [ "$dd_crit" = "1" ]; then
-    alert_tg "Drawdown crítico <b>${dd}%</b> (totalValue=\$${tv})"
+    alert_tg "drawdown_crit" "Drawdown crítico <b>${dd}%</b> (totalValue=\$${tv})"
   fi
 
   log "live OK: tv=\$${tv} cap=\$${cap} committed ledger=\$${tl} pos=${op} dd=${dd}%"
@@ -136,7 +187,7 @@ check_health() {
   local health
   health=$(curl -sS --max-time 5 "${LIVE_HOST}/api/health" 2>/dev/null || echo "")
   if [ -z "$health" ]; then
-    alert_tg "cryptobot-live /api/health no responde"
+    alert_tg "health_api_down" "cryptobot-live /api/health no responde"
     return
   fi
   echo "$health" | python3 -c "
@@ -146,7 +197,7 @@ try:
     if not d.get('ok'): print('NOT_OK'); sys.exit(1)
 except:
     print('PARSE_ERR'); sys.exit(1)
-" >/dev/null || alert_tg "cryptobot-live /api/health devolvió estado no OK"
+" >/dev/null || alert_tg "health_not_ok" "cryptobot-live /api/health devolvió estado no OK"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
