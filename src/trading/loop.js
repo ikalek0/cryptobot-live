@@ -182,22 +182,13 @@ setInterval(async()=>{
     ticks++;
 
     // ── Simple engine signals → real orders ──────────────────────────────
+    // FIX-A/C/D: la ejecución real ahora se dispara SÍNCRONAMENTE vía los
+    // callbacks S.simpleBot._onBuy / _onSell (wired en server.js). Esto elimina
+    // el race del dispatcher basado en log.filter y garantiza que:
+    //   - placeLiveBuy ve el portfolio ya mutado con status="pending" (ctx.strategyId)
+    //   - applyRealBuyFill / applyRealSellFill pueden reconciliar contra la reserva
     if(S.simpleBot && !S.tgControls?.isPaused() && !S.bot._pausedByTelegram) {
       S.simpleBot.evaluate();
-      // Check for new trades from simple engine
-      const simpleTrades = S.simpleBot.log.filter(l =>
-        l.ts > (Date.now() - TICK_MS*2) && l.type === "BUY"
-      );
-      if(LIVE_MODE) {
-        for(const st of simpleTrades) {
-          const alreadyOrdered = S.bot.portfolio?.[st.symbol];
-          if(!alreadyOrdered) {
-            console.log(`[SIMPLE→LIVE] BUY ${st.symbol} $${st.invest?.toFixed(0)}`);
-            placeLiveBuy(st.symbol, st.invest)
-              .catch(e=>console.error("[SIMPLE ORDER] BUY error:", e.message));
-          }
-        }
-      }
       // Save simple state every 6 ticks
       if(ticks%6===0) {
         S.simpleBot.saveState && saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
