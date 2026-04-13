@@ -518,10 +518,20 @@ process.on("uncaughtException", async (err) => {
   } catch(e) { console.error("[CRASH-SIMPLE-SAVE]", e.message); }
   process.exit(1);
 });
+// FIX-M10: throttle de persistencia en unhandledRejection.
+// Un rate-limit en Binance o feeds opcionales puede disparar 100+ rejections/min.
+// Sin throttle: 100+ writes a disco/DB por minuto → desgaste SSD + posible
+// bottleneck I/O. Con throttle de 30s: logging siempre, persistencia como mucho
+// cada 30s (suficiente para recovery tras crash sin matar el disco).
+let _lastRejectionSave = 0;
+const REJECTION_SAVE_THROTTLE_MS = 30 * 1000;
 process.on("unhandledRejection", async (reason) => {
   console.error("[CRASH] unhandledRejection:", reason?.message||reason);
   // Menos agresivo que uncaughtException: muchas unhandled rejections vienen de
   // fetches opcionales (F&G, news, etc). Solo persistimos por seguridad, sin exit.
+  const now = Date.now();
+  if (now - _lastRejectionSave < REJECTION_SAVE_THROTTLE_MS) return;
+  _lastRejectionSave = now;
   try { await save(); } catch(e) {}
   try {
     if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
@@ -643,6 +653,21 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
   };
   try {
     if (!LIVE_MODE) return null;
+
+    // ── FIX-M8: Rechazar llamadas legacy sin contexto de estrategia ─────────
+    // FIX-A inserta portfolio[strategyId] con status="pending" ANTES de disparar
+    // el callback, y el filter de committed más abajo usa ctx.strategyId para
+    // excluirse del conteo. Sin ctx.strategyId:
+    //   1. rollbackReservation() no puede limpiar la reserva fantasma.
+    //   2. El filter `id !== undefined` siempre es true → committed incluye
+    //      posiciones que son self, el cap check se vuelve ruidoso.
+    //   3. applyRealBuyFill no tiene target — el fill se pierde en el vacío.
+    // Cualquier caller válido pasa ctx desde _onBuy. Rechazar el resto.
+    if (!ctx?.strategyId) {
+      console.error(`[LIVE][BUY] ❌ ${symbol} llamada sin ctx.strategyId — rechazada (FIX-M8 legacy guard)`);
+      tg.send && tg.send(`⚠️ <b>[LIVE] BUG</b>\nplaceLiveBuy llamada legacy sin ctx\n${symbol} $${usdtAmount} — rechazada`);
+      return null;
+    }
 
     // ── FIX-C: Cap global committed+new — rechazo con rollback ───────────────
     // Protección contra race entre simpleBot._onCandleClose (FIX-A, usa invest

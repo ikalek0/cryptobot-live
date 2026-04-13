@@ -698,3 +698,180 @@ describe("M7: accumulated drift over 100 BUY/SELL cycles stays bounded", () => {
       `Capa isolation broken: capa2Cash ${capa2Before} → ${bot.capa2Cash}`);
   });
 });
+
+// ── M8: placeLiveBuy legacy-call guard ──────────────────────────────────────
+// placeLiveBuy vive en server.js y requiere LIVE_MODE + side effects, así que
+// replicamos su guard aquí en aislamiento. El contrato es: si !ctx?.strategyId
+// la llamada retorna sin side-effects (early return antes del cap check).
+function simulatePlaceLiveBuyWithGuard(bot, symbol, usdtAmount, ctx, cap) {
+  // FIX-M8 guard — debe ser la PRIMERA validación tras LIVE_MODE check
+  if (!ctx?.strategyId) {
+    return { rejected: true, reason: "LEGACY_CALL_NO_CTX" };
+  }
+  // El resto replica FIX-C (simulatePlaceLiveBuyCapGuard pero desde cero)
+  const committed = Object.entries(bot.portfolio)
+    .filter(([id]) => id !== ctx.strategyId)
+    .reduce((s, [,p]) => s + (p.invest || 0), 0);
+  if (committed + usdtAmount > cap) {
+    if (ctx.strategyId && bot.portfolio[ctx.strategyId]) {
+      const pos = bot.portfolio[ctx.strategyId];
+      if (pos.status === "pending") {
+        if (pos.capa === 1) bot.capa1Cash += pos.invest;
+        else                bot.capa2Cash += pos.invest;
+        delete bot.portfolio[ctx.strategyId];
+      }
+    }
+    return { rejected: true, reason: "CAP_EXCEEDED" };
+  }
+  return { rejected: false };
+}
+
+describe("M8: placeLiveBuy rejects legacy calls without ctx.strategyId", () => {
+  it("rejects when ctx is undefined — no side effects on portfolio/cash", () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const capa2Before = bot.capa2Cash;
+    const portfolioBefore = { ...bot.portfolio };
+
+    const res = simulatePlaceLiveBuyWithGuard(bot, "BNBUSDC", 20*K, undefined, CAP_LIMIT);
+
+    assert.equal(res.rejected, true);
+    assert.equal(res.reason, "LEGACY_CALL_NO_CTX");
+    assert.equal(bot.capa1Cash, capa1Before, "capa1Cash must be unchanged");
+    assert.equal(bot.capa2Cash, capa2Before, "capa2Cash must be unchanged");
+    assert.deepEqual(bot.portfolio, portfolioBefore, "portfolio must be unchanged");
+  });
+
+  it("rejects when ctx={} (missing strategyId) — no side effects", () => {
+    const bot = new SimpleBotEngine({});
+    const res = simulatePlaceLiveBuyWithGuard(bot, "BNBUSDC", 20*K, {}, CAP_LIMIT);
+    assert.equal(res.rejected, true);
+    assert.equal(res.reason, "LEGACY_CALL_NO_CTX");
+  });
+
+  it("rejects when ctx.strategyId is null/empty — no side effects", () => {
+    const bot = new SimpleBotEngine({});
+    const res1 = simulatePlaceLiveBuyWithGuard(bot, "BNBUSDC", 20*K, { strategyId: null }, CAP_LIMIT);
+    const res2 = simulatePlaceLiveBuyWithGuard(bot, "BNBUSDC", 20*K, { strategyId: "" }, CAP_LIMIT);
+    assert.equal(res1.rejected, true, "null strategyId → reject");
+    assert.equal(res2.rejected, true, "empty strategyId → reject");
+  });
+
+  it("accepts normal calls with valid ctx.strategyId", () => {
+    const bot = new SimpleBotEngine({});
+    bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1, invest: 15*K, qty: 0.15, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "pending" };
+    const res = simulatePlaceLiveBuyWithGuard(
+      bot, "BNBUSDC", 15*K,
+      { strategyId: "BNB_1h_RSI", capa: 1, expectedPrice: 100 },
+      CAP_LIMIT
+    );
+    assert.equal(res.rejected, false, "valid ctx → accept");
+  });
+});
+
+// ── M9: _cleanupStalePending rolls back stuck pending positions ─────────────
+describe("M9: _cleanupStalePending rolls back pending positions after 5min", () => {
+  it("rolls back pending positions older than 5 min", () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash; // CAPA1_CAP
+    const oldTs = Date.now() - 6 * 60 * 1000; // 6 min atrás
+    bot.portfolio["STALE"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 98, target: 103,
+      openTs: oldTs, status: "pending"
+    };
+    bot.capa1Cash -= 20*K; // post-reserve (FIX-A contract)
+
+    bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["STALE"], "Stale pending must be removed");
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `capa1Cash must be restored: expected ${capa1Before}, got ${bot.capa1Cash}`);
+  });
+
+  it("rolls back to correct capa (capa2 scenario)", () => {
+    const bot = new SimpleBotEngine({});
+    const capa2Before = bot.capa2Cash;
+    const oldTs = Date.now() - 10 * 60 * 1000;
+    bot.portfolio["STALE2"] = {
+      pair: "XRPUSDC", capa: 2, invest: 18*K, qty: 30,
+      entryPrice: 0.6, stop: 0.58, target: 0.64,
+      openTs: oldTs, status: "pending"
+    };
+    bot.capa2Cash -= 18*K;
+
+    bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["STALE2"]);
+    assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9, "capa2 restored");
+    assert.equal(bot.capa1Cash, CAPA1_CAP, "capa1 untouched");
+  });
+
+  it("preserves pending positions younger than 5 min", () => {
+    const bot = new SimpleBotEngine({});
+    const recent = Date.now() - 60 * 1000; // 1 min atrás
+    bot.portfolio["FRESH"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 98, target: 103,
+      openTs: recent, status: "pending"
+    };
+    const capa1AtMoment = bot.capa1Cash;
+
+    bot._cleanupStalePending();
+
+    assert.ok(bot.portfolio["FRESH"], "Fresh pending must be preserved");
+    assert.equal(bot.capa1Cash, capa1AtMoment, "capa1Cash unchanged");
+  });
+
+  it("doesn't touch filled positions regardless of age", () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    bot.portfolio["OLD_FILLED"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 98, target: 103,
+      openTs: Date.now() - 24 * 60 * 60 * 1000, // 1 día
+      status: "filled"
+    };
+
+    bot._cleanupStalePending();
+
+    assert.ok(bot.portfolio["OLD_FILLED"], "Filled positions immune to cleanup");
+    assert.equal(bot.capa1Cash, capa1Before);
+  });
+
+  it("evaluate() calls _cleanupStalePending before processing", () => {
+    const bot = new SimpleBotEngine({});
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["STALE"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 98, target: 103,
+      openTs: oldTs, status: "pending"
+    };
+    const capa1AfterReserve = bot.capa1Cash - 20*K;
+    bot.capa1Cash = capa1AfterReserve;
+
+    bot.evaluate();
+
+    assert.ok(!bot.portfolio["STALE"], "evaluate() must invoke cleanup → STALE gone");
+    assert.ok(Math.abs(bot.capa1Cash - (capa1AfterReserve + 20*K)) < 1e-9,
+      `After cleanup: capa1Cash must be restored to ${capa1AfterReserve + 20*K}, got ${bot.capa1Cash}`);
+  });
+
+  it("handles multiple stale positions in one pass", () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const capa2Before = bot.capa2Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["STALE_A"] = { pair: "BNBUSDC", capa: 1, invest: 12*K, qty: 0.12, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending" };
+    bot.portfolio["STALE_B"] = { pair: "SOLUSDC", capa: 1, invest: 10*K, qty: 0.10, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending" };
+    bot.portfolio["STALE_C"] = { pair: "XRPUSDC", capa: 2, invest: 15*K, qty: 15,   entryPrice: 1,   stop: 0.99, target: 1.01, openTs: oldTs, status: "pending" };
+    bot.capa1Cash -= 22*K;
+    bot.capa2Cash -= 15*K;
+
+    bot._cleanupStalePending();
+
+    assert.equal(Object.keys(bot.portfolio).length, 0, "All stale positions must be cleaned");
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9, "capa1 fully restored");
+    assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9, "capa2 fully restored");
+  });
+});

@@ -398,7 +398,32 @@ class SimpleBotEngine {
     this._fearGreed = fearGreed;
   }
 
+  // FIX-M9: limpia posiciones stuck con status="pending".
+  // Si el callback _onBuy crashea DESPUÉS de la mutación atómica del portfolio
+  // (FIX-A: reservación sync antes del callback async), la posición queda en
+  // "pending" para siempre: cuenta en el cap check pero stop/target nunca se
+  // recomputan con applyRealBuyFill. Este método rollback la reserva tras 5min.
+  // Se ejecuta al inicio de cada evaluate() (cada tick).
+  _cleanupStalePending(){
+    const now = Date.now();
+    const STALE_MS = 5 * 60 * 1000;
+    const stale = [];
+    for(const [id, pos] of Object.entries(this.portfolio)){
+      if(pos.status === "pending" && (now - (pos.openTs || 0)) > STALE_MS){
+        stale.push(id);
+      }
+    }
+    for(const id of stale){
+      const pos = this.portfolio[id];
+      console.warn(`[SIMPLE][CLEANUP] ${id} pending > 5min (stuck) — rollback reservation $${(pos.invest||0).toFixed(2)} → capa${pos.capa}`);
+      if(pos.capa === 1) this.capa1Cash += (pos.invest || 0);
+      else               this.capa2Cash += (pos.invest || 0);
+      delete this.portfolio[id];
+    }
+  }
+
   evaluate(){
+    this._cleanupStalePending(); // FIX-M9: rollback pending stuck antes de evaluar
     this.tick++;
     if(this.tick%30===0) this.equity.push({v:this.totalValue(),t:Date.now()});
     // Diagnostic: cada 60 ticks (~10min) mostrar estado de velas
