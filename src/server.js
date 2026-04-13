@@ -80,6 +80,30 @@ try {
   S.simpleBot = new SimpleBotEngine({});
 }
 
+// ── FIX-A/C/D wiring: callbacks síncronos a placeLiveBuy/Sell ─────────────
+// simpleBot._onBuy se dispara INMEDIATAMENTE tras la mutación atómica del
+// portfolio (status="pending") y antes de que cualquier otra estrategia cierre
+// vela. placeLiveBuy valida el cap global, ejecuta TWAP y reconcilia vía
+// applyRealBuyFill. Análogo para _onSell / applyRealSellFill.
+// FIX-M1: en paper-live (LIVE_MODE=false) no hay fill real, así que marcamos
+// la posición como filled inmediatamente para que no quede stuck en pending.
+S.simpleBot._onBuy = (pair, invest, ctx) => {
+  if (!LIVE_MODE) {
+    const pos = S.simpleBot.portfolio[ctx?.strategyId];
+    if (pos && pos.status === "pending") pos.status = "filled";
+    return;
+  }
+  placeLiveBuy(pair, invest, ctx)
+    .catch(e => console.error(`[LIVE][onBuy] ${ctx?.strategyId} error:`, e.message));
+};
+S.simpleBot._onSell = (pair, qty, ctx) => {
+  // En paper-live la reconciliación ya la hizo evaluate() (expectedNet acreditado);
+  // sin fill real no hay slippage que ajustar, así que no hace nada extra.
+  if (!LIVE_MODE) return;
+  placeLiveSell(pair, qty, ctx)
+    .catch(e => console.error(`[LIVE][onSell] ${ctx?.strategyId} error:`, e.message));
+};
+
 // ── Prefill velas históricas de Binance para simpleBot ──────────────────
 async function prefillSimpleBotCandles() {
   // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
@@ -478,18 +502,40 @@ async function save() {
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
 process.on("SIGINT", async()=>{await save();process.exit(0);});
 
-// ── Capturar errores no manejados para evitar crashes silenciosos ─────────────
-process.on("uncaughtException", (err) => {
-  console.error("[CRASH] uncaughtException:", err.message);
-  console.error(err.stack);
-  // Guardar estado antes de reiniciar
-  save().catch(()=>{}).finally(()=>{
-    // No salimos — PM2 reiniciará si el proceso muere
-  });
+// ── Capturar errores no manejados — FIX-M5: persistir + morir limpiamente ───
+// Antes de M5 este handler solo logueaba y seguía, lo que dejaba el proceso
+// con estado posiblemente corrupto (p.ej. portfolio mid-mutation). Ahora:
+// 1. persistimos state vía save() (capa1/capa2, portfolio, stratTrades, curBar…),
+// 2. también guardamos simpleBot.saveState() para que el ledger virtual no pierda
+//    el tick parcial cuando PM2 reinicie el proceso,
+// 3. exit(1) para que PM2 levante una instancia limpia.
+process.on("uncaughtException", async (err) => {
+  console.error("[CRASH] uncaughtException:", err?.message||err);
+  console.error(err?.stack);
+  try { await save(); } catch(e) { console.error("[CRASH-SAVE]", e.message); }
+  try {
+    if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
+  } catch(e) { console.error("[CRASH-SIMPLE-SAVE]", e.message); }
+  process.exit(1);
 });
-process.on("unhandledRejection", (reason) => {
+// FIX-M10: throttle de persistencia en unhandledRejection.
+// Un rate-limit en Binance o feeds opcionales puede disparar 100+ rejections/min.
+// Sin throttle: 100+ writes a disco/DB por minuto → desgaste SSD + posible
+// bottleneck I/O. Con throttle de 30s: logging siempre, persistencia como mucho
+// cada 30s (suficiente para recovery tras crash sin matar el disco).
+let _lastRejectionSave = 0;
+const REJECTION_SAVE_THROTTLE_MS = 30 * 1000;
+process.on("unhandledRejection", async (reason) => {
   console.error("[CRASH] unhandledRejection:", reason?.message||reason);
-  // No salimos - solo logueamos
+  // Menos agresivo que uncaughtException: muchas unhandled rejections vienen de
+  // fetches opcionales (F&G, news, etc). Solo persistimos por seguridad, sin exit.
+  const now = Date.now();
+  if (now - _lastRejectionSave < REJECTION_SAVE_THROTTLE_MS) return;
+  _lastRejectionSave = now;
+  try { await save(); } catch(e) {}
+  try {
+    if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
+  } catch(e) {}
 });
 
 // ── Binance WebSocket ─────────────────────────────────────────────────────────
@@ -587,31 +633,89 @@ async function placeTWAPBuy(symbol, usdtAmount) {
   return orders;
 }
 
-async function placeLiveBuy(symbol, usdtAmount) {
+async function placeLiveBuy(symbol, usdtAmount, ctx) {
+  // ctx = {strategyId, capa, expectedPrice} — pasado por el callback _onBuy de simpleBot.
+  // Con FIX-A, simpleBot ya reservó optimísticamente cash y creó portfolio[strategyId]
+  // con status="pending" ANTES de disparar este callback. Este handler debe:
+  //   1. Validar cap global (FIX-C) — si rechaza, rollback de la reserva en simpleBot.
+  //   2. Ejecutar TWAP y capturar fills reales.
+  //   3. Reconciliar drift vs expected via simpleBot.applyRealBuyFill.
+  const rollbackReservation = () => {
+    if (S.simpleBot && ctx?.strategyId && S.simpleBot.portfolio[ctx.strategyId]) {
+      const pos = S.simpleBot.portfolio[ctx.strategyId];
+      if (pos.status === "pending") {
+        if (pos.capa === 1) S.simpleBot.capa1Cash += pos.invest;
+        else                S.simpleBot.capa2Cash += pos.invest;
+        delete S.simpleBot.portfolio[ctx.strategyId];
+        console.log(`[LIVE][ROLLBACK] ${ctx.strategyId} reserva devuelta ($${pos.invest.toFixed(2)} → capa${pos.capa})`);
+      }
+    }
+  };
   try {
     if (!LIVE_MODE) return null;
-    const maxSafe = (S.bot?.totalValue()||S.CAPITAL_USDT) * 0.40;
+
+    // ── FIX-M8: Rechazar llamadas legacy sin contexto de estrategia ─────────
+    // FIX-A inserta portfolio[strategyId] con status="pending" ANTES de disparar
+    // el callback, y el filter de committed más abajo usa ctx.strategyId para
+    // excluirse del conteo. Sin ctx.strategyId:
+    //   1. rollbackReservation() no puede limpiar la reserva fantasma.
+    //   2. El filter `id !== undefined` siempre es true → committed incluye
+    //      posiciones que son self, el cap check se vuelve ruidoso.
+    //   3. applyRealBuyFill no tiene target — el fill se pierde en el vacío.
+    // Cualquier caller válido pasa ctx desde _onBuy. Rechazar el resto.
+    if (!ctx?.strategyId) {
+      console.error(`[LIVE][BUY] ❌ ${symbol} llamada sin ctx.strategyId — rechazada (FIX-M8 legacy guard)`);
+      tg.send && tg.send(`⚠️ <b>[LIVE] BUG</b>\nplaceLiveBuy llamada legacy sin ctx\n${symbol} $${usdtAmount} — rechazada`);
+      return null;
+    }
+
+    // ── FIX-C: Cap global committed+new — rechazo con rollback ───────────────
+    // Protección contra race entre simpleBot._onCandleClose (FIX-A, usa invest
+    // nominal) y la ejecución real de varios BUYs en el mismo tick.
+    const cap = (S.CAPITAL_USDT || 100) * 1.005;
+    const committed = Object.entries(S.simpleBot?.portfolio || {})
+      // Excluir la propia estrategia — su invest ya está dentro del portfolio
+      // (FIX-A lo insertó sync) y no debe contarse como "ya comprometido".
+      .filter(([id]) => id !== ctx?.strategyId)
+      .reduce((s, [,p]) => s + (p.invest || 0), 0);
+    if (committed + usdtAmount > cap) {
+      console.error(`[LIVE][CAP] ❌ ${symbol} committed+new=$${(committed+usdtAmount).toFixed(2)} > cap=$${cap.toFixed(2)} — RECHAZADA`);
+      tg.send && tg.send(`⚠️ <b>[LIVE] CAP EXCEDIDO</b>\n${symbol} rechazada\ncommitted+new=$${(committed+usdtAmount).toFixed(2)} > cap=$${cap.toFixed(2)}`);
+      rollbackReservation();
+      return null;
+    }
+
+    // Sanity pre-ejecución: si safe<5, no enviamos nada y rollback.
+    const maxSafe = cap; // FIX-C se encarga del cap; no re-aplicamos 40%
     const safe = Math.min(usdtAmount, maxSafe);
-    if (safe < 5) { console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`); return null; }
+    if (safe < 5) {
+      console.log(`[LIVE][BUY] ${symbol} importe muy pequeño ($${safe}), omitido`);
+      rollbackReservation();
+      return null;
+    }
+
     const orders = await placeTWAPBuy(symbol, safe);
     if(orders?.length) {
-      // Registrar precio real de ejecución para ajustar cash virtual
+      // Capturar fills reales para reconciliación slippage (FIX-A closing loop)
       const fills = orders.flatMap(o=>o.fills||[]);
       const realSpent = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0) || safe;
       const realQty = fills.reduce((s,f)=>s+parseFloat(f.qty),0);
       const avgPrice = realQty>0 ? realSpent/realQty : safe;
       console.log(`[LIVE][BUY] Real: gastado $${realSpent.toFixed(2)} @ avg $${avgPrice.toFixed(2)}`);
-      // Ajustar bot.cash con el precio real (no el estimado)
-      if(S.bot && Math.abs(realSpent - safe) > 0.01) {
-        const drift = realSpent - safe;
-        // [DISABLED 2026-04] drift correction: signo invertido Y variable incorrecta — S.bot.cash nunca se decrementa en BUY (SimpleBot usa capa1Cash/capa2Cash). Mutar aquí inflaba el ledger con dinero fantasma.
-        console.log(`[LIVE] Corrección slippage: ${drift>0?"+":""}${drift.toFixed(3)} USDC`);
+      // Reconciliar con simpleBot (marca pending→filled, ajusta drift en capa correcta)
+      if (S.simpleBot && ctx?.strategyId) {
+        try { S.simpleBot.applyRealBuyFill(ctx.strategyId, {realSpent, realQty}); }
+        catch(e) { console.error(`[LIVE][RECONCILE-BUY] ${ctx.strategyId}:`, e.message); }
       }
-      // BUY notification removed\n$${realSpent.toFixed(2)} gastados en ${orders.length} parte(s)\nPrecio medio: $${avgPrice.toFixed(2)}`);
+    } else {
+      // Orden no ejecutada (sin fills) → rollback reserva
+      console.warn(`[LIVE][BUY] ${symbol} sin fills — rollback reserva`);
+      rollbackReservation();
     }
     return orders?.[0]||null;
   } catch(e) {
     console.error(`[LIVE][BUY] Error ${symbol}:`, e.message);
+    rollbackReservation();
     return null;
   }
 }
@@ -633,7 +737,10 @@ async function getActualBinanceQty(symbol) {
   } catch(e) { return 0; }
 }
 
-async function placeLiveSell(symbol, quantity) {
+async function placeLiveSell(symbol, quantity, ctx) {
+  // ctx = {strategyId, capa, expectedNet, expectedGross, reason} pasado por _onSell.
+  // simpleBot.evaluate() ya acreditó expectedNet a la capa virtual; este handler
+  // reconcilia el delta slippage vía applyRealSellFill(strategyId, {realGross, capa, expectedNet}).
   try {
     if (!LIVE_MODE) return null;
     if (quantity <= 0) return null;
@@ -665,7 +772,18 @@ async function placeLiveSell(symbol, quantity) {
     });
     if (order?.orderId) {
       console.log(`[LIVE][SELL] ✅ ${symbol} qty:${quantity} → orderId:${order.orderId}`);
-      // SELL notification removed\nSELL ${symbol} — qty:${quantity.toFixed(4)}\nOrden: ${order.orderId}`);
+      // FIX-D: capturar fills reales y reconciliar vía applyRealSellFill
+      try {
+        const fills = order.fills || [];
+        const realGross = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0);
+        if (S.simpleBot && ctx?.strategyId && realGross > 0) {
+          S.simpleBot.applyRealSellFill(ctx.strategyId, {
+            realGross,
+            capa: ctx.capa,
+            expectedNet: ctx.expectedNet,
+          });
+        }
+      } catch(e) { console.error(`[LIVE][RECONCILE-SELL] ${ctx?.strategyId}:`, e.message); }
     } else {
       console.error(`[LIVE][SELL] ❌ ${symbol}`, JSON.stringify(order));
       // -2010 = insufficient balance → position doesn't exist in Binance

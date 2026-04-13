@@ -332,13 +332,32 @@ class SimpleBotEngine {
       console.log(`[SIMPLE][FILTER][ATR] ${cfg.pair}/${cfg.tf} bloqueado — volatilidad percentil ${atrPct} (mín:${ATR_MIN_PERCENTILE})`);
       return;
     }
-    // ── Position sizing: basado en capital REAL, no en INITIAL_CAPITAL ────
+    // ── Position sizing (FIX-B: usar min(tv, INITIAL_CAPITAL) para bloquear inflación por mark-to-market)
     const tv = this.totalValue();
+    const sizingBase = Math.min(tv, INITIAL_CAPITAL);
     const kellyFrac = Math.max(0.05, Math.min(0.5, kelly.kelly || 0.1));
-    let invest = tv * kellyFrac * 0.5; // Half-Kelly conservador
-    if(invest > tv * 0.30) invest = tv * 0.30; // máximo 30% del capital
-    if(invest > availCash) invest = availCash; // no gastar más del cash disponible
-    console.log(`[SIMPLE][SIZING] ${cfg.id} capital=$${tv.toFixed(2)} kelly=${kellyFrac.toFixed(3)} → invest=$${invest.toFixed(2)}`);
+    let invest = sizingBase * kellyFrac * 0.5; // Half-Kelly conservador
+    if(invest > sizingBase * 0.30) invest = sizingBase * 0.30; // máximo 30% del sizing base
+    if(invest > availCash) invest = availCash; // no gastar más del cash de la capa
+
+    // ── FIX-A: Global committed cap check ATÓMICO ─────────────────────────
+    // committed se computa aquí, y portfolio se muta más abajo SÍNCRONAMENTE
+    // (antes de cualquier callback async). Eso garantiza que, si varias
+    // estrategias cierran vela en el mismo tick, la segunda ve el committed
+    // actualizado por la primera.
+    const committed = Object.values(this.portfolio).reduce((s,p) => s + (p.invest || 0), 0);
+    const capLimit = INITIAL_CAPITAL * 1.005; // 0.5% tolerancia para fees/slippage micro
+    if(committed + invest > capLimit){
+      const headroom = capLimit - committed;
+      if(headroom < 10){
+        console.log(`[SIMPLE][CAP] ${cfg.id} bloqueado — committed=$${committed.toFixed(2)} + new=$${invest.toFixed(2)} > cap=$${capLimit.toFixed(2)} (headroom $${headroom.toFixed(2)} < $10)`);
+        return;
+      }
+      console.log(`[SIMPLE][CAP] ${cfg.id} shrink invest $${invest.toFixed(2)} → $${headroom.toFixed(2)} (committed=$${committed.toFixed(2)} cap=$${capLimit.toFixed(2)})`);
+      invest = headroom;
+    }
+
+    console.log(`[SIMPLE][SIZING] ${cfg.id} base=$${sizingBase.toFixed(2)} committed=$${committed.toFixed(2)} kelly=${kellyFrac.toFixed(3)} → invest=$${invest.toFixed(2)}`);
     if(invest < 10){
       console.log(`[SIMPLE][SIZING] ${cfg.id} invest=$${invest.toFixed(2)} < $10 mínimo — skip`);
       return;
@@ -346,15 +365,26 @@ class SimpleBotEngine {
     const price = this.prices[cfg.pair];
     if(!price) return;
     const qty = invest*(1-FEE)/price;
+
+    // ── FIX-A atomicidad: mutar portfolio SYNC antes de cualquier _onBuy ──
+    // No insertar await/callback entre este bloque y el fin de _onCandleClose.
     if(cfg.capa===1) this.capa1Cash -= invest;
     else             this.capa2Cash -= invest;
     this.portfolio[cfg.id]={
       pair:cfg.pair,capa:cfg.capa,type:cfg.type,tf:cfg.tf,
       entryPrice:price,qty,stop:price*(1-cfg.stop),target:price*(1+cfg.target),
       openTs:Date.now(),invest,
+      status:"pending", // se convierte en "filled" cuando applyRealFill reconcilia (FASE 3)
     };
     this.log.push({type:"BUY",symbol:cfg.pair,strategy:cfg.id,price,invest,ts:Date.now()});
     console.log(`[SIMPLE][BUY] ${cfg.pair} @ $${price.toFixed(4)} $${invest.toFixed(0)} [Capa${cfg.capa}] ${cfg.id}`);
+
+    // ── Callback para ejecución real (FASE 3). portfolio ya está actualizado,
+    // el committed que vea la próxima estrategia en este mismo tick es correcto.
+    if(typeof this._onBuy === "function"){
+      try { this._onBuy(cfg.pair, invest, {strategyId: cfg.id, capa: cfg.capa, expectedPrice: price}); }
+      catch(e) { console.error(`[SIMPLE][onBuy] ${cfg.id} error:`, e.message); }
+    }
     } catch(e) {
       console.error(`[SIMPLE][ERROR] _onCandleClose ${cfg?.id}: ${e.message}`);
       console.error(e.stack?.split("\n").slice(0,3).join("\n"));
@@ -368,7 +398,32 @@ class SimpleBotEngine {
     this._fearGreed = fearGreed;
   }
 
+  // FIX-M9: limpia posiciones stuck con status="pending".
+  // Si el callback _onBuy crashea DESPUÉS de la mutación atómica del portfolio
+  // (FIX-A: reservación sync antes del callback async), la posición queda en
+  // "pending" para siempre: cuenta en el cap check pero stop/target nunca se
+  // recomputan con applyRealBuyFill. Este método rollback la reserva tras 5min.
+  // Se ejecuta al inicio de cada evaluate() (cada tick).
+  _cleanupStalePending(){
+    const now = Date.now();
+    const STALE_MS = 5 * 60 * 1000;
+    const stale = [];
+    for(const [id, pos] of Object.entries(this.portfolio)){
+      if(pos.status === "pending" && (now - (pos.openTs || 0)) > STALE_MS){
+        stale.push(id);
+      }
+    }
+    for(const id of stale){
+      const pos = this.portfolio[id];
+      console.warn(`[SIMPLE][CLEANUP] ${id} pending > 5min (stuck) — rollback reservation $${(pos.invest||0).toFixed(2)} → capa${pos.capa}`);
+      if(pos.capa === 1) this.capa1Cash += (pos.invest || 0);
+      else               this.capa2Cash += (pos.invest || 0);
+      delete this.portfolio[id];
+    }
+  }
+
   evaluate(){
+    this._cleanupStalePending(); // FIX-M9: rollback pending stuck antes de evaluar
     this.tick++;
     if(this.tick%30===0) this.equity.push({v:this.totalValue(),t:Date.now()});
     // Diagnostic: cada 60 ticks (~10min) mostrar estado de velas
@@ -394,8 +449,9 @@ class SimpleBotEngine {
       if(hitStop||hitTarget||timeStop){
         const reason=hitStop?"STOP":hitTarget?"TARGET":"TIME STOP";
         const gross=pos.qty*price;
-        if(pos.capa===1) this.capa1Cash+=gross*(1-FEE);
-        else             this.capa2Cash+=gross*(1-FEE);
+        const expectedNet = gross*(1-FEE);
+        if(pos.capa===1) this.capa1Cash+=expectedNet;
+        else             this.capa2Cash+=expectedNet;
         // Record for Kelly
         if(!this._stratTrades[id]) this._stratTrades[id]=[];
         this._stratTrades[id].push({pnl:pnlPct,ts:Date.now()});
@@ -432,9 +488,73 @@ class SimpleBotEngine {
             mfeReal: +(pos.maxMFE||0).toFixed(3),
           }).catch(()=>{});
         }
+        // FIX-D: capturar capa/qty ANTES del delete para el callback _onSell.
+        // El portfolio ya se borró localmente, pero el callback necesita saber
+        // de qué capa restar el delta slippage cuando applyRealSellFill llegue.
+        const sellCtx = {
+          strategyId: id,
+          capa: pos.capa,
+          pair: pos.pair,
+          qty: pos.qty,
+          entryPrice: pos.entryPrice,
+          expectedGross: gross,
+          expectedNet,
+          reason,
+        };
         delete this.portfolio[id];
+        if(typeof this._onSell === "function"){
+          try { this._onSell(pos.pair, pos.qty, sellCtx); }
+          catch(e) { console.error(`[SIMPLE][onSell] ${id} error:`, e.message); }
+        }
       }
     }
+  }
+
+  // ── FIX-A reconciliation: real BUY fill → marca filled + ajusta slippage ──
+  // ctx.strategyId, ctx.realSpent (USDC gastado real), ctx.realQty (asset recibido real)
+  // Ejecutado DESPUÉS de que placeLiveBuy complete en Binance.
+  // FIX-M2: también recomputa entryPrice/stop/target usando el precio real
+  // manteniendo los mismos porcentajes originales de stop/target. Sin esto,
+  // un slippage de +1% deja el stop anclado al precio estimado y el riesgo
+  // real de la posición no coincide con el backtest.
+  applyRealBuyFill(strategyId, {realSpent, realQty}){
+    const pos = this.portfolio[strategyId];
+    if(!pos){
+      console.warn(`[SIMPLE][RECONCILE-BUY] ${strategyId} no existe en portfolio — skip`);
+      return;
+    }
+    // Slippage: reservamos `pos.invest` optimista. Si real > reservado, restar extra;
+    // si real < reservado, devolver sobrante a la capa.
+    const expectedSpent = pos.invest;
+    const drift = realSpent - expectedSpent;
+    if(pos.capa===1) this.capa1Cash -= drift;
+    else             this.capa2Cash -= drift;
+    // FIX-M2: recomputar entryPrice/stop/target con precio real.
+    // Derivamos los % originales desde el par (estimado) stop/target/entryPrice:
+    //   stopPct   = 1 - stop/entryPrice
+    //   targetPct = target/entryPrice - 1
+    // y los reaplicamos contra el nuevo entryPrice real.
+    const realPrice = (realQty > 0 && realSpent > 0) ? (realSpent / realQty) : pos.entryPrice;
+    const stopPct   = 1 - (pos.stop   / pos.entryPrice);
+    const targetPct = (pos.target / pos.entryPrice) - 1;
+    pos.entryPrice = realPrice;
+    pos.stop       = realPrice * (1 - stopPct);
+    pos.target     = realPrice * (1 + targetPct);
+    pos.qty    = realQty  || pos.qty;
+    pos.invest = realSpent || pos.invest;
+    pos.status = "filled";
+    console.log(`[SIMPLE][RECONCILE-BUY] ${strategyId} expected=$${expectedSpent.toFixed(2)} real=$${realSpent.toFixed(2)} drift=${drift>=0?"+":""}${drift.toFixed(4)} entry=$${realPrice.toFixed(4)} stop=$${pos.stop.toFixed(4)} target=$${pos.target.toFixed(4)} qty=${pos.qty.toFixed(6)}`);
+  }
+
+  // ── FIX-D reconciliation: real SELL fill → ajusta capa cash por slippage ──
+  // ctx trae capa (capturado antes del delete) + realGross (USDC recibido real).
+  // La SELL virtual ya añadió expectedNet a la capa; este método añade el delta.
+  applyRealSellFill(strategyId, {realGross, capa, expectedNet}){
+    const realNet = (realGross || 0) * (1 - FEE);
+    const delta = realNet - (expectedNet || 0);
+    if(capa===1) this.capa1Cash += delta;
+    else         this.capa2Cash += delta;
+    console.log(`[SIMPLE][RECONCILE-SELL] ${strategyId} expected=$${(expectedNet||0).toFixed(2)} real=$${realNet.toFixed(2)} delta=${delta>=0?"+":""}${delta.toFixed(4)} capa${capa}`);
   }
 
   totalValue(){
@@ -493,4 +613,4 @@ class SimpleBotEngine {
   }
 }
 
-module.exports={SimpleBotEngine, calcKelly, evalSignal, STRATEGIES};
+module.exports={SimpleBotEngine, calcKelly, evalSignal, STRATEGIES, INITIAL_CAPITAL, FEE};
