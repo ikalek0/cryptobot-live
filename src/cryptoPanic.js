@@ -1,5 +1,19 @@
 // cryptoPanic.js — Modo defensivo por noticias negativas de CryptoPanic
-// Polling cada 10 min. Sin API key = tier gratuito (limitado pero funcional).
+//
+// ⚠️  ESTADO (abril 2026): start() DESACTIVADO en server.js:254 por
+// rate-limiting del tier gratuito (API devolvía HTML en vez de JSON, ver
+// CLAUDE.md sección "CryptoPanic rate-limited").
+//
+// El objeto `cryptoPanic` sigue instanciado y consultado por loop.js:
+//   - cryptoPanic.globalDefensive  → siempre false (nunca se llama _check)
+//   - cryptoPanic.defensivePairs    → siempre Set vacío
+//   - cryptoPanic.getStatus()       → devuelve defaults
+//   - cpGlobalMult en loop.js:115   → siempre 1.0 en la práctica
+//
+// Todos los consumers reciben defaults seguros. Bugs latentes (F19-F22)
+// sólo aflorarían si Iñigo reactiva start(). Fixes defensivos por ahora.
+//
+// Polling cada 10 min (cuando esté activo). Sin API key = tier gratuito.
 "use strict";
 
 const https = require("https");
