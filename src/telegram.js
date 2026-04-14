@@ -197,10 +197,20 @@ function startCommandListener(getState, botControls, initialPaused=false) {
               else if(text.startsWith("/capital ")) {
                 const val = parseFloat(text.split(" ")[1]);
                 if(isNaN(val)||val<10) { send("❌ Formato: /capital 110"); }
-                else if(botControls?.setCapital) {
-                  botControls.setCapital(val);
-                  send(`✅ Capital actualizado a $${val} USDC`);
-                } else { send("❌ Comando no disponible"); }
+                else {
+                  // F3: rechazar si hay posiciones abiertas. Recalcular cash
+                  // descontando invested es semánticamente ambiguo (qué pasa
+                  // con stops mid-flight, con capa1 vs capa2, con reservas
+                  // pending). Reject simple es la única vía sin bugs.
+                  const simpleSnap = botControls?.getSimpleState?.();
+                  const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
+                  if(openPos > 0) {
+                    send(`❌ No puedo cambiar capital con ${openPos} posición(es) abiertas. Cierra posiciones primero o espera a que cierren solas.`);
+                  } else if(botControls?.setCapital) {
+                    botControls.setCapital(val);
+                    send(`✅ Capital actualizado a $${val} USDC`);
+                  } else { send("❌ Comando no disponible"); }
+                }
               }
               else if(text==="/semana") send(buildWeekly(s));
               else if(text==="/pausa") {
