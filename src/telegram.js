@@ -292,7 +292,10 @@ module.exports.notifyMaxDrawdown = notifyMaxDrawdown;
 
 // ── Explicabilidad de trades ───────────────────────────────────────────────────
 function explainTrade(trade, regime, patternWinRate) {
-  const sym = trade.symbol?.replace("USDT","") || "—";
+  // F6: trading es en USDC pero el strip viejo sólo eliminaba USDT
+  // (drift de la migración USDT→USDC). Resultado: símbolos quedaban
+  // como "SOLUSDC" en notificaciones en vez de "SOL".
+  const sym = trade.symbol?.replace(/USDT|USDC/g, "") || "—";
   const action = trade.type === "BUY" ? "Compré" : "Vendí";
   const reasons = [];
 
@@ -324,7 +327,8 @@ function notifyTradeWithExplanation(trade, regime, patternWinRate) {
   const emoji = pnl >= 3 ? "💰" : pnl >= 0 ? "✅" : pnl >= -3 ? "⚠️" : "📉";
   const explanation = explainTrade(trade, regime, patternWinRate);
   send(
-    `${emoji} <b>${trade.symbol?.replace("USDT","")} ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</b>\n` +
+    // F6: idem explainTrade, strip USDT|USDC.
+    `${emoji} <b>${trade.symbol?.replace(/USDT|USDC/g, "")} ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</b>\n` +
     `${explanation}\n` +
     `Precio salida: $${trade.price} · ${trade.reason}`
   );
