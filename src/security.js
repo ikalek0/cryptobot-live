@@ -46,8 +46,18 @@ class RateLimiter {
   }
 
   _getKey(req) {
-    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-           req.socket?.remoteAddress || "unknown";
+    // F17: x-forwarded-for es client-controlled. Sólo confiar si el proceso
+    // corre detrás de un proxy conocido (TRUST_PROXY=true en env). En caso
+    // contrario usar socket.remoteAddress directo — imposible de spoofear.
+    const trustProxy = process.env.TRUST_PROXY === "true";
+    if (trustProxy) {
+      const xff = req.headers["x-forwarded-for"];
+      if (xff) {
+        const first = String(xff).split(",")[0]?.trim();
+        if (first) return first;
+      }
+    }
+    return req.socket?.remoteAddress || "unknown";
   }
 
   // Middleware configurable por ruta
