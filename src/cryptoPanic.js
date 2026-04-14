@@ -49,7 +49,9 @@ class CryptoPanicDefense {
     this.globalDefensive  = false;     // defensivo global (muchas noticias malas)
     this.lastCheck        = 0;
     this.checkIntervalMs  = 10 * 60 * 1000; // cada 10 min
-    this.panicExpiryMs    = (this._learnedExpiryHours||2) * 60 * 60 * 1000;
+    // F21: panicExpiryMs eliminado — era dead field (nunca se leía). _process()
+    // calcula currentExpiry fresh cada vez via this._learnedExpiryHours para
+    // permitir que RiskLearning ajuste el valor en caliente.
     this.panicTimestamps  = {}; // { symbol: timestamp }
     this.lastHeadlines    = []; // últimas noticias para log
     this._prevGlobal      = false;
