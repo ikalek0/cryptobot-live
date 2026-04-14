@@ -131,12 +131,15 @@ class CryptoPanicDefense {
 
       if (netSentiment < -2) {
         negativeCount++;
-        // Mapear currencies a pares USDT
+        // F19: mapear currency → TODOS los pares del SYMBOL_MAP que matchean
+        // (antes sólo el primero via .find(), que siempre era USDT y dejaba
+        // USDC sin marcar aunque simpleBot opera en USDC).
         for (const code of currencies) {
-          const pair = Object.entries(SYMBOL_MAP).find(([,v]) => v === code)?.[0];
-          if (pair) {
-            newDefensive.add(pair);
-            this.panicTimestamps[pair] = now;
+          for (const [pair, symCode] of Object.entries(SYMBOL_MAP)) {
+            if (symCode === code) {
+              newDefensive.add(pair);
+              this.panicTimestamps[pair] = now;
+            }
           }
         }
         // Noticia sin currency específica = global
@@ -144,12 +147,18 @@ class CryptoPanicDefense {
       }
     }
 
-    // Limpiar pares cuyo pánico expiró (expiry ajustado por RiskLearning)
+    // F20: primero purgar timestamps expirados, después mergear pairs VIGENTES
+    // en newDefensive. Antes: newDefensive sólo contenía detects del poll actual
+    // → un pair entraba en defensive y al siguiente poll (sin news nuevas)
+    // perdía el estado instantáneamente, violando el contrato "defensive hasta
+    // expiry". Ahora: cada pair con timestamp < expiry permanece defensive.
     const currentExpiry = (this._learnedExpiryHours||2) * 60 * 60 * 1000;
     for (const [pair, ts] of Object.entries(this.panicTimestamps)) {
       if (now - ts > currentExpiry) {
         delete this.panicTimestamps[pair];
         newDefensive.delete(pair);
+      } else {
+        newDefensive.add(pair); // pair aún en ventana de pánico
       }
     }
 
