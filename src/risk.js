@@ -40,6 +40,20 @@ class CircuitBreaker {
     if(newValue) this.startOfDayVal = newValue;
     console.log("[CB] Circuit breaker reseteado manualmente");
   }
+  // Pure read — no side effects. Safe to call from getState() / API handlers.
+  // Returns last-known state without mutating daily reset or triggered flag.
+  getStatus() {
+    const startOfDay=this.startOfDayVal;
+    const drawdown = (startOfDay && Number.isFinite(startOfDay))
+      ? 0  // sin currentValue no se puede calcular; callers que necesiten drawdown deben usar check()
+      : 0;
+    return{triggered:this.triggered,drawdown,startOfDay,resetTime:"próxima medianoche"};
+  }
+  // Mutating: daily reset + trigger on threshold breach.
+  // CONTRATO: este método muta estado (triggered, startOfDayVal, lastResetDay).
+  // Debería llamarse sólo desde el loop de trading, NO desde getState()/API polls.
+  // En la práctica las mutaciones son idempotentes (triggered monotónico hasta
+  // reset diario, startOfDayVal set-once) pero el invariante debe documentarse.
   check(currentValue) {
     const today=new Date().toDateString();
     if(this.lastResetDay!==today){this.startOfDayVal=currentValue;this.triggered=false;this.lastResetDay=today;}
