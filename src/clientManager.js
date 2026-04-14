@@ -137,17 +137,36 @@ class ClientBotManager {
   }
 
   // Verify client has enough balance before copying trade
+  // F35: antes silent-skip en error → master/client divergence acumulada sin
+  // señal. Ahora log warn + contador de errores consecutivos, mark inactive
+  // tras 5 fallos seguidos para parar el drift.
   async verifyClientBalance(clientId, neededUSDC) {
     const c = this.clients[clientId];
     if (!c) return false;
     try {
       const balances = await clientGetBalance(c.apiKey, c.apiSecret);
-      if (!balances) return false;
+      if (!balances) {
+        c.verifyFailCount = (c.verifyFailCount || 0) + 1;
+        console.warn(`[CLIENT] ${c.name} verifyBalance returned null (fail #${c.verifyFailCount})`);
+        if (c.verifyFailCount >= 5) {
+          c.status = "inactive";
+          c.lastError = "5+ verifyBalance fallos consecutivos — desactivado";
+          console.warn(`[CLIENT] ⚠️ ${c.name} desactivado por verifyBalance fallos`);
+        }
+        return false;
+      }
+      c.verifyFailCount = 0; // reset on success
       const usdc = parseFloat(balances.find(b => b.asset === "USDC")?.free || 0);
       c.lastCheck = { ts: Date.now(), usdc };
       return usdc >= neededUSDC * 0.9; // 10% tolerance
     } catch(e) {
+      c.verifyFailCount = (c.verifyFailCount || 0) + 1;
       c.lastError = e.message;
+      console.warn(`[CLIENT] ${c.name} verifyBalance error: ${e.message} (fail #${c.verifyFailCount})`);
+      if (c.verifyFailCount >= 5) {
+        c.status = "inactive";
+        console.warn(`[CLIENT] ⚠️ ${c.name} desactivado por verifyBalance fallos`);
+      }
       return false;
     }
   }
