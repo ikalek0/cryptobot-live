@@ -249,7 +249,13 @@ function startCommandListener(getState, botControls, initialPaused=false) {
               );
             }
           }
-        } catch(e){}
+        } catch(e){
+          // F7: antes era catch silencioso. Un comando con bug, JSON
+          // malformado de Telegram, o un send() roto desaparecía sin
+          // rastro. Log warn (no re-throw — un error en un comando
+          // Telegram NO debe crashear el bot, PM2 reiniciaría en loop).
+          console.warn("[TG] cmd failed:", e.message);
+        }
         setTimeout(poll,1000);
       });
     });
