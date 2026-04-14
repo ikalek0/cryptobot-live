@@ -593,37 +593,6 @@ app.post("/api/set-alert-config", (req,res) => {
   res.json({ok:true});
 });
 
-// ── T1: endpoint TEMPORAL para validar pipeline BUY→SELL en paper-live ───
-// ELIMINAR después de validar. Sólo activo si LIVE_MODE=false.
-// Protegido con header X-Test-Secret cuyo valor se imprime en boot.
-const TEST_SECRET = process.env.TEST_SECRET || require("crypto").randomBytes(16).toString("hex");
-console.log(`[TEST] X-Test-Secret = ${TEST_SECRET}`);
-app.post("/api/test/force-signal", (req,res) => {
-  if (LIVE_MODE) return res.status(403).json({error:"forbidden in LIVE mode"});
-  if (req.headers["x-test-secret"] !== TEST_SECRET)
-    return res.status(401).json({error:"unauthorized"});
-  if (!S.simpleBot) return res.status(503).json({error:"simpleBot not ready"});
-  const { strategyId, side, ignorarFiltros } = req.body || {};
-  if (!strategyId || !side)
-    return res.status(400).json({error:"strategyId and side required"});
-  const { STRATEGIES: _strats } = require("./engine_simple");
-  const cfg = (_strats || []).find(s => s.id === strategyId);
-  if (!cfg) return res.status(400).json({error:`unknown strategyId: ${strategyId}`});
-  try {
-    if (side === "BUY") {
-      const r = S.simpleBot._forceTestBuy(cfg, !!ignorarFiltros);
-      return res.json({action:"BUY", ...r});
-    }
-    if (side === "SELL") {
-      const r = S.simpleBot._forceTestSell(cfg);
-      return res.json({action:"SELL", ...r});
-    }
-    return res.status(400).json({error:"side must be BUY or SELL"});
-  } catch(e) {
-    return res.status(500).json({error:e.message});
-  }
-});
-
 app.post("/api/set-capital", (req,res) => {
   const { secret, capitalUSD } = req.body;
   if (secret !== (process.env.BOT_SECRET||"bafir_bot_secret"))
