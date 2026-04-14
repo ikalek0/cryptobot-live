@@ -71,6 +71,74 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 
+  // ── H6: Persistencia de estado de sync entre restarts ─────────────────
+  // saveState() debe persistir los 4 campos de sync (failCount, pausedUntil,
+  // lastTs, lastOk) y el constructor debe restaurarlos. Sin esto, un PM2
+  // restart durante una pausa por fallo de sync arranca como si todo OK.
+  describe("H6: persistencia del estado de sync", () => {
+    it("saveState devuelve los 4 campos de sync", () => {
+      const eng = new SimpleBotEngine({});
+      eng._capitalSyncFailCount = 3;
+      eng._lastCapitalSyncTs = 1700000000000;
+      eng._lastCapitalSyncOk = false;
+      const fixedPaused = Date.now() + 20*60*1000; // 20min futuro
+      eng._capitalSyncPausedUntil = fixedPaused;
+
+      const st = eng.saveState();
+      assert.equal(st.capitalSyncFailCount, 3);
+      assert.equal(st.lastCapitalSyncTs, 1700000000000);
+      assert.equal(st.lastCapitalSyncOk, false);
+      assert.equal(st.capitalSyncPausedUntil, fixedPaused);
+    });
+
+    it("round-trip: saveState → new instance restaura failCount y lastTs", () => {
+      const a = new SimpleBotEngine({});
+      a._capitalSyncFailCount = 2;
+      a._lastCapitalSyncTs = 1700000000000;
+      a._lastCapitalSyncOk = false;
+      const saved = a.saveState();
+      const b = new SimpleBotEngine(saved);
+      assert.equal(b._capitalSyncFailCount, 2);
+      assert.equal(b._lastCapitalSyncTs, 1700000000000);
+      assert.equal(b._lastCapitalSyncOk, false);
+    });
+
+    it("saved pausedUntil > now+10min → se mantiene (no baja por default)", () => {
+      const a = new SimpleBotEngine({});
+      const future30min = Date.now() + 30*60*1000;
+      a._capitalSyncPausedUntil = future30min;
+      const saved = a.saveState();
+      const b = new SimpleBotEngine(saved);
+      assert.ok(b._capitalSyncPausedUntil >= future30min - 100,
+        `saved 30min future debe mantenerse, got ${b._capitalSyncPausedUntil - Date.now()}ms`);
+    });
+
+    it("saved pausedUntil = 0 → constructor aplica fail-closed default (10min)", () => {
+      const a = new SimpleBotEngine({});
+      a._capitalSyncPausedUntil = 0;
+      const saved = a.saveState();
+      // assert: saveState persiste el 0 tal cual
+      assert.equal(saved.capitalSyncPausedUntil, 0);
+      // pero constructor aplica Math.max con el fail-closed default
+      const before = Date.now();
+      const b = new SimpleBotEngine(saved);
+      const delta = b._capitalSyncPausedUntil - before;
+      assert.ok(delta >= 9*60*1000 && delta <= 11*60*1000,
+        `fail-closed default debe aplicarse, delta=${delta}ms`);
+    });
+
+    it("saved pausedUntil pasado (restart tardío) → default fail-closed supera", () => {
+      const a = new SimpleBotEngine({});
+      a._capitalSyncPausedUntil = Date.now() - 60*60*1000; // hace 1h (expirado)
+      const saved = a.saveState();
+      const before = Date.now();
+      const b = new SimpleBotEngine(saved);
+      const delta = b._capitalSyncPausedUntil - before;
+      assert.ok(delta >= 9*60*1000,
+        `pausedUntil expirado + fail-closed debe dar ≥9min, delta=${delta}ms`);
+    });
+  });
+
   describe("Escenario 1: real < declarado → efectivo = real", () => {
     it("$50 real vs $100 declarado → efectivo=$50, capa1=$30, capa2=$20", async () => {
       const eng = new SimpleBotEngine({});

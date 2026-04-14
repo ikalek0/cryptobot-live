@@ -193,14 +193,18 @@ class SimpleBotEngine {
     this._capitalEfectivo       = saved.capitalEfectivo ?? INITIAL_CAPITAL;
     this._usdcLibre             = saved.usdcLibre       ?? null;
     this._valorPosiciones       = saved.valorPosiciones ?? null;
-    this._lastCapitalSyncTs     = 0;
-    this._lastCapitalSyncOk     = true;
-    this._capitalSyncFailCount  = 0;
-    // H7 fail-closed: al boot, BUYs bloqueados 10min hasta que el primer
-    // syncCapitalFromBinance tenga éxito (lo resetea a 0). Si el sync falla
-    // repetidamente, la pausa se mantiene → mejor pausado que operando con
-    // datos stale post-restart (incidente 12-abril).
-    this._capitalSyncPausedUntil = Date.now() + 10*60*1000; // epoch ms; bloquea BUYs hasta este ts
+    // H6 persist: sync state sobrevive PM2 restart. Sin esto, un restart
+    // durante una pausa por fallo de sync arrancaba como si todo estuviera
+    // bien. Con H7 fail-closed encima (Math.max), la pausa NUNCA baja por
+    // debajo de now+10min en el boot: si el saved pausedUntil es menor (o
+    // cero), se impone el default fail-closed.
+    this._lastCapitalSyncTs     = saved.lastCapitalSyncTs     || 0;
+    this._lastCapitalSyncOk     = saved.lastCapitalSyncOk     !== false;
+    this._capitalSyncFailCount  = saved.capitalSyncFailCount  || 0;
+    this._capitalSyncPausedUntil = Math.max(
+      saved.capitalSyncPausedUntil || 0,
+      Date.now() + 10*60*1000  // H7 fail-closed default si no había uno en disco
+    );
     // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
     // Iñigo confirma que la opción está activa en su cuenta → default true.
     // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
@@ -1010,6 +1014,14 @@ class SimpleBotEngine {
       bnbBalance:      this._bnbBalance,
       bnbLowAlertSent: this._bnbLowAlertSent,
       lastFeeMode:     this._lastFeeMode,
+      // ── H6: persistir estado de capital sync entre restarts ──────────
+      // Un PM2 restart durante una pausa por fallo de sync debe reanudar
+      // pausado, no como si todo estuviera bien. El constructor aplica
+      // Math.max con el fail-closed default de H7 al restaurar.
+      capitalSyncFailCount:   this._capitalSyncFailCount   || 0,
+      capitalSyncPausedUntil: this._capitalSyncPausedUntil || 0,
+      lastCapitalSyncTs:      this._lastCapitalSyncTs      || 0,
+      lastCapitalSyncOk:      this._lastCapitalSyncOk !== false,
     };
   }
 }
