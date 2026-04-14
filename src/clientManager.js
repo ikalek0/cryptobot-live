@@ -185,6 +185,13 @@ class ClientBotManager {
     let firstOrder = true;
     for (const [clientId, c] of Object.entries(this.clients)) {
       if (c.status !== "active" || !c.apiKey) continue;
+      // F33 drift: portfolio está indexado por symbol pero master puede tener
+      // dos strategies sobre el mismo par (BTC_30m_RSI + BTC_30m_EMA). Con este
+      // dedup, el cliente copia SÓLO el primer strategy que llega → divergence
+      // semántica con master. Decisión pendiente de Iñigo: ¿1 posición/symbol
+      // (conservador, actual) o 1 posición/strategy (mirror exacto)? El sizing
+      // y stops del master se basan en per-strategy, así que mirror sería más
+      // fiel — pero exige refactor del portfolio schema a keyed-by-strategyId.
       if (c.portfolio[symbol]) continue; // already has this position
 
       try {
