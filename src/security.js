@@ -237,13 +237,27 @@ function securityLogger(req, res, next) {
 }
 
 // ── SANITIZAR STRINGS (prevenir injection) ────────────────────────────────────
+// F18: antes sólo stripaba < y > — no protegía contra entity escapes, quotes,
+// javascript: URIs ni HTML properly escaped. Ahora HTML-escapa cada carácter
+// especial y también neutraliza `javascript:` / `data:` prefijos comunes.
 function sanitize(str) {
   if (typeof str !== "string") return str;
-  return str
-    .replace(/[<>]/g, "")        // XSS básico
-    .replace(/[\x00-\x1F]/g, "") // caracteres de control
+  let out = str
+    .replace(/[\x00-\x1F\x7F]/g, "") // caracteres de control (incluye DEL)
     .trim()
-    .slice(0, 500);              // truncar
+    .slice(0, 500);                  // truncar antes de escape para evitar ampliación
+  // Neutralizar URI schemes peligrosos (sólo los ataques clásicos)
+  if (/^\s*(javascript|data|vbscript):/i.test(out)) out = out.replace(/^\s*\w+:/, "blocked:");
+  // HTML-escape conservativo
+  out = out
+    .replace(/&/g,  "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;")
+    .replace(/"/g,  "&quot;")
+    .replace(/'/g,  "&#39;")
+    .replace(/`/g,  "&#96;")
+    .replace(/\//g, "&#47;");
+  return out;
 }
 
 function sanitizeBody(fields) {
