@@ -174,8 +174,13 @@ class ClientBotManager {
 
         const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "BUY", clientInvest);
         if (result.success) {
-          c.portfolio[symbol] = { investedUSDC: clientInvest, orderId: result.orderId, ts: new Date().toISOString() };
-          c.log.push({ type: "BUY", symbol, amount: clientInvest, ts: new Date().toISOString(), orderId: result.orderId });
+          // F34: trackear qty recibida en los fills para poder vender EXACTAMENTE
+          // esa cantidad en copySell (no el balance entero del wallet).
+          const filledQty = Array.isArray(result.fills)
+            ? result.fills.reduce((s, f) => s + parseFloat(f.qty || 0), 0)
+            : 0;
+          c.portfolio[symbol] = { investedUSDC: clientInvest, qty: filledQty, orderId: result.orderId, ts: new Date().toISOString() };
+          c.log.push({ type: "BUY", symbol, amount: clientInvest, qty: filledQty, ts: new Date().toISOString(), orderId: result.orderId });
           console.log(`[CLIENT] ✅ ${c.name} BUY ${symbol} $${clientInvest.toFixed(2)}`);
           results.push({ clientId, success: true });
         } else {
@@ -201,7 +206,19 @@ class ClientBotManager {
       if (!c.portfolio[symbol]) continue; // doesn't have this position
 
       try {
-        // Get actual balance of the coin in client's Binance
+        // F34: vender sólo la qty tracked del fill BUY original, NO el balance
+        // entero del wallet del cliente. Evita liquidar holdings manuales.
+        const pos = c.portfolio[symbol];
+        const trackedQty = pos?.qty || 0;
+        if (trackedQty <= 0) {
+          // Si no hay qty tracked (pre-F34 position o data corrupta), borrar sin vender.
+          // NO caemos al coinBalance original → nunca vendemos holdings del cliente.
+          console.warn(`[CLIENT] ${c.name} ${symbol}: sin qty tracked, skip sell (pre-F34)`);
+          delete c.portfolio[symbol];
+          continue;
+        }
+
+        // Safety cap: nunca vender más de lo que el cliente tiene actualmente
         const balances = await clientGetBalance(c.apiKey, c.apiSecret);
         const coinBalance = parseFloat(
           balances?.find(b => b.asset === symbol.replace("USDC","").replace("USDT",""))?.free || 0
@@ -210,12 +227,13 @@ class ClientBotManager {
           delete c.portfolio[symbol];
           continue;
         }
+        const qtyToSell = Math.min(trackedQty, coinBalance);
 
-        const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "SELL", coinBalance);
+        const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "SELL", qtyToSell);
         if (result.success) {
           const invested = c.portfolio[symbol]?.investedUSDC || 0;
           delete c.portfolio[symbol];
-          c.log.push({ type: "SELL", symbol, qty: coinBalance, ts: new Date().toISOString(), orderId: result.orderId });
+          c.log.push({ type: "SELL", symbol, qty: qtyToSell, ts: new Date().toISOString(), orderId: result.orderId });
           console.log(`[CLIENT] ✅ ${c.name} SELL ${symbol}`);
           results.push({ clientId, success: true });
 
