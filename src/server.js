@@ -39,6 +39,25 @@ console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KE
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
+// F13: ruido en boot si cualquier secret cae al default literal (histórico bug F0:
+// dotenv no cargaba → todos los defaults estaban en source público de git, permitiendo
+// bypass de /api/set-capital, /api/sync/*, /api/shadow/*). Se avisa SIEMPRE, no sólo
+// en LIVE_MODE, porque el paper-live también expone estos endpoints en el mismo puerto.
+(function warnPredictableSecrets(){
+  const bad = [];
+  if(!process.env.SYNC_SECRET)  bad.push("SYNC_SECRET");
+  if(!process.env.BOT_SECRET)   bad.push("BOT_SECRET");
+  if(!process.env.BAFIR_SECRET) bad.push("BAFIR_SECRET");
+  if(bad.length){
+    const banner = "!".repeat(70);
+    console.warn(banner);
+    console.warn(`[SECURITY] ⚠️  Secrets en default literal: ${bad.join(", ")}`);
+    console.warn(`[SECURITY] ⚠️  Estos valores están hardcoded en src/server.js (git público)`);
+    console.warn(`[SECURITY] ⚠️  Endpoints /api/sync/*, /api/shadow/*, /api/set-capital BYPASSABLES`);
+    console.warn(`[SECURITY] ⚠️  Fix: exportar ${bad.join(", ")} en .env o PM2 ecosystem`);
+    console.warn(banner);
+  }
+})();
 
 // Umbral para adoptar parámetros del PAPER
 // 7 días consecutivos donde paper > live en WR Y avgPnl
