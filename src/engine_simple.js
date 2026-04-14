@@ -500,6 +500,49 @@ class SimpleBotEngine {
       const usdc = account.balances.find(b => b.asset === "USDC");
       const usdcLibre = parseFloat(usdc?.free || "0");
 
+      // 1b) T0-FEE: BNB libre — reserva para fees con "Use BNB for fees".
+      //     NUNCA se suma a capitalReal/efectivo — es combustible, no capital.
+      const bnb = account.balances.find(b => b.asset === "BNB");
+      this._bnbBalance = parseFloat(bnb?.free || "0");
+
+      // 1c) T0-FEE: detección de bnbFeeEnabled vía commissionAsset del último
+      //     trade. Se prueba en cascada para funcionar tanto en bots con
+      //     historial como en bots recién arrancados:
+      //       (a) símbolo del último trade en this.log (si lo hay)
+      //       (b) primer par de las estrategias del simpleBot (BNB_1h_RSI→BNBUSDC)
+      //       (c) BNBUSDC como último recurso (BNB siempre listado)
+      //     Si todas las llamadas fallan o devuelven array vacío, NO se toca
+      //     el valor previo (persistente) — el default al boot es true.
+      try {
+        const prevMode = this._bnbFeeEnabled;
+        const detected = await this._detectBnbFeeMode(deps.binanceReadOnlyRequest);
+        if (detected !== null) {
+          this._bnbFeeEnabled = detected;
+          if (prevMode !== detected) {
+            console.log(`[SIMPLE][FEE-MODE] cambio detectado: ${prevMode?"BNB":"USDC"} → ${detected?"BNB":"USDC"}`);
+          }
+        }
+      } catch (e) {
+        // Detección best-effort — no bloquea el sync
+        console.warn(`[SIMPLE][FEE-MODE] detección falló (no crítico): ${e.message}`);
+      }
+
+      // 1d) T0-FEE: alerta BNB bajo con latch (evita spam). Umbral ≈ $3.
+      const UMBRAL_BNB_BAJO = 0.005;
+      if (this._bnbBalance < UMBRAL_BNB_BAJO && !this._bnbLowAlertSent) {
+        if (typeof deps?.telegramSend === "function") {
+          try {
+            deps.telegramSend(`⚠️ <b>BNB BAJO</b>\nBalance: ${this._bnbBalance.toFixed(6)} BNB\nPróximas operaciones pagarán fee en USDC (0.1%).\nConsidera añadir BNB.`);
+          } catch {}
+        }
+        this._bnbLowAlertSent = true;
+        console.warn(`[SIMPLE][FEE] BNB bajo (${this._bnbBalance.toFixed(6)} < ${UMBRAL_BNB_BAJO}) — alerta Telegram enviada`);
+      }
+      if (this._bnbBalance >= UMBRAL_BNB_BAJO && this._bnbLowAlertSent) {
+        this._bnbLowAlertSent = false;
+        console.log(`[SIMPLE][FEE] BNB recuperado (${this._bnbBalance.toFixed(6)}) — latch de alerta reseteado`);
+      }
+
       // 2) Valor MTM de las posiciones GESTIONADAS por el simpleBot.
       //    Usamos los precios cacheados en this.prices (ya normalizados USDC).
       //    Si falta el precio de algún par, loguear pero seguir (partial OK —
@@ -610,6 +653,55 @@ class SimpleBotEngine {
       bnbPrice:          +bnbPrice.toFixed(4),
       ts:                Date.now(),
     };
+  }
+
+  // ── T0-FEE: detección de "Use BNB for fees" vía commissionAsset ────────
+  // Prueba GET /api/v3/myTrades en cascada sobre símbolos candidatos.
+  // Devuelve true  si el último trade real usó commissionAsset="BNB"
+  // Devuelve false si usó otro asset (la fee se pagó en el propio activo)
+  // Devuelve null  si todos los candidatos devuelven array vacío o fallan
+  //                (el caller mantiene el valor previo en ese caso)
+  //
+  // Estrategia de cascada:
+  //   1. Último símbolo registrado en this.log con type=BUY|SELL
+  //   2. Primer par único de this.portfolio (posiciones abiertas)
+  //   3. Primer par único de STRATEGIES (pares activos del simpleBot)
+  //   4. BNBUSDC como último recurso (BNB siempre listado en Binance)
+  //
+  // Esto funciona tanto si el bot acaba de arrancar sin historial propio
+  // (cae al fallback 3 o 4) como si ya ha operado (usa fallback 1 o 2).
+  async _detectBnbFeeMode(binanceReadOnlyRequest) {
+    if (typeof binanceReadOnlyRequest !== "function") return null;
+    const candidates = [];
+    // (1) último symbol del log
+    const lastEntry = [...(this.log||[])].reverse()
+      .find(l => (l?.type === "BUY" || l?.type === "SELL") && l?.symbol);
+    if (lastEntry) candidates.push(lastEntry.symbol);
+    // (2) primer pair único del portfolio
+    for (const pos of Object.values(this.portfolio || {})) {
+      if (pos?.pair && !candidates.includes(pos.pair)) candidates.push(pos.pair);
+    }
+    // (3) pares de las estrategias activas
+    for (const cfg of STRATEGIES) {
+      if (cfg?.pair && !candidates.includes(cfg.pair)) candidates.push(cfg.pair);
+    }
+    // (4) último recurso — siempre BNB
+    if (!candidates.includes("BNBUSDC")) candidates.push("BNBUSDC");
+
+    for (const symbol of candidates) {
+      try {
+        const trades = await binanceReadOnlyRequest("GET", "myTrades", { symbol, limit: 5 });
+        if (Array.isArray(trades) && trades.length > 0) {
+          const last = trades[trades.length - 1];
+          if (last && last.commissionAsset) {
+            return last.commissionAsset === "BNB";
+          }
+        }
+      } catch (e) {
+        // prueba siguiente candidato — no loguear aquí (lo hace el caller)
+      }
+    }
+    return null;
   }
 
   // FIX-M9: limpia posiciones stuck con status="pending".
@@ -851,6 +943,11 @@ class SimpleBotEngine {
       capitalEfectivo: this._capitalEfectivo,
       usdcLibre:       this._usdcLibre,
       valorPosiciones: this._valorPosiciones,
+      // ── T0-FEE: fee mode + BNB balance + latch ────────────────────────
+      bnbFeeEnabled:   this._bnbFeeEnabled,
+      bnbBalance:      this._bnbBalance,
+      bnbLowAlertSent: this._bnbLowAlertSent,
+      lastFeeMode:     this._lastFeeMode,
     };
   }
 }
