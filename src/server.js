@@ -53,9 +53,20 @@ const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
     console.warn(banner);
     console.warn(`[SECURITY] ⚠️  Secrets en default literal: ${bad.join(", ")}`);
     console.warn(`[SECURITY] ⚠️  Estos valores están hardcoded en src/server.js (git público)`);
-    console.warn(`[SECURITY] ⚠️  Endpoints /api/sync/*, /api/shadow/*, /api/set-capital BYPASSABLES`);
+    console.warn(`[SECURITY] ⚠️  Endpoints /api/sync/*, /api/shadow/*, /api/set-capital, /api/reset-state BYPASSABLES`);
     console.warn(`[SECURITY] ⚠️  Fix: exportar ${bad.join(", ")} en .env o PM2 ecosystem`);
     console.warn(banner);
+    // C3: fail-closed en LIVE_MODE. Antes solo loguearse — con LIVE_MODE=true
+    // un atacante que alcance el puerto puede bypass endpoints críticos.
+    // ABORT boot con mensaje claro + guardrail operativo del firewall.
+    if (LIVE_MODE) {
+      console.error(banner);
+      console.error(`[SECURITY] ❌ LIVE_MODE=true con secrets default — ABORT boot.`);
+      console.error(`[SECURITY] ❌ Define ${bad.join(", ")} en .env antes de arrancar.`);
+      console.error(`[SECURITY] ❌ Verifica también que ufw status muestra puerto 3001 bloqueado antes de activar LIVE_MODE.`);
+      console.error(banner);
+      process.exit(1);
+    }
   }
 })();
 
@@ -446,7 +457,14 @@ app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIV
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
 
 // Reset state — borrar estado guardado para empezar limpio
+// C3: auth obligatoria. Sin esto, cualquiera que alcance el puerto 3001
+// puede borrar state.json + simpleState vía POST vacío → seed Kelly gates
+// positivos, olvidar posiciones reales abiertas. Usa el mismo patrón que
+// /api/set-capital (BOT_SECRET).
 app.post("/api/reset-state", async (req, res) => {
+  const { secret } = req.body || {};
+  if (secret !== (process.env.BOT_SECRET || "bafir_bot_secret"))
+    return res.status(401).json({ error: "No autorizado" });
   try {
     await deleteState();
     await saveSimpleState({});
@@ -458,7 +476,10 @@ app.post("/api/reset-state", async (req, res) => {
 });
 
 // Endpoint temporal para obtener IP pública de salida del servidor
-app.get("/api/myip", (_,res)=>{
+// C3: solo disponible en paper-live (debug). En LIVE exponer la IP del
+// servidor es info de reconocimiento útil para un atacante.
+app.get("/api/myip", (req,res)=>{
+  if (LIVE_MODE) return res.status(404).json({error:"not available in LIVE"});
   const https2=require("https");
   https2.get("https://api.ipify.org?format=json", r=>{
     let d=""; r.on("data",c=>d+=c);
@@ -467,7 +488,9 @@ app.get("/api/myip", (_,res)=>{
 });
 
 // Check EGRESS IP (what external services like Binance actually see)
-app.get("/api/myip-egress", (_,res)=>{
+// C3: solo disponible en paper-live (debug).
+app.get("/api/myip-egress", (req,res)=>{
+  if (LIVE_MODE) return res.status(404).json({error:"not available in LIVE"});
   const https2=require("https");
   // Use multiple services to cross-check
   const check = (url, cb) => {
