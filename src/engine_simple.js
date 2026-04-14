@@ -173,6 +173,22 @@ class SimpleBotEngine {
     // F2: paused flag persisted on disk. Source of truth for /pausa /reanudar.
     // Sin esto, un PM2 restart tras /pausa reanuda el bot silenciosamente.
     this.paused     = saved.paused     === true;
+    // ── T0: Capital dinámico sincronizado con Binance ────────────────────
+    // DECLARADO = valor máximo del bot (env CAPITAL_USDC/USDT). REAL = lo que
+    // Binance reporta ahora (usdc libre + MTM de las posiciones GESTIONADAS
+    // por el simpleBot — NO de todos los assets). EFECTIVO = min(DECLARADO, REAL).
+    // Regla: el bot jamás opera con más que DECLARADO. Si Binance tiene
+    // menos, opera con menos. Si tiene más, el resto es invisible.
+    // Posiciones fuera de this.portfolio (incidente 12 abril) NO cuentan.
+    this._capitalDeclarado      = INITIAL_CAPITAL;
+    this._capitalReal           = saved.capitalReal     ?? INITIAL_CAPITAL;
+    this._capitalEfectivo       = saved.capitalEfectivo ?? INITIAL_CAPITAL;
+    this._usdcLibre             = saved.usdcLibre       ?? null;
+    this._valorPosiciones       = saved.valorPosiciones ?? null;
+    this._lastCapitalSyncTs     = 0;
+    this._lastCapitalSyncOk     = true;
+    this._capitalSyncFailCount  = 0;
+    this._capitalSyncPausedUntil = 0; // epoch ms; bloquea BUYs hasta este ts
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -300,6 +316,14 @@ class SimpleBotEngine {
     console.log(`[SIMPLE][CANDLE] ${cfg.pair}/${cfg.tf} cerrada — O:${last?.open?.toFixed(2)} H:${last?.high?.toFixed(2)} L:${last?.low?.toFixed(2)} C:${last?.close?.toFixed(2)} (${candles.length}/${CANDLE_MIN[cfg.tf]} velas)`);
     if(candles.length < CANDLE_MIN[cfg.tf]) return;
     console.log(`[SIMPLE][EVAL-START] ${cfg.id} ${cfg.pair}/${cfg.tf}/${cfg.type}`);
+    // ── T0 capital sync gate: si la sincronización contra Binance falló,
+    // bloqueamos NUEVOS BUYs durante 5min. Las SELLs (evaluate() → stops/
+    // targets) siguen ejecutándose para no dejar posiciones atrapadas.
+    if (Date.now() < (this._capitalSyncPausedUntil || 0)) {
+      const remaining = Math.ceil(((this._capitalSyncPausedUntil||0) - Date.now())/1000);
+      console.log(`[SIMPLE][CAPITAL-SYNC] ${cfg.id} bloqueado — pausa por fallo de sync (${remaining}s restantes)`);
+      return;
+    }
     if(this.portfolio[cfg.id]){
       console.log(`[SIMPLE][EVAL] ${cfg.id} — posición abierta, skip`);
       return;
@@ -335,21 +359,25 @@ class SimpleBotEngine {
       console.log(`[SIMPLE][FILTER][ATR] ${cfg.pair}/${cfg.tf} bloqueado — volatilidad percentil ${atrPct} (mín:${ATR_MIN_PERCENTILE})`);
       return;
     }
-    // ── Position sizing (FIX-B: usar min(tv, INITIAL_CAPITAL) para bloquear inflación por mark-to-market)
+    // ── Position sizing (FIX-B + T0: usar min(tv, capRef) para bloquear inflación por mark-to-market,
+    // donde capRef = min(declarado, efectivo) — nunca superar lo declarado aunque Binance tenga más)
     const tv = this.totalValue();
-    const sizingBase = Math.min(tv, INITIAL_CAPITAL);
+    const capDeclaradoLocal = this._capitalDeclarado || INITIAL_CAPITAL;
+    const capEfectivoLocal  = this._capitalEfectivo  || capDeclaradoLocal;
+    const capRef            = Math.min(capDeclaradoLocal, capEfectivoLocal);
+    const sizingBase = Math.min(tv, capRef);
     const kellyFrac = Math.max(0.05, Math.min(0.5, kelly.kelly || 0.1));
     let invest = sizingBase * kellyFrac * 0.5; // Half-Kelly conservador
     if(invest > sizingBase * 0.30) invest = sizingBase * 0.30; // máximo 30% del sizing base
     if(invest > availCash) invest = availCash; // no gastar más del cash de la capa
 
-    // ── FIX-A: Global committed cap check ATÓMICO ─────────────────────────
+    // ── FIX-A + T0: Global committed cap check ATÓMICO ────────────────────
     // committed se computa aquí, y portfolio se muta más abajo SÍNCRONAMENTE
     // (antes de cualquier callback async). Eso garantiza que, si varias
     // estrategias cierran vela en el mismo tick, la segunda ve el committed
-    // actualizado por la primera.
+    // actualizado por la primera. El capLimit ahora usa capRef dinámico.
     const committed = Object.values(this.portfolio).reduce((s,p) => s + (p.invest || 0), 0);
-    const capLimit = INITIAL_CAPITAL * 1.005; // 0.5% tolerancia para fees/slippage micro
+    const capLimit = capRef * 1.005; // 0.5% tolerancia para fees/slippage micro
     if(committed + invest > capLimit){
       const headroom = capLimit - committed;
       if(headroom < 10){
@@ -399,6 +427,105 @@ class SimpleBotEngine {
     this._botName = botName;
     this._regime = regime;
     this._fearGreed = fearGreed;
+  }
+
+  // ── T0: Capital dinámico — sincronización contra Binance ───────────────
+  // Consulta el balance USDC libre + MTM de las posiciones que el simpleBot
+  // gestiona (this.portfolio) y recalcula capa1Cash/capa2Cash para que el
+  // ledger virtual refleje la realidad, sin exceder nunca el cap declarado.
+  //
+  // CRÍTICO: valorPosiciones itera SOLO sobre this.portfolio, NO sobre todos
+  // los balances de Binance. Motivo: las posiciones del incidente del 12 abril
+  // (SOL/XRP residuales) no están en this.portfolio y el bot no puede
+  // gestionarlas (no sabe cerrarlas, no conoce el precio de entrada, etc.).
+  // Incluirlas en capital_real sería mentirle al sizing. Se quedan fuera del
+  // alcance del bot hasta que el operador las migre explícitamente.
+  //
+  // Si Binance falla: _capitalSyncPausedUntil se adelanta 5min → _onCandleClose
+  // bloquea nuevos BUYs. Las SELLs (stops/targets/time-stop) siguen
+  // funcionando en evaluate() para no dejar posiciones atrapadas.
+  async syncCapitalFromBinance(deps) {
+    // deps = { binanceReadOnlyRequest, telegramSend? }
+    try {
+      if (typeof deps?.binanceReadOnlyRequest !== "function")
+        throw new Error("binanceReadOnlyRequest not provided");
+      const account = await deps.binanceReadOnlyRequest("GET", "account", {});
+      if (!account || !Array.isArray(account.balances))
+        throw new Error("invalid account payload");
+
+      // 1) USDC libre (spot)
+      const usdc = account.balances.find(b => b.asset === "USDC");
+      const usdcLibre = parseFloat(usdc?.free || "0");
+
+      // 2) Valor MTM de las posiciones GESTIONADAS por el simpleBot.
+      //    Usamos los precios cacheados en this.prices (ya normalizados USDC).
+      //    Si falta el precio de algún par, loguear pero seguir (partial OK —
+      //    la próxima sync lo corregirá cuando el precio esté disponible).
+      let valorPosiciones = 0;
+      const missingPrices = [];
+      for (const [stratId, pos] of Object.entries(this.portfolio || {})) {
+        const px = this.prices[pos.pair];
+        if (!px || px <= 0) { missingPrices.push(pos.pair); continue; }
+        valorPosiciones += (pos.qty || 0) * px;
+      }
+      if (missingPrices.length > 0) {
+        console.warn(`[SIMPLE][CAPITAL-SYNC] precios faltantes para ${[...new Set(missingPrices)].join(",")} — valoración parcial`);
+      }
+
+      const real       = usdcLibre + valorPosiciones;
+      const declarado  = this._capitalDeclarado || INITIAL_CAPITAL;
+      const efectivo   = Math.min(declarado, real);
+
+      // 3) Ajustar capa1Cash / capa2Cash respetando:
+      //    - el split 60/40 del EFECTIVO
+      //    - el committed de cada capa (no tocar posiciones abiertas)
+      //    - nunca valores negativos
+      const committedC1 = Object.values(this.portfolio||{})
+        .filter(p => p.capa===1).reduce((s,p)=>s+(p.invest||0), 0);
+      const committedC2 = Object.values(this.portfolio||{})
+        .filter(p => p.capa===2).reduce((s,p)=>s+(p.invest||0), 0);
+      const newCapa1Cash = Math.max(0, efectivo*CAPA1_PCT - committedC1);
+      const newCapa2Cash = Math.max(0, efectivo*CAPA2_PCT - committedC2);
+
+      // Tolerancia para evitar log spam por fluctuación cents
+      const TOL = 0.10;
+      const changed = Math.abs(newCapa1Cash - this.capa1Cash) > TOL
+                   || Math.abs(newCapa2Cash - this.capa2Cash) > TOL
+                   || Math.abs(efectivo - (this._capitalEfectivo||0)) > TOL;
+
+      this._capitalReal     = +real.toFixed(4);
+      this._capitalEfectivo = +efectivo.toFixed(4);
+      this._usdcLibre       = +usdcLibre.toFixed(4);
+      this._valorPosiciones = +valorPosiciones.toFixed(4);
+      this.capa1Cash        = +newCapa1Cash.toFixed(4);
+      this.capa2Cash        = +newCapa2Cash.toFixed(4);
+      this._lastCapitalSyncTs    = Date.now();
+      this._lastCapitalSyncOk    = true;
+      this._capitalSyncFailCount = 0;
+      this._capitalSyncPausedUntil = 0;
+
+      console.log(`[SIMPLE][CAPITAL-SYNC] declarado=$${declarado.toFixed(2)} real=$${real.toFixed(2)} efectivo=$${efectivo.toFixed(2)} usdcLibre=$${usdcLibre.toFixed(2)} valorPos=$${valorPosiciones.toFixed(2)} capa1=$${this.capa1Cash.toFixed(2)} capa2=$${this.capa2Cash.toFixed(2)}${changed?" (ajustado)":""}`);
+
+      return {
+        ok: true,
+        capitalDeclarado: this._capitalDeclarado,
+        capitalReal:      this._capitalReal,
+        capitalEfectivo:  this._capitalEfectivo,
+        usdcLibre:        this._usdcLibre,
+        valorPosiciones:  this._valorPosiciones,
+      };
+    } catch (err) {
+      this._capitalSyncFailCount++;
+      this._lastCapitalSyncOk = false;
+      this._capitalSyncPausedUntil = Date.now() + 5*60*1000;
+      console.error(`[SIMPLE][CAPITAL-SYNC] ERROR (${this._capitalSyncFailCount}/3) — pausing trades 5min: ${err.message}`);
+      if (this._capitalSyncFailCount >= 3 && typeof deps?.telegramSend === "function") {
+        try {
+          deps.telegramSend(`🚨 <b>[LIVE] CAPITAL-SYNC</b>\n3 fallos consecutivos consultando Binance.\nBUYs pausados hasta recuperar conexión.\nÚltimo error: ${err.message}`);
+        } catch {}
+      }
+      return { ok: false, error: err.message };
+    }
   }
 
   // FIX-M9: limpia posiciones stuck con status="pending".
@@ -587,6 +714,18 @@ class SimpleBotEngine {
       winRate:this.globalWR(),
       returnPct:+((tv-INITIAL_CAPITAL)/INITIAL_CAPITAL*100).toFixed(2),
       mode:"SIMPLE_v3_7strategies",
+      // ── T0: capital dinámico ─────────────────────────────────────────
+      capitalDeclarado: this._capitalDeclarado,
+      capitalReal:      this._capitalReal,
+      capitalEfectivo:  this._capitalEfectivo,
+      usdcLibre:        this._usdcLibre,
+      valorPosiciones:  this._valorPosiciones,
+      capitalSync: {
+        lastTs:      this._lastCapitalSyncTs,
+        ok:          this._lastCapitalSyncOk,
+        failCount:   this._capitalSyncFailCount,
+        pausedUntil: this._capitalSyncPausedUntil,
+      },
       equity:this.equity.slice(-200),
       log:this.log.slice(-100),
       trades:sells.length,
@@ -613,6 +752,12 @@ class SimpleBotEngine {
       curBar:this._curBar,
       stratTrades:this._stratTrades,
       paused:this.paused === true, // F2: persisted across restarts
+      // ── T0: capital dinámico (se re-sincroniza al arrancar de todos modos,
+      // pero persistir evita el "ventana" de 5min sin valor conocido)
+      capitalReal:     this._capitalReal,
+      capitalEfectivo: this._capitalEfectivo,
+      usdcLibre:       this._usdcLibre,
+      valorPosiciones: this._valorPosiciones,
     };
   }
 }
