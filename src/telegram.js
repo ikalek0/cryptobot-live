@@ -32,7 +32,10 @@ function notifyStartup(mode) {
 
 // ── Resúmenes ─────────────────────────────────────────────────────────────────
 function buildDaily(state) {
-  const tv=state.totalValue||10000,ret=state.returnPct||0;
+  // F5: usar ?? (nullish coalescing), no || — totalValue=0 es legítimo
+  // y ||10000 era el mismo anti-patrón que causó el bug del bot live
+  // ($10k de capital fantasma cuando dotenv no cargaba).
+  const tv=state.totalValue ?? 0,ret=state.returnPct ?? 0;
   const today=new Date().toDateString();
   const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===today);
   const wins=ts.filter(l=>l.pnl>0).length,pnl=ts.reduce((s,l)=>s+(l.pnl||0),0),fees=ts.reduce((s,l)=>s+(l.fee||0),0);
@@ -45,7 +48,8 @@ function buildDaily(state) {
     `⚙️ Score mín: ${state.optimizerParams?.minScore||65} | EMA ${state.optimizerParams?.emaFast}/${state.optimizerParams?.emaSlow}`;
 }
 function buildWeekly(state) {
-  const tv=state.totalValue||10000,ret=state.returnPct||0;
+  // F5: idem buildDaily — ?? 0 evita mostrar "$10000" si totalValue=0.
+  const tv=state.totalValue ?? 0,ret=state.returnPct ?? 0;
   const wa=Date.now()-7*24*60*60*1000;
   const ws=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).getTime()>wa);
   const wins=ws.filter(l=>l.pnl>0).length,pnl=ws.reduce((s,l)=>s+(l.pnl||0),0),fees=ws.reduce((s,l)=>s+(l.fee||0),0);
