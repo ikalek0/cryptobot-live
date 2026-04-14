@@ -1,6 +1,20 @@
 // clientManager.js — Gestión de copy-trading para clientes SaaS
 // Cada cliente tiene sus propias API keys de Binance
 // El bot ejecuta las mismas operaciones en todas las cuentas activas
+//
+// ⚠️  ESTADO (abril 2026): INERT. this.bafirUrl = "" (BAFIR endpoint removed
+// — disabled, línea 66). syncClients() y _reportTrade() early-return, this.clients
+// nunca se pobla, copyBuy/copySell iteran sobre object vacío. Módulo inerte pero
+// importado por server.js y llamado desde trading/loop.js cada SELL/BUY.
+//
+// Bugs latentes (F33-F36) sólo importan si Iñigo re-habilita bafirUrl:
+//   - F33 dedup por symbol vs master por strategyId (divergence semántica)
+//   - F34 copySell liquidaría ENTIRE coinBalance del wallet cliente (user funds)
+//   - F35 verifyClientBalance silent skip → master/client divergence
+//   - F36 sin throttle entre orders → Binance 10/sec ban por IP
+//
+// F34 ya tiene fix defensivo aplicado (qty tracking + safety cap).
+//
 "use strict";
 
 const https = require("https");
