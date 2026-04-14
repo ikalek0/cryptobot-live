@@ -215,6 +215,20 @@ async function prefillSimpleBotCandles() {
   console.log(`[SIMPLE-PREFILL] ✅ ${filled}/${seen.size} pares prefilled`);
 }
 await prefillSimpleBotCandles();
+// ── T0: primer sync de capital contra Binance ────────────────────────────
+// Si no hay API keys, modo legacy (capitalEfectivo = declarado).
+// Si hay keys y el sync falla, el simpleBot quedará pausado 5min (gate en
+// _onCandleClose). No abortamos el boot — el bot queda listo pero no compra.
+if (BINANCE_API_KEY && BINANCE_API_SECRET) {
+  try {
+    const r = await S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps());
+    if (!r.ok) console.warn("[SIMPLE][CAPITAL-SYNC] primer sync falló — BUYs pausados hasta próximo intento (5min)");
+  } catch(e) {
+    console.warn("[SIMPLE][CAPITAL-SYNC] primer sync excepción:", e.message);
+  }
+} else {
+  console.log("[SIMPLE][CAPITAL-SYNC] sin API keys — modo legacy, capitalEfectivo = declarado");
+}
 // Verificar sufijos de pares vs streams de Binance
 const streamSymbols = new Set(PAIRS.map(p=>p.symbol));
 const simplePairs = [...new Set((S.simpleBot.getState?.()?.strategies||[]).map(s=>s.pair))];
@@ -277,6 +291,17 @@ for(const sp of simplePairs){
     LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
     getLiveStartTime: () => liveStartTime,
   });
+
+  // ── T0: safety-check periódico de capital cada 5min ─────────────────────
+  // Fire-and-forget, no bloquea el tick loop. Si Binance falla, el gate en
+  // _onCandleClose se encarga de pausar BUYs durante 5min.
+  if (BINANCE_API_KEY && BINANCE_API_SECRET) {
+    setInterval(() => {
+      if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
+        S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
+      }
+    }, 5 * 60 * 1000);
+  }
 }
 
 // Historial de sincronizaciones recibidas del PAPER
@@ -371,6 +396,19 @@ app.get("/api/simpleBot/state", (_,res) => {
     trades:       s.trades,
     winRate:      s.winRate,
     returnPct:    s.returnPct,
+    // ── T0: capital dinámico (min(declarado, real)) ───────────────────
+    capitalDeclarado: sb._capitalDeclarado,
+    capitalReal:      sb._capitalReal,
+    capitalEfectivo:  sb._capitalEfectivo,
+    usdcLibre:        sb._usdcLibre,
+    valorPosiciones:  sb._valorPosiciones,
+    capitalSync: {
+      lastTs:      sb._lastCapitalSyncTs || 0,
+      ok:          sb._lastCapitalSyncOk !== false,
+      failCount:   sb._capitalSyncFailCount || 0,
+      pausedUntil: sb._capitalSyncPausedUntil || 0,
+      pausedNow:   Date.now() < (sb._capitalSyncPausedUntil || 0),
+    },
   });
 });
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
@@ -691,6 +729,50 @@ function binanceRequest(method, path, params={}) {
   });
 }
 
+// ── T0: read-only request helper — ignora LIVE_MODE ────────────────────────
+// Sólo GET, sólo para sincronización de capital / auditoría. Nunca toca
+// fondos. Falla explícito si no hay API keys (para que syncCapitalFromBinance
+// pueda pausar BUYs en vez de operar con datos stale).
+function binanceReadOnlyRequest(method, path, params={}) {
+  if (!BINANCE_API_KEY || !BINANCE_API_SECRET)
+    return Promise.reject(new Error("Binance API keys missing"));
+  if (method !== "GET")
+    return Promise.reject(new Error("read-only: only GET allowed"));
+  const ts  = Date.now();
+  const all = { ...params, timestamp: ts };
+  const qs  = new URLSearchParams(all).toString();
+  const sig = crypto2.createHmac("sha256", BINANCE_API_SECRET).update(qs).digest("hex");
+  const fullPath = `/api/v3/${path}?${qs}&signature=${sig}`;
+  return new Promise((resolve, reject) => {
+    const req = https2.request({
+      hostname: "api.binance.com", path: fullPath, method,
+      headers: { "X-MBX-APIKEY": BINANCE_API_KEY }
+    }, res => {
+      let d = ""; res.on("data", c => d+=c);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(d);
+          if (parsed && typeof parsed.code === "number" && parsed.code < 0)
+            return reject(new Error(`Binance error ${parsed.code}: ${parsed.msg}`));
+          resolve(parsed);
+        } catch(e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
+    req.end();
+  });
+}
+
+// Helper inyectado a simpleBot.syncCapitalFromBinance para desacoplar
+// el motor de la capa de red (tests pueden mockearlo).
+function _capitalSyncDeps() {
+  return {
+    binanceReadOnlyRequest,
+    telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
+  };
+}
+
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
 // Pares ilíquidos (ARB, OP, NEAR, APT) → 3 partes con 30s entre ellas
 // Pares principales (BTC, ETH, SOL, BNB) → 1 sola orden (alta liquidez)
@@ -809,6 +891,10 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
         try { S.simpleBot.applyRealBuyFill(ctx.strategyId, {realSpent, realQty}); }
         catch(e) { console.error(`[LIVE][RECONCILE-BUY] ${ctx.strategyId}:`, e.message); }
       }
+      // ── T0: re-sync capital post-fill (fire-and-forget) ─────────────────
+      if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
+        S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
+      }
     } else {
       // Orden no ejecutada (sin fills) → rollback reserva
       console.warn(`[LIVE][BUY] ${symbol} sin fills — rollback reserva`);
@@ -884,6 +970,10 @@ async function placeLiveSell(symbol, quantity, ctx) {
             capa: ctx.capa,
             expectedNet: ctx.expectedNet,
           });
+        }
+        // ── T0: re-sync capital post-fill (fire-and-forget) ──────────────
+        if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
+          S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
         }
       } catch(e) { console.error(`[LIVE][RECONCILE-SELL] ${ctx?.strategyId}:`, e.message); }
     } else {
