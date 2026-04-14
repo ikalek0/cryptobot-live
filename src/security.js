@@ -110,13 +110,35 @@ function securityHeaders(req, res, next) {
 }
 
 // ── CORS RESTRINGIDO ──────────────────────────────────────────────────────────
+// F16 fix: el match anterior usaba origin.endsWith(o) → "evilexample.com"
+// pasaba un filtro "example.com" (classic subdomain-suffix bypass). Ahora exige
+// match exacto, o prefijo ".domain" (subdominios legítimos explícitos).
+function _matchOrigin(origin, allowed) {
+  if (!origin) return false;
+  try {
+    const hostname = new URL(origin).hostname.toLowerCase();
+    for (const o of allowed) {
+      const needle = o.toLowerCase().trim();
+      if (!needle) continue;
+      // Match exacto del origin completo (con protocolo)
+      if (origin.toLowerCase() === needle) return true;
+      // Match exacto del hostname
+      if (hostname === needle) return true;
+      // Match de subdominio legítimo: "foo.example.com" match "example.com"
+      // pero "evilexample.com" NO match "example.com"
+      if (hostname.endsWith("." + needle)) return true;
+    }
+  } catch(e) { return false; }
+  return false;
+}
+
 function corsRestricted(allowedOrigins = []) {
   return (req, res, next) => {
     const origin = req.headers.origin;
     // En desarrollo permitir localhost
     const isDev = process.env.NODE_ENV !== "production";
     if (isDev || !origin || allowedOrigins.length === 0 ||
-        allowedOrigins.some(o => origin === o || origin?.endsWith(o))) {
+        _matchOrigin(origin, allowedOrigins)) {
       if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
     } else {
       console.warn(`[SECURITY] CORS bloqueado: ${origin}`);
