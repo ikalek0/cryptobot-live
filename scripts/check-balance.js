@@ -127,8 +127,46 @@ function fetchPrice(symbol) {
     console.log(`\nUSDC libre:  $${(usdc?.free || 0).toFixed(2)}`);
     console.log(`USDT libre:  $${(usdt?.free || 0).toFixed(2)}`);
 
+    // ── T0-FEE: sección dedicada a BNB como combustible para fees ────────
+    // Binance cobra 0.075% (25% descuento) en BNB cuando "Use BNB for fees"
+    // está activo. Si BNB se agota hay fallback automático a 0.1% sobre el
+    // asset. El bot necesita saberlo para predecir el coste virtual de cada
+    // trade y para alertar cuando BNB baja de umbral.
+    const bnb    = balances.find(b => b.asset === "BNB");
+    const bnbQty = bnb ? (bnb.free + bnb.locked) : 0;
+    const bnbEq  = usdcEquivs["BNB"] || 0;
+    const UMBRAL_BNB_BAJO = 0.005;
+    const low = bnbQty < UMBRAL_BNB_BAJO;
+    console.log(`\n=== BNB (reserva para fees) ===`);
+    console.log(`BNB: ${bnbQty.toFixed(8)} (≈$${bnbEq.toFixed(2)}) ← reserva para fees, NO parte del capital del bot`);
+    console.log(`Alerta BNB bajo (< ${UMBRAL_BNB_BAJO}): ${low ? "SÍ ⚠️" : "NO"}`);
+
+    // Detección fee mode vía commissionAsset del último trade.
+    // Cascada de símbolos candidatos para cubrir cuentas sin historial
+    // en un par específico (igual criterio que engine._detectBnbFeeMode).
+    const feeModeCandidates = ["BNBUSDC","BTCUSDC","ETHUSDC","SOLUSDC"];
+    let feeMode  = "desconocido";
+    let feeSrc   = "sin trades recientes";
+    for (const sym of feeModeCandidates) {
+      try {
+        const trades = await get("myTrades", { symbol: sym, limit: 5 });
+        if (Array.isArray(trades) && trades.length > 0) {
+          const last = trades[trades.length - 1];
+          if (last && last.commissionAsset) {
+            feeMode = last.commissionAsset === "BNB"
+              ? "BNB (25% descuento, 0.075% efectivo)"
+              : `${last.commissionAsset} (0.1% sin descuento)`;
+            feeSrc = `myTrades:${sym} (${trades.length} trades)`;
+            break;
+          }
+        }
+      } catch (e) { /* siguiente candidato */ }
+    }
+    console.log(`Fee mode detectado: ${feeMode}`);
+    console.log(`Fuente detección:   ${feeSrc}`);
+
     const nonStable = balances.filter(b =>
-      b.asset !== "USDC" && b.asset !== "USDT" && b.asset !== "BUSD"
+      b.asset !== "USDC" && b.asset !== "USDT" && b.asset !== "BUSD" && b.asset !== "BNB"
     );
     if (nonStable.length > 0) {
       console.log(`\nAssets no-stable con balance (posibles posiciones huérfanas):`);
