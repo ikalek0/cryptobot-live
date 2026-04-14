@@ -18,12 +18,28 @@
 
 const https = require("https");
 
+// F19: SimpleBot opera USDC pero CryptoPanic indexa por currency code (BTC,
+// ETH, etc) y el map se usa en ambas direcciones. Mapeo explícito por symbol
+// cubre USDT + USDC — cualquier consumer con BTCUSDC encuentra el par correcto.
 const SYMBOL_MAP = {
-  BTCUSDT:"BTC", ETHUSDT:"ETH", SOLUSDT:"SOL", BNBUSDT:"BNB",
-  AVAXUSDT:"AVAX", ADAUSDT:"ADA", DOTUSDT:"DOT", LINKUSDT:"LINK",
-  UNIUSDT:"UNI", AAVEUSDT:"AAVE", XRPUSDT:"XRP", LTCUSDT:"LTC",
-  MATICUSDT:"MATIC", OPUSDT:"OP", ARBUSDT:"ARB", ATOMUSDT:"ATOM",
-  NEARUSDT:"NEAR", APTUSDT:"APT",
+  BTCUSDT:"BTC", BTCUSDC:"BTC",
+  ETHUSDT:"ETH", ETHUSDC:"ETH",
+  SOLUSDT:"SOL", SOLUSDC:"SOL",
+  BNBUSDT:"BNB", BNBUSDC:"BNB",
+  AVAXUSDT:"AVAX", AVAXUSDC:"AVAX",
+  ADAUSDT:"ADA", ADAUSDC:"ADA",
+  DOTUSDT:"DOT",
+  LINKUSDT:"LINK", LINKUSDC:"LINK",
+  UNIUSDT:"UNI",
+  AAVEUSDT:"AAVE",
+  XRPUSDT:"XRP", XRPUSDC:"XRP",
+  LTCUSDT:"LTC",
+  MATICUSDT:"MATIC",
+  OPUSDT:"OP",
+  ARBUSDT:"ARB",
+  ATOMUSDT:"ATOM", ATOMUSDC:"ATOM",
+  NEARUSDT:"NEAR",
+  APTUSDT:"APT",
 };
 
 class CryptoPanicDefense {
