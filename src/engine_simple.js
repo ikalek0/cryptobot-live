@@ -205,6 +205,13 @@ class SimpleBotEngine {
       saved.capitalSyncPausedUntil || 0,
       Date.now() + 10*60*1000  // H7 fail-closed default si no había uno en disco
     );
+    // ── C2: pausa por stream-dead (WebSocket Binance sin ticks > 30s) ────
+    // Distinto semánticamente de _capitalSyncPausedUntil: uno es "no tengo
+    // datos de capital", otro es "no tengo datos de precios". Los logs de
+    // _onCandleClose los distinguen explícitamente. Sobrevive restarts via
+    // saveState (H6 pattern) — una pausa de 60s post-stream-dead no se pierde
+    // si el proceso reinicia dentro de la ventana.
+    this._streamDeadPausedUntil = saved.streamDeadPausedUntil || 0;
     // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
     // Iñigo confirma que la opción está activa en su cuenta → default true.
     // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
@@ -356,7 +363,16 @@ class SimpleBotEngine {
     // targets) siguen ejecutándose para no dejar posiciones atrapadas.
     if (Date.now() < (this._capitalSyncPausedUntil || 0)) {
       const remaining = Math.ceil(((this._capitalSyncPausedUntil||0) - Date.now())/1000);
-      console.log(`[SIMPLE][CAPITAL-SYNC] ${cfg.id} bloqueado — pausa por fallo de sync (${remaining}s restantes)`);
+      console.log(`[SIMPLE][CAPITAL-SYNC] ${cfg.id} bloqueado — sync falló hace ${remaining}s restantes`);
+      return;
+    }
+    // ── C2 stream-dead gate: si el WebSocket de Binance no emite ticks
+    // reales durante >30s, trading/loop.js setea _streamDeadPausedUntil y
+    // aquí bloqueamos BUYs. Distinto del capital sync gate para que los
+    // logs distingan "no tengo precio real" de "no tengo balance real".
+    if (Date.now() < (this._streamDeadPausedUntil || 0)) {
+      const remaining = Math.ceil(((this._streamDeadPausedUntil||0) - Date.now())/1000);
+      console.log(`[SIMPLE][STREAM-DEAD] ${cfg.id} bloqueado — WS sin ticks hace ${remaining}s restantes`);
       return;
     }
     if(this.portfolio[cfg.id]){
@@ -1032,6 +1048,8 @@ class SimpleBotEngine {
       capitalSyncPausedUntil: this._capitalSyncPausedUntil || 0,
       lastCapitalSyncTs:      this._lastCapitalSyncTs      || 0,
       lastCapitalSyncOk:      this._lastCapitalSyncOk !== false,
+      // ── C2: persistir pausa por stream-dead ──────────────────────────
+      streamDeadPausedUntil:  this._streamDeadPausedUntil  || 0,
     };
   }
 }

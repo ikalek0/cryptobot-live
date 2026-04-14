@@ -309,6 +309,13 @@ for(const sp of simplePairs){
     marketGuard, blacklist, cryptoPanic, clientManager,
     LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
     getLiveStartTime: () => liveStartTime,
+    // C2: expose stream liveness check + telegram sink to trading/loop.js.
+    // lastPriceTs vive en este módulo (ver connectBinance); el loop necesita
+    // consultarlo para decidir si propagar precios al simpleBot (sin esto,
+    // simulatePrices acabaría alimentando velas fabricadas al engine).
+    isPriceStreamLive: () => (Date.now() - lastPriceTs) < 10000,
+    getMsSinceLastTick: () => (Date.now() - lastPriceTs),
+    telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
   });
 
   // ── T0: safety-check periódico de capital cada 5min ─────────────────────

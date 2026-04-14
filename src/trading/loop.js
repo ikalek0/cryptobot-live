@@ -19,11 +19,24 @@ function startLoop(deps) {
     marketGuard, blacklist, cryptoPanic, clientManager,
     LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
     getLiveStartTime,
+    // C2: stream liveness check inyectado desde server.js (lastPriceTs
+    // vive allí, asociado al WS de Binance). Si falta, asumimos stream
+    // viva — backwards-compat con callers legacy.
+    isPriceStreamLive,
+    getMsSinceLastTick,
+    telegramSend,
   } = deps;
 
   connectBinance();
   let _tickRunning = false;
   const _sessionStartTs = Date.now(); // track session start for P&L
+  // ── C2: tracking del estado de stream-dead para el gate de >30s ────────
+  // _streamDeadSince se setea la primera vez que detectamos stream muerta
+  // y se limpia cuando vuelve. Si pasa >30s consecutivos sin ticks, pausamos
+  // BUYs vía simpleBot._streamDeadPausedUntil + enviamos alerta Telegram.
+  // El throttle de la alerta evita spam si la pausa se renueva cada tick.
+  let _streamDeadSince = 0;
+  let _lastStreamDeadAlertTs = 0;
 
 // ── Capital Alert: aviso de añadir capital cuando condiciones son óptimas ───
 // F27: persistimos timestamps en S.bot para sobrevivir PM2 restart. Antes, las
@@ -77,11 +90,43 @@ setInterval(async()=>{
     try {
     simulatePrices();
 
-    // Feed current prices to simple engine
-    if(S.simpleBot && S.bot.prices) {
+    // ── C2: Feed current prices to simple engine SOLO si stream real ─────
+    // simulatePrices() puede escribir random-walk desde SEEDS hardcoded
+    // cuando el WS de Binance lleva >=10s sin emitir. Propagar eso al
+    // simpleBot construiría velas OHLC con datos falsos y dispararía
+    // señales BUY sobre ruido puro. S.bot (zombie, evaluate es no-op)
+    // puede recibir los precios fabricados sin consecuencias — sólo el
+    // simpleBot necesita este guard.
+    const streamLive = typeof isPriceStreamLive === "function" ? isPriceStreamLive() : true;
+    if(S.simpleBot && S.bot.prices && streamLive) {
       for(const [sym,price] of Object.entries(S.bot.prices)) {
         S.simpleBot.updatePrice(sym, price);
       }
+    }
+    // ── C2: tracking stream-dead > 30s → pausar BUYs vía _streamDeadPausedUntil ──
+    if (!streamLive) {
+      if (_streamDeadSince === 0) _streamDeadSince = Date.now();
+      const deadMs = Date.now() - _streamDeadSince;
+      if (deadMs > 30 * 1000 && S.simpleBot) {
+        // Renovar la pausa para bloquear BUYs 60s más. Mientras la stream
+        // siga muerta, cada tick la extiende.
+        S.simpleBot._streamDeadPausedUntil = Date.now() + 60 * 1000;
+        // Alerta Telegram con throttle de 10min para evitar spam.
+        if (Date.now() - _lastStreamDeadAlertTs > 10 * 60 * 1000) {
+          _lastStreamDeadAlertTs = Date.now();
+          const msSince = typeof getMsSinceLastTick === "function" ? getMsSinceLastTick() : 0;
+          try {
+            (typeof telegramSend === "function") && telegramSend(
+              `⚠️ <b>[LIVE] STREAM-DEAD</b>\nWebSocket Binance sin ticks ${Math.round(msSince/1000)}s\nBUYs pausados hasta que vuelvan.`
+            );
+          } catch {}
+          console.warn(`[LIVE][STREAM-DEAD] WS sin ticks ${Math.round(msSince/1000)}s — simpleBot BUYs pausados 60s`);
+        }
+      }
+    } else if (_streamDeadSince !== 0) {
+      // Stream recuperada — limpiar tracker (la pausa ya expirará por timeout natural).
+      console.log(`[LIVE][STREAM-LIVE] WS recuperado tras ${Math.round((Date.now()-_streamDeadSince)/1000)}s`);
+      _streamDeadSince = 0;
     }
 
     const marketState=marketGuard.update(S.bot.prices["BTCUSDC"]);
