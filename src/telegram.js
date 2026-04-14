@@ -196,7 +196,13 @@ function startCommandListener(getState, botControls, initialPaused=false) {
               }
               else if(text.startsWith("/capital ")) {
                 const val = parseFloat(text.split(" ")[1]);
-                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110"); }
+                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10)"); }
+                // F4: hard ceiling $500 (5× INITIAL). Sin techo, un typo
+                // /capital 10000 (en lugar de 100) escala el bot a $10k →
+                // Half-Kelly de $10k = posiciones de ~$1500 → órdenes BUY a
+                // Binance que vacían el balance real al primer trade. Para
+                // cambios mayores, editar .env directamente.
+                else if(val > 500) { send("❌ Capital máximo $500 (5× INITIAL). Para cambios mayores edita .env directamente."); }
                 else {
                   // F3: rechazar si hay posiciones abiertas. Recalcular cash
                   // descontando invested es semánticamente ambiguo (qué pasa
