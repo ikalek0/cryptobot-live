@@ -25,7 +25,7 @@ const RISK_PROFILES = {
   conservative: { maxDailyLoss:0.03, maxPositionSize:0.25, maxOpenPositions:2,  atrMultiplier:1.5, trailingPct:0.04, minScore:70 },
   moderate:     { maxDailyLoss:0.05, maxPositionSize:0.35, maxOpenPositions:3,  atrMultiplier:3.5, trailingPct:0.06, minScore:55 },
   aggressive:   { maxDailyLoss:0.10, maxPositionSize:0.45, maxOpenPositions:5,  atrMultiplier:2.5, trailingPct:0.08, minScore:50 },
-  paper:        { maxDailyLoss:1.00, maxPositionSize:0.20, maxOpenPositions:18, atrMultiplier:3.0, trailingPct:0.05, minScore:30 },
+  paper:        { maxDailyLoss:1.00, maxPositionSize:0.20, maxOpenPositions:8,  atrMultiplier:3.0, trailingPct:0.05, minScore:30 },
 };
 
 class CircuitBreaker {
