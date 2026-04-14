@@ -39,6 +39,25 @@ console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KE
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
 const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
+// F13: ruido en boot si cualquier secret cae al default literal (histórico bug F0:
+// dotenv no cargaba → todos los defaults estaban en source público de git, permitiendo
+// bypass de /api/set-capital, /api/sync/*, /api/shadow/*). Se avisa SIEMPRE, no sólo
+// en LIVE_MODE, porque el paper-live también expone estos endpoints en el mismo puerto.
+(function warnPredictableSecrets(){
+  const bad = [];
+  if(!process.env.SYNC_SECRET)  bad.push("SYNC_SECRET");
+  if(!process.env.BOT_SECRET)   bad.push("BOT_SECRET");
+  if(!process.env.BAFIR_SECRET) bad.push("BAFIR_SECRET");
+  if(bad.length){
+    const banner = "!".repeat(70);
+    console.warn(banner);
+    console.warn(`[SECURITY] ⚠️  Secrets en default literal: ${bad.join(", ")}`);
+    console.warn(`[SECURITY] ⚠️  Estos valores están hardcoded en src/server.js (git público)`);
+    console.warn(`[SECURITY] ⚠️  Endpoints /api/sync/*, /api/shadow/*, /api/set-capital BYPASSABLES`);
+    console.warn(`[SECURITY] ⚠️  Fix: exportar ${bad.join(", ")} en .env o PM2 ecosystem`);
+    console.warn(banner);
+  }
+})();
 
 // Umbral para adoptar parámetros del PAPER
 // 7 días consecutivos donde paper > live en WR Y avgPnl
@@ -105,12 +124,17 @@ S.simpleBot._onSell = (pair, qty, ctx) => {
 };
 
 // ── Prefill velas históricas de Binance para simpleBot ──────────────────
+// F32 note: `key:USDC` asume que simpleBot mapea todas las strategies a pares
+// USDC (convención actual post-F1). Si una strategy futura usa otro quote
+// (BUSD, FDUSD, EUR...) debe actualizarse este PAIRS_TF o el prefill se salta
+// silenciosamente.
 async function prefillSimpleBotCandles() {
   // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
+  // F30: duplicate BTCUSDT/30m eliminado — el seen Set ya lo deduplicaba, pero
+  // era copy-paste confuso (BTC_30m_RSI y BTC_30m_EMA comparten la misma vela).
   const PAIRS_TF = [
     {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1h"},
     {api:"SOLUSDT",  key:"SOLUSDC",  tf:"1h"},
-    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
     {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
     {api:"XRPUSDT",  key:"XRPUSDC",  tf:"4h"},
     {api:"SOLUSDT",  key:"SOLUSDC",  tf:"4h"},
@@ -118,6 +142,38 @@ async function prefillSimpleBotCandles() {
   ];
   const seen = new Set();
   let filled = 0;
+  // F31: fetch hardening — timeout 8s via AbortSignal + retry exponencial x3
+  // + validación de HTTP status. Antes: fetch() sin signal + sin res.ok check;
+  // un network blip en boot provocaba 30min-24h de warmup (hasta acumular
+  // CANDLE_MIN velas desde el stream live). Ahora: intentamos 3 veces con
+  // backoff 1s/2s/4s, y logeamos error final para que ops pueda diagnosticar.
+  async function fetchKlinesWithRetry(api, tf, limit) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${api}&interval=${tf}&limit=${limit}`;
+    const backoffs = [1000, 2000, 4000];
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) {
+          lastErr = new Error(`HTTP ${res.status}`);
+          if (res.status === 429 || res.status === 418) {
+            // rate-limited — respect Retry-After if present
+            const ra = parseInt(res.headers.get("retry-after") || "0", 10);
+            if (ra > 0) await new Promise(r => setTimeout(r, Math.min(ra * 1000, 30000)));
+          }
+        } else {
+          const klines = await res.json();
+          if (Array.isArray(klines)) return klines;
+          lastErr = new Error("response is not an array");
+        }
+      } catch (e) {
+        lastErr = e;
+      }
+      if (attempt < 2) await new Promise(r => setTimeout(r, backoffs[attempt]));
+    }
+    throw lastErr || new Error("unknown fetch error");
+  }
+
   for(const {api, key, tf} of PAIRS_TF) {
     const candleKey = `${key}_${tf}`;
     if(seen.has(candleKey)) continue;
@@ -130,10 +186,7 @@ async function prefillSimpleBotCandles() {
     }
     try {
       const limit = 250;
-      const url = `https://api.binance.com/api/v3/klines?symbol=${api}&interval=${tf}&limit=${limit}`;
-      const res = await fetch(url);
-      const klines = await res.json();
-      if(!Array.isArray(klines)) continue;
+      const klines = await fetchKlinesWithRetry(api, tf, limit);
       if(!S.simpleBot._candles) S.simpleBot._candles = {};
       if(!S.simpleBot._candles[candleKey]) S.simpleBot._candles[candleKey] = [];
       for(const k of klines) {
@@ -154,9 +207,12 @@ async function prefillSimpleBotCandles() {
       }
       filled++;
       console.log(`[SIMPLE-PREFILL] ${candleKey}: ${S.simpleBot._candles[candleKey].length} velas + curBar`);
-    } catch(e) { console.warn(`[SIMPLE-PREFILL] Error ${api}/${tf}:`, e.message); }
+    } catch(e) {
+      // F31: warn ruidoso en vez de silencioso — ops necesita ver el fallo
+      console.warn(`[SIMPLE-PREFILL] ⚠️ ${api}/${tf} falló tras 3 intentos: ${e.message}`);
+    }
   }
-  console.log(`[SIMPLE-PREFILL] ✅ ${filled} pares prefilled`);
+  console.log(`[SIMPLE-PREFILL] ✅ ${filled}/${seen.size} pares prefilled`);
 }
 await prefillSimpleBotCandles();
 // Verificar sufijos de pares vs streams de Binance

@@ -53,6 +53,33 @@ describe("INITIAL_CAPITAL fallback chain", () => {
     );
   });
 
+  it("trading/state.js has the same fallback chain (F24)", () => {
+    const content = fs.readFileSync(path.join(SRC, "trading", "state.js"), "utf-8");
+    assert.ok(
+      content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
+      "state.js CAPITAL_USDT must share fallback chain with engine.js/engine_simple.js"
+    );
+  });
+
+  it("F24 runtime: CAPITAL_USDC env propagates to S.CAPITAL_USDT", () => {
+    // Limpiar cache + setear env ANTES del require
+    const modPath = require.resolve("../src/trading/state");
+    delete require.cache[modPath];
+    const prevC = process.env.CAPITAL_USDC;
+    const prevT = process.env.CAPITAL_USDT;
+    process.env.CAPITAL_USDC = "250";
+    delete process.env.CAPITAL_USDT;
+    try {
+      const S = require("../src/trading/state");
+      assert.equal(S.CAPITAL_USDT, 250, "CAPITAL_USDC=250 (no USDT) must set S.CAPITAL_USDT=250");
+    } finally {
+      // Restaurar y recargar module para no contaminar otros tests
+      if (prevC === undefined) delete process.env.CAPITAL_USDC; else process.env.CAPITAL_USDC = prevC;
+      if (prevT === undefined) delete process.env.CAPITAL_USDT; else process.env.CAPITAL_USDT = prevT;
+      delete require.cache[modPath];
+    }
+  });
+
   it("default fallback is 100, NOT 10000", () => {
     const content = fs.readFileSync(path.join(SRC, "engine_simple.js"), "utf-8");
     // The old bug was defaulting to 10000

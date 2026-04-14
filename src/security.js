@@ -1,5 +1,27 @@
 // ─── SECURITY MODULE ─────────────────────────────────────────────────────────
 // Todas las medidas de seguridad centralizadas en un módulo
+//
+// ⚠️  ESTADO (abril 2026): DEAD CODE — ningún módulo hace require('./security').
+// server.js reinventa HMAC verification inline (lines 382-392, 418-425) y
+// secret checks inline (lines 475, 482, 494, 504) en vez de usar requireHmac().
+//
+// Endpoints Express NO tienen:
+//   - rate limiting (rateLimiter.limit no aplicado a ninguna ruta)
+//   - security headers (securityHeaders no montado)
+//   - CORS restringido (corsRestricted no montado)
+//   - input validation (validateInput sin uso)
+//   - sanitization (sanitize/sanitizeBody sin uso)
+//
+// Acción pendiente (Iñigo): decidir wire-up a server.js o delete completo.
+// Mientras tanto, los defectos latentes del módulo están reportados pero NO
+// fixes agresivos — sería mover silla de un fuego que no arde.
+//
+// Bugs latentes conocidos (F15-F18, audit bloque 1.3):
+//   - F15 RateLimiter setInterval sin .unref() (keeps process alive)
+//   - F16 corsRestricted endsWith() suffix bypass (evilfoo.com passes foo.com check)
+//   - F17 _getKey() trusts x-forwarded-for sin trust-proxy config
+//   - F18 sanitize() insuficiente para XSS (sólo strip <>, no HTML-escape)
+//
 "use strict";
 
 const crypto = require("crypto");
@@ -8,9 +30,12 @@ const crypto = require("crypto");
 class RateLimiter {
   constructor() {
     this.store = {}; // { key: { count, firstAttempt, blocked } }
-    // Limpiar cada 10 minutos
-    setInterval(() => this._cleanup(), 10 * 60 * 1000);
+    // Limpiar cada 10 minutos. .unref() para no bloquear process exit
+    // (tests limpios + no mantener proceso vivo sólo por el cleanup).
+    this._cleanupTimer = setInterval(() => this._cleanup(), 10 * 60 * 1000);
+    if (this._cleanupTimer.unref) this._cleanupTimer.unref();
   }
+  stop() { if(this._cleanupTimer) { clearInterval(this._cleanupTimer); this._cleanupTimer = null; } }
 
   _cleanup() {
     const now = Date.now();
@@ -21,8 +46,18 @@ class RateLimiter {
   }
 
   _getKey(req) {
-    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-           req.socket?.remoteAddress || "unknown";
+    // F17: x-forwarded-for es client-controlled. Sólo confiar si el proceso
+    // corre detrás de un proxy conocido (TRUST_PROXY=true en env). En caso
+    // contrario usar socket.remoteAddress directo — imposible de spoofear.
+    const trustProxy = process.env.TRUST_PROXY === "true";
+    if (trustProxy) {
+      const xff = req.headers["x-forwarded-for"];
+      if (xff) {
+        const first = String(xff).split(",")[0]?.trim();
+        if (first) return first;
+      }
+    }
+    return req.socket?.remoteAddress || "unknown";
   }
 
   // Middleware configurable por ruta
@@ -85,13 +120,35 @@ function securityHeaders(req, res, next) {
 }
 
 // ── CORS RESTRINGIDO ──────────────────────────────────────────────────────────
+// F16 fix: el match anterior usaba origin.endsWith(o) → "evilexample.com"
+// pasaba un filtro "example.com" (classic subdomain-suffix bypass). Ahora exige
+// match exacto, o prefijo ".domain" (subdominios legítimos explícitos).
+function _matchOrigin(origin, allowed) {
+  if (!origin) return false;
+  try {
+    const hostname = new URL(origin).hostname.toLowerCase();
+    for (const o of allowed) {
+      const needle = o.toLowerCase().trim();
+      if (!needle) continue;
+      // Match exacto del origin completo (con protocolo)
+      if (origin.toLowerCase() === needle) return true;
+      // Match exacto del hostname
+      if (hostname === needle) return true;
+      // Match de subdominio legítimo: "foo.example.com" match "example.com"
+      // pero "evilexample.com" NO match "example.com"
+      if (hostname.endsWith("." + needle)) return true;
+    }
+  } catch(e) { return false; }
+  return false;
+}
+
 function corsRestricted(allowedOrigins = []) {
   return (req, res, next) => {
     const origin = req.headers.origin;
     // En desarrollo permitir localhost
     const isDev = process.env.NODE_ENV !== "production";
     if (isDev || !origin || allowedOrigins.length === 0 ||
-        allowedOrigins.some(o => origin === o || origin?.endsWith(o))) {
+        _matchOrigin(origin, allowedOrigins)) {
       if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
     } else {
       console.warn(`[SECURITY] CORS bloqueado: ${origin}`);
@@ -180,13 +237,27 @@ function securityLogger(req, res, next) {
 }
 
 // ── SANITIZAR STRINGS (prevenir injection) ────────────────────────────────────
+// F18: antes sólo stripaba < y > — no protegía contra entity escapes, quotes,
+// javascript: URIs ni HTML properly escaped. Ahora HTML-escapa cada carácter
+// especial y también neutraliza `javascript:` / `data:` prefijos comunes.
 function sanitize(str) {
   if (typeof str !== "string") return str;
-  return str
-    .replace(/[<>]/g, "")        // XSS básico
-    .replace(/[\x00-\x1F]/g, "") // caracteres de control
+  let out = str
+    .replace(/[\x00-\x1F\x7F]/g, "") // caracteres de control (incluye DEL)
     .trim()
-    .slice(0, 500);              // truncar
+    .slice(0, 500);                  // truncar antes de escape para evitar ampliación
+  // Neutralizar URI schemes peligrosos (sólo los ataques clásicos)
+  if (/^\s*(javascript|data|vbscript):/i.test(out)) out = out.replace(/^\s*\w+:/, "blocked:");
+  // HTML-escape conservativo
+  out = out
+    .replace(/&/g,  "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;")
+    .replace(/"/g,  "&quot;")
+    .replace(/'/g,  "&#39;")
+    .replace(/`/g,  "&#96;")
+    .replace(/\//g, "&#47;");
+  return out;
 }
 
 function sanitizeBody(fields) {

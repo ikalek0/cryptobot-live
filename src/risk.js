@@ -1,11 +1,31 @@
 // ─── RISK MANAGER v2 ──────────────────────────────────────────────────────────
+//
+// ESTADO (abril 2026): este módulo es 90% LEGACY / dead code.
+//
+//   VIVO:
+//     - CircuitBreaker      → engine.js zombie lo llama en evaluate()/getState() y
+//                              loop.js reconciliación lo resetea. Dashboard y
+//                              telegram /estado consumen su estado.
+//     - RISK_PROFILES       → engine.js muestra `profile` en getState() para el
+//                              dashboard (sólo display, no decisiones).
+//
+//   ZOMBIE (nunca invocado, preservado por backwards-compat del import en engine.js):
+//     - calcPositionSize    → simpleBot usa su propio Half-Kelly en engine_simple.js
+//     - TrailingStop.update → simpleBot no trailing stops; sólo `.highs` se persiste
+//     - AutoOptimizer       → `.recordTrade()/.optimize()` nunca llamados; sólo
+//                              `.params` se persiste y muestra en el dashboard
+//
+// Phase H (post-LIVE) eliminará engine.js + este módulo completo. Mientras tanto
+// NO borrar exports muertos — romperíamos el require() del zombie. Sólo hardening
+// defensivo para que lectores futuros no se confundan.
+//
 "use strict";
 
 const RISK_PROFILES = {
   conservative: { maxDailyLoss:0.03, maxPositionSize:0.25, maxOpenPositions:2,  atrMultiplier:1.5, trailingPct:0.04, minScore:70 },
   moderate:     { maxDailyLoss:0.05, maxPositionSize:0.35, maxOpenPositions:3,  atrMultiplier:3.5, trailingPct:0.06, minScore:55 },
   aggressive:   { maxDailyLoss:0.10, maxPositionSize:0.45, maxOpenPositions:5,  atrMultiplier:2.5, trailingPct:0.08, minScore:50 },
-  paper:        { maxDailyLoss:1.00, maxPositionSize:0.20, maxOpenPositions:18, atrMultiplier:3.0, trailingPct:0.05, minScore:30 },
+  paper:        { maxDailyLoss:1.00, maxPositionSize:0.20, maxOpenPositions:8,  atrMultiplier:3.0, trailingPct:0.05, minScore:30 },
 };
 
 class CircuitBreaker {
@@ -20,6 +40,20 @@ class CircuitBreaker {
     if(newValue) this.startOfDayVal = newValue;
     console.log("[CB] Circuit breaker reseteado manualmente");
   }
+  // Pure read — no side effects. Safe to call from getState() / API handlers.
+  // Returns last-known state without mutating daily reset or triggered flag.
+  getStatus() {
+    const startOfDay=this.startOfDayVal;
+    const drawdown = (startOfDay && Number.isFinite(startOfDay))
+      ? 0  // sin currentValue no se puede calcular; callers que necesiten drawdown deben usar check()
+      : 0;
+    return{triggered:this.triggered,drawdown,startOfDay,resetTime:"próxima medianoche"};
+  }
+  // Mutating: daily reset + trigger on threshold breach.
+  // CONTRATO: este método muta estado (triggered, startOfDayVal, lastResetDay).
+  // Debería llamarse sólo desde el loop de trading, NO desde getState()/API polls.
+  // En la práctica las mutaciones son idempotentes (triggered monotónico hasta
+  // reset diario, startOfDayVal set-once) pero el invariante debe documentarse.
   check(currentValue) {
     const today=new Date().toDateString();
     if(this.lastResetDay!==today){this.startOfDayVal=currentValue;this.triggered=false;this.lastResetDay=today;}
@@ -47,17 +81,24 @@ class TrailingStop {
 
 function calcKellyFraction(winRate, avgWinPct, avgLossPct) {
   // Kelly Criterion: f* = WR/|avgLoss| - (1-WR)/avgWin
-  // Acotado entre 0 y maxPositionSize para seguridad
+  // Acotado entre 0 y maxPositionSize para seguridad.
+  // Defensive: rechaza NaN/Infinity/no-finite y devuelve default conservador.
+  if(!Number.isFinite(winRate)||!Number.isFinite(avgWinPct)||!Number.isFinite(avgLossPct)) return 0.20;
   if(!winRate||!avgWinPct||!avgLossPct||avgLossPct===0) return 0.20; // default conservador
   const wr = Math.min(0.80, Math.max(0.10, winRate));
   const ratio = Math.abs(avgWinPct) / Math.abs(avgLossPct);
+  if(!Number.isFinite(ratio)||ratio<=0) return 0.20;
   const kelly = wr - (1-wr)/ratio;
+  if(!Number.isFinite(kelly)) return 0.20;
   // Half-Kelly para ser conservadores (estrategia estándar en fondos)
   const halfKelly = kelly * 0.5;
   return Math.max(0.05, Math.min(0.40, halfKelly)); // entre 5% y 40%
 }
 
 function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyData=null) {
+  // Defensive: inputs inválidos → sizing 0 (nunca negativo)
+  if(!Number.isFinite(availableCash)||availableCash<=0) return 0;
+  if(!profile||!Number.isFinite(profile.maxPositionSize)) return 0;
   // Base: Kelly Criterion si tenemos suficientes datos, sino usar max% fijo
   let base;
   if(kellyData && kellyData.trades>=20) {
@@ -66,10 +107,13 @@ function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyDat
   } else {
     base = availableCash * profile.maxPositionSize;
   }
-  const scoreFactor = 0.6 + ((score-50)/50)*0.8;
+  // Clamp score a [0,100] para evitar scoreFactor negativo con score<12.5
+  const safeScore = Math.min(100, Math.max(0, Number(score)||0));
+  const scoreFactor = Math.max(0, 0.6 + ((safeScore-50)/50)*0.8);
   const atrFactor   = atrPct>5 ? 0.5 : atrPct>3 ? 0.75 : 1.0;
   const openFactor  = Math.max(0.4, 1 - nOpen*0.15);
-  return Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
+  const size = Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
+  return Math.max(0, size);
 }
 
 class AutoOptimizer {

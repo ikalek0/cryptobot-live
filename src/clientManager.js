@@ -1,6 +1,20 @@
 // clientManager.js — Gestión de copy-trading para clientes SaaS
 // Cada cliente tiene sus propias API keys de Binance
 // El bot ejecuta las mismas operaciones en todas las cuentas activas
+//
+// ⚠️  ESTADO (abril 2026): INERT. this.bafirUrl = "" (BAFIR endpoint removed
+// — disabled, línea 66). syncClients() y _reportTrade() early-return, this.clients
+// nunca se pobla, copyBuy/copySell iteran sobre object vacío. Módulo inerte pero
+// importado por server.js y llamado desde trading/loop.js cada SELL/BUY.
+//
+// Bugs latentes (F33-F36) sólo importan si Iñigo re-habilita bafirUrl:
+//   - F33 dedup por symbol vs master por strategyId (divergence semántica)
+//   - F34 copySell liquidaría ENTIRE coinBalance del wallet cliente (user funds)
+//   - F35 verifyClientBalance silent skip → master/client divergence
+//   - F36 sin throttle entre orders → Binance 10/sec ban por IP
+//
+// F34 ya tiene fix defensivo aplicado (qty tracking + safety cap).
+//
 "use strict";
 
 const https = require("https");
@@ -123,19 +137,44 @@ class ClientBotManager {
   }
 
   // Verify client has enough balance before copying trade
+  // F35: antes silent-skip en error → master/client divergence acumulada sin
+  // señal. Ahora log warn + contador de errores consecutivos, mark inactive
+  // tras 5 fallos seguidos para parar el drift.
   async verifyClientBalance(clientId, neededUSDC) {
     const c = this.clients[clientId];
     if (!c) return false;
     try {
       const balances = await clientGetBalance(c.apiKey, c.apiSecret);
-      if (!balances) return false;
+      if (!balances) {
+        c.verifyFailCount = (c.verifyFailCount || 0) + 1;
+        console.warn(`[CLIENT] ${c.name} verifyBalance returned null (fail #${c.verifyFailCount})`);
+        if (c.verifyFailCount >= 5) {
+          c.status = "inactive";
+          c.lastError = "5+ verifyBalance fallos consecutivos — desactivado";
+          console.warn(`[CLIENT] ⚠️ ${c.name} desactivado por verifyBalance fallos`);
+        }
+        return false;
+      }
+      c.verifyFailCount = 0; // reset on success
       const usdc = parseFloat(balances.find(b => b.asset === "USDC")?.free || 0);
       c.lastCheck = { ts: Date.now(), usdc };
       return usdc >= neededUSDC * 0.9; // 10% tolerance
     } catch(e) {
+      c.verifyFailCount = (c.verifyFailCount || 0) + 1;
       c.lastError = e.message;
+      console.warn(`[CLIENT] ${c.name} verifyBalance error: ${e.message} (fail #${c.verifyFailCount})`);
+      if (c.verifyFailCount >= 5) {
+        c.status = "inactive";
+        console.warn(`[CLIENT] ⚠️ ${c.name} desactivado por verifyBalance fallos`);
+      }
       return false;
     }
+  }
+
+  // F36 helper: throttle entre orders para no saturar Binance (10 orders/sec
+  // per IP, compartido entre sub-accounts). 110ms = ~9 orders/sec con margen.
+  async _sleepBetweenOrders() {
+    await new Promise(r => setTimeout(r, 110));
   }
 
   // Copy a BUY trade to all active clients
@@ -143,8 +182,16 @@ class ClientBotManager {
     const results = [];
     await this.syncClients();
 
+    let firstOrder = true;
     for (const [clientId, c] of Object.entries(this.clients)) {
       if (c.status !== "active" || !c.apiKey) continue;
+      // F33 drift: portfolio está indexado por symbol pero master puede tener
+      // dos strategies sobre el mismo par (BTC_30m_RSI + BTC_30m_EMA). Con este
+      // dedup, el cliente copia SÓLO el primer strategy que llega → divergence
+      // semántica con master. Decisión pendiente de Iñigo: ¿1 posición/symbol
+      // (conservador, actual) o 1 posición/strategy (mirror exacto)? El sizing
+      // y stops del master se basan en per-strategy, así que mirror sería más
+      // fiel — pero exige refactor del portfolio schema a keyed-by-strategyId.
       if (c.portfolio[symbol]) continue; // already has this position
 
       try {
@@ -158,10 +205,19 @@ class ClientBotManager {
           continue;
         }
 
+        // F36: throttle — sleep antes de orders que no sean la primera
+        if (!firstOrder) await this._sleepBetweenOrders();
+        firstOrder = false;
+
         const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "BUY", clientInvest);
         if (result.success) {
-          c.portfolio[symbol] = { investedUSDC: clientInvest, orderId: result.orderId, ts: new Date().toISOString() };
-          c.log.push({ type: "BUY", symbol, amount: clientInvest, ts: new Date().toISOString(), orderId: result.orderId });
+          // F34: trackear qty recibida en los fills para poder vender EXACTAMENTE
+          // esa cantidad en copySell (no el balance entero del wallet).
+          const filledQty = Array.isArray(result.fills)
+            ? result.fills.reduce((s, f) => s + parseFloat(f.qty || 0), 0)
+            : 0;
+          c.portfolio[symbol] = { investedUSDC: clientInvest, qty: filledQty, orderId: result.orderId, ts: new Date().toISOString() };
+          c.log.push({ type: "BUY", symbol, amount: clientInvest, qty: filledQty, ts: new Date().toISOString(), orderId: result.orderId });
           console.log(`[CLIENT] ✅ ${c.name} BUY ${symbol} $${clientInvest.toFixed(2)}`);
           results.push({ clientId, success: true });
         } else {
@@ -182,12 +238,28 @@ class ClientBotManager {
     const results = [];
     await this.syncClients();
 
+    let firstOrder = true;
     for (const [clientId, c] of Object.entries(this.clients)) {
       if (c.status !== "active" || !c.apiKey) continue;
       if (!c.portfolio[symbol]) continue; // doesn't have this position
 
       try {
-        // Get actual balance of the coin in client's Binance
+        // F36: throttle — sleep antes de orders que no sean la primera
+        if (!firstOrder) await this._sleepBetweenOrders();
+        firstOrder = false;
+        // F34: vender sólo la qty tracked del fill BUY original, NO el balance
+        // entero del wallet del cliente. Evita liquidar holdings manuales.
+        const pos = c.portfolio[symbol];
+        const trackedQty = pos?.qty || 0;
+        if (trackedQty <= 0) {
+          // Si no hay qty tracked (pre-F34 position o data corrupta), borrar sin vender.
+          // NO caemos al coinBalance original → nunca vendemos holdings del cliente.
+          console.warn(`[CLIENT] ${c.name} ${symbol}: sin qty tracked, skip sell (pre-F34)`);
+          delete c.portfolio[symbol];
+          continue;
+        }
+
+        // Safety cap: nunca vender más de lo que el cliente tiene actualmente
         const balances = await clientGetBalance(c.apiKey, c.apiSecret);
         const coinBalance = parseFloat(
           balances?.find(b => b.asset === symbol.replace("USDC","").replace("USDT",""))?.free || 0
@@ -196,12 +268,13 @@ class ClientBotManager {
           delete c.portfolio[symbol];
           continue;
         }
+        const qtyToSell = Math.min(trackedQty, coinBalance);
 
-        const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "SELL", coinBalance);
+        const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "SELL", qtyToSell);
         if (result.success) {
           const invested = c.portfolio[symbol]?.investedUSDC || 0;
           delete c.portfolio[symbol];
-          c.log.push({ type: "SELL", symbol, qty: coinBalance, ts: new Date().toISOString(), orderId: result.orderId });
+          c.log.push({ type: "SELL", symbol, qty: qtyToSell, ts: new Date().toISOString(), orderId: result.orderId });
           console.log(`[CLIENT] ✅ ${c.name} SELL ${symbol}`);
           results.push({ clientId, success: true });
 
