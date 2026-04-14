@@ -59,11 +59,21 @@ class CryptoPanicDefense {
   }
 
   start() {
+    if (this._timer) return; // ya corriendo — no duplicar (F22)
     this._failCount = 0;
     this._backoffUntil = 0;
     this._check();
-    setInterval(() => this._check(), this.checkIntervalMs);
+    this._timer = setInterval(() => this._check(), this.checkIntervalMs);
+    // F22: .unref() para no bloquear process exit (tests, hot-reload limpios)
+    if (this._timer.unref) this._timer.unref();
     console.log("[CryptoPanic] Monitor de noticias iniciado (cada 10 min)");
+  }
+
+  stop() {
+    if (!this._timer) return;
+    clearInterval(this._timer);
+    this._timer = null;
+    console.log("[CryptoPanic] Monitor de noticias detenido");
   }
 
   async _check() {
