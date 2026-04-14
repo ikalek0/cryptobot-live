@@ -230,7 +230,7 @@ setInterval(async()=>{
     if(circuitBreaker?.triggered&&!S.cbNotified){tg.notifyCircuitBreaker(circuitBreaker.drawdown);S.cbNotified=true;}
     if(!circuitBreaker?.triggered)S.cbNotified=false;
     if(drawdownAlert?.triggered)tg.notifyMaxDrawdown(drawdownAlert);
-    if(!circuitBreaker?.triggered) S.cbNotified=false;
+    // F26: línea duplicada eliminada (`if(!circuitBreaker?.triggered) S.cbNotified=false;`)
 
 
     // Real-time F&G — actualizar cada tick
