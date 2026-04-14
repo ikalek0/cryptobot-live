@@ -1,5 +1,27 @@
 // ─── SECURITY MODULE ─────────────────────────────────────────────────────────
 // Todas las medidas de seguridad centralizadas en un módulo
+//
+// ⚠️  ESTADO (abril 2026): DEAD CODE — ningún módulo hace require('./security').
+// server.js reinventa HMAC verification inline (lines 382-392, 418-425) y
+// secret checks inline (lines 475, 482, 494, 504) en vez de usar requireHmac().
+//
+// Endpoints Express NO tienen:
+//   - rate limiting (rateLimiter.limit no aplicado a ninguna ruta)
+//   - security headers (securityHeaders no montado)
+//   - CORS restringido (corsRestricted no montado)
+//   - input validation (validateInput sin uso)
+//   - sanitization (sanitize/sanitizeBody sin uso)
+//
+// Acción pendiente (Iñigo): decidir wire-up a server.js o delete completo.
+// Mientras tanto, los defectos latentes del módulo están reportados pero NO
+// fixes agresivos — sería mover silla de un fuego que no arde.
+//
+// Bugs latentes conocidos (F15-F18, audit bloque 1.3):
+//   - F15 RateLimiter setInterval sin .unref() (keeps process alive)
+//   - F16 corsRestricted endsWith() suffix bypass (evilfoo.com passes foo.com check)
+//   - F17 _getKey() trusts x-forwarded-for sin trust-proxy config
+//   - F18 sanitize() insuficiente para XSS (sólo strip <>, no HTML-escape)
+//
 "use strict";
 
 const crypto = require("crypto");
