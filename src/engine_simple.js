@@ -738,13 +738,24 @@ class SimpleBotEngine {
     return null;
   }
 
-  // FIX-M9: limpia posiciones stuck con status="pending".
+  // FIX-M9 + C4: limpia posiciones stuck con status="pending".
   // Si el callback _onBuy crashea DESPUÉS de la mutación atómica del portfolio
   // (FIX-A: reservación sync antes del callback async), la posición queda en
   // "pending" para siempre: cuenta en el cap check pero stop/target nunca se
   // recomputan con applyRealBuyFill. Este método rollback la reserva tras 5min.
   // Se ejecuta al inicio de cada evaluate() (cada tick).
-  _cleanupStalePending(){
+  //
+  // C4 pre-cleanup verification: si tenemos binanceReadOnlyRequest inyectado
+  // (server.js lo setea en this._binanceReadOnlyRequest tras la construcción),
+  // ANTES de hacer rollback ciego, preguntamos a Binance si hay fills reales
+  // posteriores a pos.openTs. Si los hay, reconciliar vía applyRealBuyFill
+  // (el asset está en Binance, solo el callback local se perdió). Si la
+  // verificación falla por red/timeout, MANTENER el pending y reintentar en
+  // el próximo tick — mejor mantener que borrar un asset real.
+  //
+  // Sin deps inyectadas (tests, paper-live sin binance): fallback al comportamiento
+  // original de rollback inmediato.
+  async _cleanupStalePending(){
     const now = Date.now();
     const STALE_MS = 5 * 60 * 1000;
     const stale = [];
@@ -753,8 +764,45 @@ class SimpleBotEngine {
         stale.push(id);
       }
     }
+    const hasBinance = typeof this._binanceReadOnlyRequest === "function";
     for(const id of stale){
       const pos = this.portfolio[id];
+      if(!pos) continue; // mutación concurrente (improbable)
+
+      if (hasBinance) {
+        // C4: verificar con Binance si hay fills reales antes de rollback
+        let trades;
+        try {
+          trades = await this._binanceReadOnlyRequest("GET", "myTrades", {
+            symbol: pos.pair,
+            startTime: Math.max(0, (pos.openTs || 0) - 60*1000),
+            limit: 20,
+          });
+        } catch(e) {
+          // Red/timeout: NO rollback. Mantener pending y reintentar al próximo tick.
+          console.error(`[SIMPLE][STALE-CHECK] ${id} verificación Binance falló (${e.message}) — mantener pending, reintentar próximo tick`);
+          continue;
+        }
+        if (Array.isArray(trades) && trades.length > 0) {
+          // Filtrar solo los buys de ESTA posición (posteriores a openTs-60s).
+          // Binance devuelve compras y ventas en myTrades; filtramos isBuyer=true.
+          const relevant = trades.filter(t => t.isBuyer === true && (t.time || 0) >= ((pos.openTs || 0) - 60*1000));
+          const totalQty  = relevant.reduce((s,t) => s + parseFloat(t.qty||0), 0);
+          const totalCost = relevant.reduce((s,t) => s + parseFloat(t.quoteQty||0), 0);
+          if (totalQty > 0 && totalCost > 0) {
+            console.error(`[SIMPLE][STALE-FILL] ${id} fills reales detectados (qty=${totalQty.toFixed(6)} cost=$${totalCost.toFixed(2)}) — reconciliando en vez de borrar`);
+            try {
+              this.applyRealBuyFill(id, { realSpent: totalCost, realQty: totalQty });
+            } catch(e) {
+              console.error(`[SIMPLE][STALE-FILL] ${id} applyRealBuyFill falló: ${e.message}`);
+            }
+            continue; // no rollback, reconciliado
+          }
+        }
+        // Binance confirmó sin fills → rollback seguro
+      }
+
+      // Rollback seguro: sin Binance (no podemos verificar) o Binance confirmó sin fills
       console.warn(`[SIMPLE][CLEANUP] ${id} pending > 5min (stuck) — rollback reservation $${(pos.invest||0).toFixed(2)} → capa${pos.capa}`);
       if(pos.capa === 1) this.capa1Cash += (pos.invest || 0);
       else               this.capa2Cash += (pos.invest || 0);
@@ -762,8 +810,8 @@ class SimpleBotEngine {
     }
   }
 
-  evaluate(){
-    this._cleanupStalePending(); // FIX-M9: rollback pending stuck antes de evaluar
+  async evaluate(){
+    await this._cleanupStalePending(); // FIX-M9 + C4: rollback/reconcile pending stuck
     this.tick++;
     if(this.tick%30===0) this.equity.push({v:this.totalValue(),t:Date.now()});
     // Diagnostic: cada 60 ticks (~10min) mostrar estado de velas

@@ -117,6 +117,14 @@ try {
 // applyRealBuyFill. Análogo para _onSell / applyRealSellFill.
 // FIX-M1: en paper-live (LIVE_MODE=false) no hay fill real, así que marcamos
 // la posición como filled inmediatamente para que no quede stuck en pending.
+// ── C4: inyectar binanceReadOnlyRequest en el simpleBot para que
+// _cleanupStalePending pueda verificar con Binance antes de hacer rollback.
+// Sin esto (tests, o LIVE_MODE=false sin keys), _cleanupStalePending cae al
+// comportamiento original de rollback inmediato.
+if (typeof binanceReadOnlyRequest === "function") {
+  S.simpleBot._binanceReadOnlyRequest = binanceReadOnlyRequest;
+}
+
 S.simpleBot._onBuy = (pair, invest, ctx) => {
   // ── C1 defense in depth: rollback si pausa detectada aquí ──────────────
   // _onCandleClose ya aplica el pause gate antes de mutar portfolio (primera

@@ -245,7 +245,10 @@ setInterval(async()=>{
     //   - placeLiveBuy ve el portfolio ya mutado con status="pending" (ctx.strategyId)
     //   - applyRealBuyFill / applyRealSellFill pueden reconciliar contra la reserva
     if(S.simpleBot && !S.tgControls?.isPaused() && !S.bot._pausedByTelegram) {
-      S.simpleBot.evaluate();
+      // C4: evaluate() es ahora async (cleanupStalePending puede hacer
+      // GET myTrades antes del rollback). El try/catch del tick completo
+      // captura excepciones para que no maten el loop.
+      await S.simpleBot.evaluate();
       // Save simple state every 6 ticks
       if(ticks%6===0) {
         S.simpleBot.saveState && saveSimpleState(S.simpleBot.saveState()).catch(()=>{});

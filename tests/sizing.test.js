@@ -443,7 +443,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
     assert.ok(delta < 0, "sanity: this scenario requires negative delta");
   });
 
-  it("_onSell callback receives capa in ctx BEFORE portfolio delete", () => {
+  it("_onSell callback receives capa in ctx BEFORE portfolio delete", async () => {
     const bot = new SimpleBotEngine({});
     // Posición Capa2 que va a cerrar por TARGET
     bot.portfolio["BNB_1d_T200"] = {
@@ -460,7 +460,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
       captured = { pair, qty, ctx, stillInPortfolio: !!bot.portfolio["BNB_1d_T200"] };
     };
 
-    bot.evaluate();
+    await bot.evaluate(); // C4: evaluate es async
 
     assert.ok(captured, "_onSell must fire on SELL trigger");
     assert.equal(captured.pair, "BNBUSDC");
@@ -473,7 +473,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
       "Portfolio MUST be deleted before callback fires (contract: callback is post-mutation)");
   });
 
-  it("roundtrip: SELL virtual credit + applyRealSellFill = real final balance", () => {
+  it("roundtrip: SELL virtual credit + applyRealSellFill = real final balance", async () => {
     // Simula el flujo completo: evaluate() acredita expectedNet a capa,
     // luego placeLiveSell→applyRealSellFill ajusta por slippage real.
     const bot = new SimpleBotEngine({});
@@ -488,7 +488,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
 
     let sellCtx = null;
     bot._onSell = (_p, _q, ctx) => { sellCtx = ctx; };
-    bot.evaluate(); // trigger TARGET → credits expectedNet
+    await bot.evaluate(); // C4: evaluate es async — trigger TARGET → credits expectedNet
 
     const capa2AfterVirtual = bot.capa2Cash;
     // Virtual should equal pre + (qty * price * (1-FEE))
@@ -776,7 +776,7 @@ describe("M8: placeLiveBuy rejects legacy calls without ctx.strategyId", () => {
 
 // ── M9: _cleanupStalePending rolls back stuck pending positions ─────────────
 describe("M9: _cleanupStalePending rolls back pending positions after 5min", () => {
-  it("rolls back pending positions older than 5 min", () => {
+  it("rolls back pending positions older than 5 min", async () => {
     const bot = new SimpleBotEngine({});
     const capa1Before = bot.capa1Cash; // CAPA1_CAP
     const oldTs = Date.now() - 6 * 60 * 1000; // 6 min atrás
@@ -787,14 +787,14 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     };
     bot.capa1Cash -= 20*K; // post-reserve (FIX-A contract)
 
-    bot._cleanupStalePending();
+    await bot._cleanupStalePending(); // C4: async
 
     assert.ok(!bot.portfolio["STALE"], "Stale pending must be removed");
     assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
       `capa1Cash must be restored: expected ${capa1Before}, got ${bot.capa1Cash}`);
   });
 
-  it("rolls back to correct capa (capa2 scenario)", () => {
+  it("rolls back to correct capa (capa2 scenario)", async () => {
     const bot = new SimpleBotEngine({});
     const capa2Before = bot.capa2Cash;
     const oldTs = Date.now() - 10 * 60 * 1000;
@@ -805,14 +805,14 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     };
     bot.capa2Cash -= 18*K;
 
-    bot._cleanupStalePending();
+    await bot._cleanupStalePending();
 
     assert.ok(!bot.portfolio["STALE2"]);
     assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9, "capa2 restored");
     assert.equal(bot.capa1Cash, CAPA1_CAP, "capa1 untouched");
   });
 
-  it("preserves pending positions younger than 5 min", () => {
+  it("preserves pending positions younger than 5 min", async () => {
     const bot = new SimpleBotEngine({});
     const recent = Date.now() - 60 * 1000; // 1 min atrás
     bot.portfolio["FRESH"] = {
@@ -822,13 +822,13 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     };
     const capa1AtMoment = bot.capa1Cash;
 
-    bot._cleanupStalePending();
+    await bot._cleanupStalePending();
 
     assert.ok(bot.portfolio["FRESH"], "Fresh pending must be preserved");
     assert.equal(bot.capa1Cash, capa1AtMoment, "capa1Cash unchanged");
   });
 
-  it("doesn't touch filled positions regardless of age", () => {
+  it("doesn't touch filled positions regardless of age", async () => {
     const bot = new SimpleBotEngine({});
     const capa1Before = bot.capa1Cash;
     bot.portfolio["OLD_FILLED"] = {
@@ -838,13 +838,13 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
       status: "filled"
     };
 
-    bot._cleanupStalePending();
+    await bot._cleanupStalePending();
 
     assert.ok(bot.portfolio["OLD_FILLED"], "Filled positions immune to cleanup");
     assert.equal(bot.capa1Cash, capa1Before);
   });
 
-  it("evaluate() calls _cleanupStalePending before processing", () => {
+  it("evaluate() calls _cleanupStalePending before processing", async () => {
     const bot = new SimpleBotEngine({});
     const oldTs = Date.now() - 6 * 60 * 1000;
     bot.portfolio["STALE"] = {
@@ -855,14 +855,14 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     const capa1AfterReserve = bot.capa1Cash - 20*K;
     bot.capa1Cash = capa1AfterReserve;
 
-    bot.evaluate();
+    await bot.evaluate(); // C4: evaluate es async
 
     assert.ok(!bot.portfolio["STALE"], "evaluate() must invoke cleanup → STALE gone");
     assert.ok(Math.abs(bot.capa1Cash - (capa1AfterReserve + 20*K)) < 1e-9,
       `After cleanup: capa1Cash must be restored to ${capa1AfterReserve + 20*K}, got ${bot.capa1Cash}`);
   });
 
-  it("handles multiple stale positions in one pass", () => {
+  it("handles multiple stale positions in one pass", async () => {
     const bot = new SimpleBotEngine({});
     const capa1Before = bot.capa1Cash;
     const capa2Before = bot.capa2Cash;
@@ -873,11 +873,117 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     bot.capa1Cash -= 22*K;
     bot.capa2Cash -= 15*K;
 
-    bot._cleanupStalePending();
+    await bot._cleanupStalePending();
 
     assert.equal(Object.keys(bot.portfolio).length, 0, "All stale positions must be cleaned");
     assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9, "capa1 fully restored");
     assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9, "capa2 fully restored");
+  });
+});
+
+// ── C4: _cleanupStalePending pre-verification con Binance ──────────────────
+// Antes del rollback, el engine consulta myTrades para ver si el BUY se
+// ejecutó en Binance pese a que el callback local murió. Si hay fills reales
+// → reconciliar vía applyRealBuyFill (el asset existe en Binance, solo el
+// callback se perdió). Si no → rollback seguro. Si Binance error → mantener
+// pending y reintentar en próximo tick (mejor mantener que borrar un asset real).
+describe("C4: _cleanupStalePending pre-verification con Binance", () => {
+  it("stale pending con fills reales → reconcilia vía applyRealBuyFill (no rollback)", async () => {
+    const bot = new SimpleBotEngine({});
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["BNB_1h_RSI"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 99.2, target: 101.6,
+      openTs: oldTs, status: "pending",
+    };
+    const capa1BeforeCleanup = bot.capa1Cash;
+
+    // Mock: Binance devuelve un fill real que matchea la compra
+    bot._binanceReadOnlyRequest = async (method, path, params) => {
+      assert.equal(method, "GET");
+      assert.equal(path, "myTrades");
+      assert.equal(params.symbol, "BNBUSDC");
+      return [
+        { isBuyer: true, qty: "0.198", quoteQty: "19.80", time: oldTs + 1000 },
+      ];
+    };
+
+    await bot._cleanupStalePending();
+
+    // La posición NO se borra — se reconcilia a filled con los datos reales
+    assert.ok(bot.portfolio["BNB_1h_RSI"], "pos debe persistir tras reconcile");
+    assert.equal(bot.portfolio["BNB_1h_RSI"].status, "filled",
+      "applyRealBuyFill debe marcar filled");
+    assert.ok(Math.abs(bot.portfolio["BNB_1h_RSI"].qty - 0.198) < 1e-9,
+      "qty debe venir del fill real");
+    // capa1Cash NO debe haberse restaurado (no hubo rollback)
+    assert.ok(Math.abs(bot.capa1Cash - capa1BeforeCleanup) < 1, // drift tolerance por slippage
+      `capa1 no debe restaurarse por rollback, antes=${capa1BeforeCleanup}, después=${bot.capa1Cash}`);
+  });
+
+  it("stale pending sin fills → rollback seguro del cash", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["STALE_NOFILL"] = {
+      pair: "SOLUSDC", capa: 1, invest: 15*K, qty: 0.08,
+      entryPrice: 180, stop: 178.5, target: 183,
+      openTs: oldTs, status: "pending",
+    };
+    bot.capa1Cash -= 15*K;
+
+    // Mock: Binance devuelve array vacío — no hubo compra real
+    bot._binanceReadOnlyRequest = async () => [];
+
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["STALE_NOFILL"], "pending sin fills debe borrarse");
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `capa1 debe restaurarse por rollback, expected ${capa1Before}, got ${bot.capa1Cash}`);
+  });
+
+  it("stale pending con Binance error → mantiene pending (no borra, no reconcilia)", async () => {
+    const bot = new SimpleBotEngine({});
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["BNB_1h_RSI"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 99.2, target: 101.6,
+      openTs: oldTs, status: "pending",
+    };
+    bot.capa1Cash -= 20*K;
+    const capa1AfterReserve = bot.capa1Cash;
+
+    // Mock: Binance tira error
+    bot._binanceReadOnlyRequest = async () => { throw new Error("timeout"); };
+
+    await bot._cleanupStalePending();
+
+    assert.ok(bot.portfolio["BNB_1h_RSI"],
+      "Binance error: pending debe mantenerse (no borrar asset potencialmente real)");
+    assert.equal(bot.portfolio["BNB_1h_RSI"].status, "pending",
+      "status sigue pending (no reconcilió)");
+    assert.equal(bot.capa1Cash, capa1AfterReserve,
+      "capa1Cash NO debe tocarse con Binance error");
+  });
+
+  it("stale pending sin _binanceReadOnlyRequest → fallback a rollback original (backwards compat)", async () => {
+    // Sin la dep inyectada, comportamiento del bloque M9 histórico: rollback inmediato.
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    bot.portfolio["LEGACY_STALE"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
+      entryPrice: 100, stop: 99, target: 101,
+      openTs: oldTs, status: "pending",
+    };
+    bot.capa1Cash -= 20*K;
+
+    // Sin this._binanceReadOnlyRequest
+    assert.equal(typeof bot._binanceReadOnlyRequest, "undefined");
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["LEGACY_STALE"], "fallback: rollback inmediato");
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9, "capa1 restaurada");
   });
 });
 
