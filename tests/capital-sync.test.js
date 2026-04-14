@@ -320,4 +320,132 @@ describe("T0 — Capital dinámico", () => {
       assert.ok(eng.portfolio["XRP_4h_EMA"]);
     });
   });
+
+  // ── M14: returnPct y drawdownPct contra baseline honesto ─────────────
+  // El bug previo reportaba returnPct=-86% con capital real $14 vs declarado
+  // $100 desde el primer tick, disparando falsas alertas de drawdown.
+  // El fix: baseline = _capitalEfectivo, drawdown desde peak histórico.
+  describe("M14: returnPct y drawdownPct contra baseline honesto", () => {
+    it("tv == baseline → returnPct == 0 (no hay ganancia ni pérdida)", async () => {
+      const eng = new SimpleBotEngine({});
+      // Sync contra Binance con real=$50 → efectivo=$50 → baseline=$50
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(50),
+      });
+      // capa1=$30 + capa2=$20 = tv $50 = baseline
+      assert.ok(Math.abs(eng.totalValue() - 50) < 0.01, `tv=${eng.totalValue()}`);
+      const st = eng.getState();
+      assert.equal(st.returnPct, 0,
+        `baseline=$50, tv=$50 → returnPct debe ser 0, got ${st.returnPct}`);
+      assert.equal(st.baseline, 50);
+    });
+
+    it("tv == baseline * 1.1 → returnPct == 10.0", async () => {
+      const eng = new SimpleBotEngine({});
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(50),
+      });
+      // Simular ganancia: subir cash $5 (10%)
+      eng.capa1Cash += 5;
+      const st = eng.getState();
+      assert.equal(st.returnPct, 10.0,
+        `baseline=50, tv=55 → returnPct debe ser 10.0, got ${st.returnPct}`);
+    });
+
+    it("con capital real $14 < declarado $100 → returnPct NO reporta -86%", async () => {
+      // Regression test del bug original: este escenario reportaba -85.84%.
+      const eng = new SimpleBotEngine({});
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(14.16),
+      });
+      // baseline=14.16, tv=14.16 → returnPct=0, no -86%
+      const st = eng.getState();
+      assert.equal(st.returnPct, 0,
+        `regression M14: baseline=14.16 tv=14.16 debe dar returnPct=0, got ${st.returnPct}`);
+      assert.equal(st.drawdownPct, 0,
+        `regression M14: peak=tv=14.16 debe dar drawdownPct=0, got ${st.drawdownPct}`);
+    });
+
+    it("sin sync aún (baseline fallback): returnPct usa INITIAL_CAPITAL", () => {
+      // Pre-sync, _capitalEfectivo queda con el default del constructor.
+      // El fallback debe ser INITIAL_CAPITAL para que el baseline exista.
+      const eng = new SimpleBotEngine({});
+      const st = eng.getState();
+      // capa1=60 + capa2=40 = tv=100, baseline=100 → returnPct=0
+      assert.equal(st.returnPct, 0);
+      assert.equal(st.baseline, 100);
+    });
+
+    it("peakTv se actualiza cuando tv sube", async () => {
+      const eng = new SimpleBotEngine({});
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(100),
+      });
+      const st1 = eng.getState();
+      assert.equal(st1.peakTv, 100);
+
+      // Sube tv a 120 → peak se actualiza
+      eng.capa1Cash += 20;
+      const st2 = eng.getState();
+      assert.equal(st2.peakTv, 120);
+
+      // Baja tv a 110 → peak se mantiene en 120
+      eng.capa1Cash -= 10;
+      const st3 = eng.getState();
+      assert.equal(st3.peakTv, 120, "peak histórico no debe bajar");
+    });
+
+    it("drawdownPct refleja distancia desde peak, no desde baseline", async () => {
+      const eng = new SimpleBotEngine({});
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(100),
+      });
+      // Subir a 120 (peak)
+      eng.capa1Cash += 20;
+      eng.getState(); // latch peak
+      // Bajar a 108 → drawdown desde peak 120 = (120-108)/120 = 10%
+      eng.capa1Cash -= 12;
+      const st = eng.getState();
+      assert.ok(Math.abs(st.drawdownPct - 10) < 0.01,
+        `drawdownPct desde peak=120 a tv=108 debe ser 10%, got ${st.drawdownPct}`);
+      // returnPct sigue siendo 8% (sobre baseline 100)
+      assert.equal(st.returnPct, 8.0);
+    });
+
+    it("peakTv persiste via saveState → round-trip", async () => {
+      const a = new SimpleBotEngine({});
+      a.capa1Cash = 80;
+      a.capa2Cash = 40; // tv=120
+      a.getState(); // latch peak
+      assert.equal(a._peakTv, 120);
+      const saved = a.saveState();
+      assert.equal(saved.peakTv, 120,
+        "saveState debe persistir peakTv");
+
+      const b = new SimpleBotEngine(saved);
+      assert.equal(b._peakTv, 120,
+        "constructor debe restaurar peakTv del saved state");
+    });
+
+    it("baseline se recalcula cuando _capitalEfectivo cambia (sync añade fondos)", async () => {
+      const eng = new SimpleBotEngine({});
+      // Sync inicial con $50
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(50),
+      });
+      const st1 = eng.getState();
+      assert.equal(st1.baseline, 50);
+
+      // Usuario añade $30 a Binance → próximo sync ve $80 → baseline sube
+      await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(80),
+      });
+      const st2 = eng.getState();
+      assert.equal(st2.baseline, 80,
+        "baseline debe recalcularse tras sync con nuevo capital real");
+      // tv también sube (efectivo=80, cash=80, portfolio vacío → tv=80)
+      assert.equal(st2.returnPct, 0,
+        "tras sync nuevo: tv=baseline=80 → returnPct=0");
+    });
+  });
 });

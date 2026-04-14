@@ -212,6 +212,14 @@ class SimpleBotEngine {
     // saveState (H6 pattern) — una pausa de 60s post-stream-dead no se pierde
     // si el proceso reinicia dentro de la ventana.
     this._streamDeadPausedUntil = saved.streamDeadPausedUntil || 0;
+    // ── M14: peak totalValue para drawdown clásico ────────────────────────
+    // Antes: drawdownPct y returnPct usaban INITIAL_CAPITAL/S.CAPITAL_USDT
+    // como denominador. Con capital real ($14) < declarado ($100), reportaba
+    // drawdown=86% desde el primer tick aunque no hubiera pérdidas reales.
+    // Fix: drawdownPct contra peak histórico, returnPct contra _capitalEfectivo
+    // (fallback INITIAL_CAPITAL si aún no hubo sync). null como sentinela
+    // hasta el primer tick de getState() que llama totalValue().
+    this._peakTv = saved.peakTv ?? null;
     // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
     // Iñigo confirma que la opción está activa en su cuenta → default true.
     // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
@@ -1030,6 +1038,29 @@ class SimpleBotEngine {
     for(const cfg of STRATEGIES){
       kellyByStrat[cfg.id]=calcKelly(this._stratTrades[cfg.id]||[]);
     }
+    // ── M14: returnPct y drawdownPct contra baseline honesto ─────────────
+    // Baseline = capital efectivo (lo que el bot puede usar realmente,
+    // post-sync contra Binance). Fallback a INITIAL_CAPITAL si aún no hubo
+    // primer sync. Antes: denominador siempre INITIAL_CAPITAL → con capital
+    // real $14 vs declarado $100, el bot reportaba returnPct=-86% y
+    // drawdownPct=86% desde el primer tick sin haber perdido nada.
+    //
+    // El baseline SE ACTUALIZA con cada syncCapitalFromBinance. Si el
+    // usuario añade fondos a Binance, _capitalEfectivo sube → returnPct se
+    // recalcula sobre la nueva base. Es intencional: el bot reporta "cuánto
+    // he ganado/perdido sobre lo que actualmente tengo disponible".
+    const baseline = this._capitalEfectivo || INITIAL_CAPITAL;
+    // Track peak histórico para drawdown clásico (definición: distancia
+    // desde el máximo alcanzado, no desde el capital de partida).
+    if (this._peakTv === null || tv > this._peakTv) {
+      this._peakTv = tv;
+    }
+    const returnPct = baseline > 0
+      ? +((tv - baseline) / baseline * 100).toFixed(2)
+      : 0;
+    const drawdownPct = (this._peakTv && this._peakTv > 0)
+      ? +((this._peakTv - tv) / this._peakTv * 100).toFixed(3)
+      : 0;
     return{
       totalValue:tv,
       capa1Cash:this.capa1Cash,
@@ -1037,7 +1068,10 @@ class SimpleBotEngine {
       portfolio:this.portfolio,
       tick:this.tick,
       winRate:this.globalWR(),
-      returnPct:+((tv-INITIAL_CAPITAL)/INITIAL_CAPITAL*100).toFixed(2),
+      returnPct,
+      drawdownPct,
+      peakTv: this._peakTv,
+      baseline: +baseline.toFixed(4),
       mode:"SIMPLE_v3_7strategies",
       // ── T0: capital dinámico ─────────────────────────────────────────
       capitalDeclarado: this._capitalDeclarado,
@@ -1098,6 +1132,11 @@ class SimpleBotEngine {
       lastCapitalSyncOk:      this._lastCapitalSyncOk !== false,
       // ── C2: persistir pausa por stream-dead ──────────────────────────
       streamDeadPausedUntil:  this._streamDeadPausedUntil  || 0,
+      // ── M14: peak totalValue para drawdown clásico ────────────────────
+      // Sin persistir, un restart resetea el peak y el drawdownPct vuelve a 0
+      // aunque el bot esté realmente en drawdown. Con persistencia, el peak
+      // sobrevive PM2 restarts y las alertas de drawdown siguen siendo válidas.
+      peakTv:                 this._peakTv,
     };
   }
 }

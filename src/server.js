@@ -423,7 +423,9 @@ app.get("/api/simpleBot/state", (_,res) => {
   const totalLedger = capa1Cash + capa2Cash + committed;
   const cap        = S.CAPITAL_USDT;
   const tv         = s.totalValue || 0;
-  const drawdownPct = tv < cap ? +(((cap - tv) / cap) * 100).toFixed(3) : 0;
+  // M14: drawdownPct viene del engine (contra peak histórico, no contra
+  // cap declarado). Antes este endpoint recalculaba drawdown = (cap-tv)/cap
+  // lo que reportaba 86% con capital real $14 sin haber perdido nada.
   res.json({
     instance:     LIVE_MODE ? "LIVE" : "PAPER-LIVE",
     mode:         s.mode,
@@ -435,7 +437,9 @@ app.get("/api/simpleBot/state", (_,res) => {
     committed:    +committed.toFixed(4),
     totalLedger:  +totalLedger.toFixed(4),
     capViolation: totalLedger > cap * 1.005,
-    drawdownPct:  drawdownPct,
+    drawdownPct:  s.drawdownPct,
+    peakTv:       s.peakTv,
+    baseline:     s.baseline,
     openPositions: Object.keys(sb.portfolio||{}).length,
     portfolio:    sb.portfolio || {},
     trades:       s.trades,
