@@ -864,12 +864,70 @@ class SimpleBotEngine {
   // ── FIX-D reconciliation: real SELL fill → ajusta capa cash por slippage ──
   // ctx trae capa (capturado antes del delete) + realGross (USDC recibido real).
   // La SELL virtual ya añadió expectedNet a la capa; este método añade el delta.
-  applyRealSellFill(strategyId, {realGross, capa, expectedNet}){
-    const realNet = (realGross || 0) * (1 - FEE);
+  applyRealSellFill(strategyId, {realGross, capa, expectedNet, feeEfectivo}){
+    // T0-FEE: si el caller pasa feeEfectivo (derivado de ctx._feePredicted
+    // del sellCtx), usarlo. Si no se pasa (compat/legacy), caer al FEE
+    // estático 0.001. En modo BNB (feeEfectivo=0) realNet = realGross porque
+    // Binance paga la fee en BNB separado y el USDC recibido es íntegro.
+    const fee = (typeof feeEfectivo === "number") ? feeEfectivo : FEE;
+    const realNet = (realGross || 0) * (1 - fee);
     const delta = realNet - (expectedNet || 0);
     if(capa===1) this.capa1Cash += delta;
     else         this.capa2Cash += delta;
-    console.log(`[SIMPLE][RECONCILE-SELL] ${strategyId} expected=$${(expectedNet||0).toFixed(2)} real=$${realNet.toFixed(2)} delta=${delta>=0?"+":""}${delta.toFixed(4)} capa${capa}`);
+    console.log(`[SIMPLE][RECONCILE-SELL] ${strategyId} expected=$${(expectedNet||0).toFixed(2)} real=$${realNet.toFixed(2)} delta=${delta>=0?"+":""}${delta.toFixed(4)} capa${capa} fee_efectivo=${fee.toFixed(4)}`);
+  }
+
+  // ── T0-FEE: verificación post-fill de la fee pagada ────────────────────
+  // Se llama desde placeLiveBuy/placeLiveSell en server.js DESPUÉS del
+  // post-fill syncCapitalFromBinance (que ya ha refrescado this._bnbBalance).
+  // Compara el delta real de BNB contra la predicción guardada en
+  // pos._feePredicted (BUY) o sellCtx._feePredicted (SELL).
+  //
+  // Regla de oro: esta función NO mueve dinero, sólo lee el balance real
+  // y loguea/alerta. La única fuente de verdad para BNB es Binance vía
+  // syncCapitalFromBinance. Así garantizamos que el BNB jamás se resta
+  // dos veces.
+  //
+  // Parámetros:
+  //   strategyId: id de la estrategia para logs
+  //   kind:       "BUY" | "SELL"
+  //   predicted:  objeto _feePredicted original con bnbBalancePre + expectedBnbFee + mode
+  //   telegramSend: función opcional para enviar alerta si hay mismatch
+  _checkFeeDiscrepancy(strategyId, kind, predicted, telegramSend) {
+    if (!predicted || typeof predicted !== "object") {
+      console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} sin predicción — skip verificación`);
+      return { ok: true, skipped: true };
+    }
+    const bnbBefore = Number(predicted.bnbBalancePre || 0);
+    const bnbAfter  = Number(this._bnbBalance || 0);
+    const bnbDelta  = bnbBefore - bnbAfter; // positivo si bajó (se consumió BNB)
+
+    if (predicted.mode === "BNB") {
+      const expected = Number(predicted.expectedBnbFee || 0);
+      const tolerance = Math.max(expected * 0.05, 1e-8); // 5% o epsilon mínimo
+      const mismatch  = Math.abs(bnbDelta - expected) > tolerance;
+
+      if (mismatch) {
+        console.error(`[SIMPLE][FEE-DISCREPANCY] ${strategyId} ${kind} esperado=${expected.toFixed(6)} real=${bnbDelta.toFixed(6)} diff=${(bnbDelta-expected).toFixed(6)}`);
+        if (typeof telegramSend === "function") {
+          try {
+            telegramSend(`⚠️ <b>[FEE] Discrepancia BNB</b>\n${strategyId} (${kind})\nEsperado: ${expected.toFixed(6)} BNB\nReal: ${bnbDelta.toFixed(6)} BNB\nDiferencia: ${(bnbDelta-expected).toFixed(6)} BNB`);
+          } catch {}
+        }
+      }
+
+      if (bnbDelta < 1e-5) {
+        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho BNB pero BNB no bajó (${bnbDelta.toFixed(8)}) — Binance usó USDC fallback`);
+      }
+
+      return { ok: !mismatch, mode: "BNB", expected, deltaReal: bnbDelta, mismatch };
+    } else {
+      // Modo USDC predicho — BNB NO debería haber bajado.
+      if (bnbDelta > 1e-5) {
+        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho USDC pero BNB bajó ${bnbDelta.toFixed(6)}`);
+      }
+      return { ok: true, mode: "USDC", deltaReal: bnbDelta, mismatch: false };
+    }
   }
 
   totalValue(){

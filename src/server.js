@@ -409,6 +409,11 @@ app.get("/api/simpleBot/state", (_,res) => {
       pausedUntil: sb._capitalSyncPausedUntil || 0,
       pausedNow:   Date.now() < (sb._capitalSyncPausedUntil || 0),
     },
+    // ── T0-FEE: fee mode + BNB balance ────────────────────────────────
+    bnbFeeEnabled: sb._bnbFeeEnabled === true,
+    bnbBalance:    +(sb._bnbBalance || 0).toFixed(8),
+    bnbLowAlert:   (sb._bnbBalance || 0) < 0.005,
+    lastFeeMode:   sb._lastFeeMode || null,
   });
 });
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
@@ -891,9 +896,26 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
         try { S.simpleBot.applyRealBuyFill(ctx.strategyId, {realSpent, realQty}); }
         catch(e) { console.error(`[LIVE][RECONCILE-BUY] ${ctx.strategyId}:`, e.message); }
       }
-      // ── T0: re-sync capital post-fill (fire-and-forget) ─────────────────
+      // ── T0: re-sync capital post-fill, encadenado a T0-FEE check ────────
+      // Cadena: sync refresca this._bnbBalance → _checkFeeDiscrepancy("BUY")
+      // compara el delta real de BNB contra pos._feePredicted que el engine
+      // adjuntó a la posición en _onCandleClose. Solo log+telegram, no mueve
+      // dinero (la única fuente de verdad para BNB es Binance vía el sync).
       if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
-        S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
+        S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())
+          .then(() => {
+            try {
+              const pos  = S.simpleBot.portfolio?.[ctx.strategyId];
+              const pred = pos?._feePredicted;
+              if (pred && typeof S.simpleBot._checkFeeDiscrepancy === "function") {
+                S.simpleBot._checkFeeDiscrepancy(
+                  ctx.strategyId, "BUY", pred,
+                  (msg) => { try { tg.send && tg.send(msg); } catch {} }
+                );
+              }
+            } catch(e) { console.error(`[LIVE][FEE-CHECK-BUY] ${ctx.strategyId}:`, e.message); }
+          })
+          .catch(()=>{});
       }
     } else {
       // Orden no ejecutada (sin fills) → rollback reserva
@@ -964,16 +986,32 @@ async function placeLiveSell(symbol, quantity, ctx) {
       try {
         const fills = order.fills || [];
         const realGross = fills.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0);
+        // T0-FEE: propagar el FEE_efectivo predicho en _onCandleClose/evaluate
+        // para que la reconciliación use 0% en modo BNB vs 0.1% en modo USDC.
+        const feeEfectivo = ctx?._feePredicted?.FEE_efectivo;
         if (S.simpleBot && ctx?.strategyId && realGross > 0) {
           S.simpleBot.applyRealSellFill(ctx.strategyId, {
             realGross,
             capa: ctx.capa,
             expectedNet: ctx.expectedNet,
+            feeEfectivo,
           });
         }
-        // ── T0: re-sync capital post-fill (fire-and-forget) ──────────────
+        // ── T0: re-sync capital post-fill, encadenado a T0-FEE check ──────
         if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
-          S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
+          S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())
+            .then(() => {
+              try {
+                const pred = ctx?._feePredicted;
+                if (pred && typeof S.simpleBot._checkFeeDiscrepancy === "function") {
+                  S.simpleBot._checkFeeDiscrepancy(
+                    ctx.strategyId, "SELL", pred,
+                    (msg) => { try { tg.send && tg.send(msg); } catch {} }
+                  );
+                }
+              } catch(e) { console.error(`[LIVE][FEE-CHECK-SELL] ${ctx?.strategyId}:`, e.message); }
+            })
+            .catch(()=>{});
         }
       } catch(e) { console.error(`[LIVE][RECONCILE-SELL] ${ctx?.strategyId}:`, e.message); }
     } else {
