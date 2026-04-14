@@ -5,67 +5,43 @@
 const https = require("https");
 
 // ── Fear & Greed Index ────────────────────────────────────────────────────────
-// Fear & Greed con cadena de fuentes:
-// 1. CoinMarketCap (tiempo real) → 2. CNN Business (tiempo real) → 3. alternative.me (fallback)
+// Fuente única: alternative.me (oficial, única que sigue funcionando pública).
+// Histórico: CMC devuelve HTML sin auth, CNN bloquea bots con 418. Eliminadas
+// en FIX-F1 para evitar 11s de timeouts ruidosos por tick.
 function fetchFearGreed() {
   const labelES = v => v<25?"😱 Pánico extremo":v<45?"😟 Miedo":v<55?"😐 Neutral":v<75?"😊 Codicia":"🤑 Codicia extrema";
 
-  const tryCMC = () => new Promise((resolve, reject) => {
-    const req = https.get({
-      hostname:"api.coinmarketcap.com", path:"/data-api/v3/fear-and-greed/latest",
-      headers:{"User-Agent":"Mozilla/5.0","Accept":"application/json"}, timeout:6000,
-    }, res => {
-      let d=""; res.on("data",c=>d+=c);
-      res.on("end",()=>{
-        try {
-          const j=JSON.parse(d);
-          const score=j?.data?.fear_greed_index?.score??j?.data?.score;
-          if(score==null) return reject(new Error("no score"));
-          const publishedAt=j?.data?.fear_greed_index?.update_time
-            ?new Date(j.data.fear_greed_index.update_time*1000).toISOString():new Date().toISOString();
-          resolve({value:Math.round(score),label:labelES(score),publishedAt,source:"CMC"});
-        } catch(e){reject(e);}
-      });
-    });
-    req.on("error",reject); req.on("timeout",()=>{req.destroy();reject(new Error("timeout"));});
-  });
-
-  const tryCNN = () => new Promise((resolve, reject) => {
-    const req = https.get({
-      hostname:"production.dataviz.cnn.io", path:"/index/fearandgreed/graphdata",
-      headers:{"User-Agent":"Mozilla/5.0","Accept":"application/json"}, timeout:6000,
-    }, res => {
-      let d=""; res.on("data",c=>d+=c);
-      res.on("end",()=>{
-        try {
-          const j=JSON.parse(d);
-          const score=j?.fear_and_greed?.score;
-          if(score==null) return reject(new Error("no score"));
-          resolve({value:Math.round(score),label:labelES(score),publishedAt:new Date().toISOString(),source:"CNN"});
-        } catch(e){reject(e);}
-      });
-    });
-    req.on("error",reject); req.on("timeout",()=>{req.destroy();reject(new Error("timeout"));});
-  });
-
-  const tryAltMe = () => new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const req = https.get("https://api.alternative.me/fng/?limit=1", res => {
       let d=""; res.on("data",c=>d+=c);
       res.on("end",()=>{
         try {
-          const j=JSON.parse(d),pt=j.data[0];
-          const publishedAt=pt.timestamp?new Date(parseInt(pt.timestamp)*1000).toISOString():null;
-          resolve({value:parseInt(pt.value),label:labelES(parseInt(pt.value)),publishedAt,source:"alternative.me"});
-        } catch(e){reject(e);}
+          const j = JSON.parse(d);
+          const pt = j.data[0];
+          const value = parseInt(pt.value);
+          const publishedAt = pt.timestamp ? new Date(parseInt(pt.timestamp)*1000).toISOString() : null;
+          resolve({
+            value,
+            label: labelES(value),
+            publishedAt,
+            source: "alternative.me"
+          });
+        } catch(e) {
+          console.warn(`[F&G] alternative.me parse failed: ${e.message} → fallback 50`);
+          resolve({ value: 50, label: "😐 Neutral", publishedAt: null, source: "fallback" });
+        }
       });
     });
-    req.on("error",reject); req.setTimeout(5000,()=>{req.destroy();reject(new Error("timeout"));});
+    req.on("error", e => {
+      console.warn(`[F&G] alternative.me fetch failed: ${e.message} → fallback 50`);
+      resolve({ value: 50, label: "😐 Neutral", publishedAt: null, source: "fallback" });
+    });
+    req.setTimeout(5000, () => {
+      req.destroy();
+      console.warn(`[F&G] alternative.me timeout → fallback 50`);
+      resolve({ value: 50, label: "😐 Neutral", publishedAt: null, source: "fallback" });
+    });
   });
-
-  return tryCMC()
-    .catch(e=>{ console.log(`[F&G] CMC falló: ${e.message} → probando CNN`); return tryCNN(); })
-    .catch(e=>{ console.log(`[F&G] CNN falló: ${e.message} → usando alternative.me`); return tryAltMe(); })
-    .catch(e=>{ console.log(`[F&G] Todos fallaron: ${e.message} → fallback 50`); return {value:50,label:"😐 Neutral",publishedAt:null,source:"fallback"}; });
 }
 
 // ── CryptoPanic news ──────────────────────────────────────────────────────────
@@ -596,30 +572,6 @@ async function fetchLiquidations() {
   } catch { return null; }
 }
 
-// ── Alternative F&G sources (backup chain) ──────────────────────────────────
-async function fetchFGAlternative() {
-  // Try multiple sources in order
-  const sources = [
-    { url:"https://api.alternative.me/fng/?limit=1&format=json", parser: d=>({value:+d.data[0].value, label:d.data[0].value_classification, ts:d.data[0].timestamp}) },
-    { url:"https://fear-and-greed-index.p.rapidapi.com/v1/fgi", parser: d=>({value:d.now.value, label:d.now.valueText, ts:Date.now()/1000}) },
-  ];
-  for(const src of sources) {
-    try {
-      const val = await new Promise((res)=>{
-        const https = require("https");
-        const timer = setTimeout(()=>res(null),4000);
-        https.get(src.url, r=>{
-          let d=""; r.on("data",c=>d+=c);
-          r.on("end",()=>{ clearTimeout(timer); try{ res(src.parser(JSON.parse(d))); }catch{ res(null); } });
-        }).on("error",()=>{ clearTimeout(timer); res(null); });
-      });
-      if(val?.value) return val;
-    } catch {}
-  }
-  return null;
-}
-
-
 // ── BTC Dominance — señal crítica para altcoin trading ──────────────────────
 // Cuando BTC.D sube: altcoins underperform aunque BTC suba
 async function fetchBTCDominance() {
@@ -764,4 +716,4 @@ async function fetchBinanceReserve() {
 
 module.exports={calcRealtimeFearGreed,fetchFearGreed,fetchNewsAlert,fetchAllKlines,runNightlyReplay,
   fetchLongShortRatio,fetchFundingRate,fetchRedditSentiment,
-  fetchOpenInterest,fetchTakerVolume,fgCalibrator,fetchLiquidations,fetchFGAlternative,fetchBTCDominance,fetchCoinbasePremium,fetchExchangeFlow,fetchBinanceReserve};
+  fetchOpenInterest,fetchTakerVolume,fgCalibrator,fetchLiquidations,fetchBTCDominance,fetchCoinbasePremium,fetchExchangeFlow,fetchBinanceReserve};
