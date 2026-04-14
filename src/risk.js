@@ -67,11 +67,15 @@ class TrailingStop {
 
 function calcKellyFraction(winRate, avgWinPct, avgLossPct) {
   // Kelly Criterion: f* = WR/|avgLoss| - (1-WR)/avgWin
-  // Acotado entre 0 y maxPositionSize para seguridad
+  // Acotado entre 0 y maxPositionSize para seguridad.
+  // Defensive: rechaza NaN/Infinity/no-finite y devuelve default conservador.
+  if(!Number.isFinite(winRate)||!Number.isFinite(avgWinPct)||!Number.isFinite(avgLossPct)) return 0.20;
   if(!winRate||!avgWinPct||!avgLossPct||avgLossPct===0) return 0.20; // default conservador
   const wr = Math.min(0.80, Math.max(0.10, winRate));
   const ratio = Math.abs(avgWinPct) / Math.abs(avgLossPct);
+  if(!Number.isFinite(ratio)||ratio<=0) return 0.20;
   const kelly = wr - (1-wr)/ratio;
+  if(!Number.isFinite(kelly)) return 0.20;
   // Half-Kelly para ser conservadores (estrategia estándar en fondos)
   const halfKelly = kelly * 0.5;
   return Math.max(0.05, Math.min(0.40, halfKelly)); // entre 5% y 40%
