@@ -336,6 +336,16 @@ class SimpleBotEngine {
 
   _onCandleClose(cfg, key){
     try {
+    // ── C1: pause gate a nivel de engine ─────────────────────────────────
+    // El comando /pausa antes sólo bloqueaba SELLs (gate antes de evaluate()
+    // en trading/loop.js). Los BUYs iban por updatePrice → _onCandleClose →
+    // _onBuy → placeLiveBuy sin consultar pausa. Vector: usuario pausa en
+    // crisis, bot sigue comprando pero no puede vender. Este gate es la
+    // primera guard de _onCandleClose — antes incluso del capital-sync gate.
+    if (this.paused === true) {
+      console.log(`[SIMPLE][PAUSE] ${cfg.id} bloqueado — bot pausado por usuario`);
+      return;
+    }
     const candles = this._candles[key]||[];
     const last = candles[candles.length-1];
     console.log(`[SIMPLE][CANDLE] ${cfg.pair}/${cfg.tf} cerrada — O:${last?.open?.toFixed(2)} H:${last?.high?.toFixed(2)} L:${last?.low?.toFixed(2)} C:${last?.close?.toFixed(2)} (${candles.length}/${CANDLE_MIN[cfg.tf]} velas)`);

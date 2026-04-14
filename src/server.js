@@ -107,6 +107,25 @@ try {
 // FIX-M1: en paper-live (LIVE_MODE=false) no hay fill real, así que marcamos
 // la posición como filled inmediatamente para que no quede stuck en pending.
 S.simpleBot._onBuy = (pair, invest, ctx) => {
+  // ── C1 defense in depth: rollback si pausa detectada aquí ──────────────
+  // _onCandleClose ya aplica el pause gate antes de mutar portfolio (primera
+  // guard). Este segundo check cubre la ventana teórica entre la mutación
+  // sync del portfolio y el disparo del callback, o el caso en que setPaused
+  // se ejecute concurrentemente. Si estamos pausados, rollback de la reserva
+  // optimista y NO llamar placeLiveBuy.
+  const paused = (S.simpleBot?.paused === true) || !!(S.tgControls && S.tgControls.isPaused && S.tgControls.isPaused());
+  if (paused) {
+    const pos = S.simpleBot?.portfolio?.[ctx?.strategyId];
+    if (pos && pos.status === "pending") {
+      if (pos.capa === 1) S.simpleBot.capa1Cash += pos.invest || 0;
+      else                S.simpleBot.capa2Cash += pos.invest || 0;
+      delete S.simpleBot.portfolio[ctx.strategyId];
+      console.log(`[LIVE][onBuy][PAUSE-ROLLBACK] ${ctx?.strategyId} reserva devuelta ($${(pos.invest||0).toFixed(2)} → capa${pos.capa})`);
+    } else {
+      console.log(`[LIVE][onBuy][PAUSE] ${ctx?.strategyId} bloqueado — bot pausado (sin reserva que rollback)`);
+    }
+    return;
+  }
   if (!LIVE_MODE) {
     const pos = S.simpleBot.portfolio[ctx?.strategyId];
     if (pos && pos.status === "pending") pos.status = "filled";
