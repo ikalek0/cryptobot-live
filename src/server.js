@@ -124,12 +124,17 @@ S.simpleBot._onSell = (pair, qty, ctx) => {
 };
 
 // ── Prefill velas históricas de Binance para simpleBot ──────────────────
+// F32 note: `key:USDC` asume que simpleBot mapea todas las strategies a pares
+// USDC (convención actual post-F1). Si una strategy futura usa otro quote
+// (BUSD, FDUSD, EUR...) debe actualizarse este PAIRS_TF o el prefill se salta
+// silenciosamente.
 async function prefillSimpleBotCandles() {
   // Fetch USDT pairs (more liquid) and store as USDC keys (what engine_simple expects)
+  // F30: duplicate BTCUSDT/30m eliminado — el seen Set ya lo deduplicaba, pero
+  // era copy-paste confuso (BTC_30m_RSI y BTC_30m_EMA comparten la misma vela).
   const PAIRS_TF = [
     {api:"BNBUSDT",  key:"BNBUSDC",  tf:"1h"},
     {api:"SOLUSDT",  key:"SOLUSDC",  tf:"1h"},
-    {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
     {api:"BTCUSDT",  key:"BTCUSDC",  tf:"30m"},
     {api:"XRPUSDT",  key:"XRPUSDC",  tf:"4h"},
     {api:"SOLUSDT",  key:"SOLUSDC",  tf:"4h"},
