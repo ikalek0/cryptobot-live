@@ -22,6 +22,14 @@ const https = require("https");
 const INITIAL_CAPITAL = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
 const FEE = 0.001;
 
+// ── T0-FEE: fees con "Use BNB for fees" activo ────────────────────────────
+// Binance aplica 0.1% sobre USDC por defecto; si el usuario tiene "Use BNB
+// for fees" activado en su cuenta, las fees se cobran del balance BNB con
+// 25% de descuento (0.075% efectivo) y el activo del trade queda íntegro.
+// Si BNB se agota, Binance hace fallback automático a 0.1% sobre el asset.
+const FEE_RATE_USDC = 0.001;  // 0.1% default Binance spot
+const BNB_DISCOUNT  = 0.75;   // 25% descuento con BNB fee mode
+
 // Capital split entre capas
 const CAPA1_PCT = 0.60; // 60% para estrategias corto plazo
 const CAPA2_PCT = 0.40; // 40% para estrategias medio plazo
@@ -189,6 +197,15 @@ class SimpleBotEngine {
     this._lastCapitalSyncOk     = true;
     this._capitalSyncFailCount  = 0;
     this._capitalSyncPausedUntil = 0; // epoch ms; bloquea BUYs hasta este ts
+    // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
+    // Iñigo confirma que la opción está activa en su cuenta → default true.
+    // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
+    // del último trade real. NUNCA se suma _bnbBalance a _capitalReal:
+    // el BNB es combustible para fees, no capital operativo.
+    this._bnbFeeEnabled    = saved.bnbFeeEnabled    ?? true;
+    this._bnbBalance       = saved.bnbBalance       ?? 0;
+    this._bnbLowAlertSent  = saved.bnbLowAlertSent  === true;
+    this._lastFeeMode      = saved.lastFeeMode      ?? null; // "BNB" | "USDC"
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -369,7 +386,18 @@ class SimpleBotEngine {
     const kellyFrac = Math.max(0.05, Math.min(0.5, kelly.kelly || 0.1));
     let invest = sizingBase * kellyFrac * 0.5; // Half-Kelly conservador
     if(invest > sizingBase * 0.30) invest = sizingBase * 0.30; // máximo 30% del sizing base
-    if(invest > availCash) invest = availCash; // no gastar más del cash de la capa
+    // T0-FEE: el clamp de cash debe respetar el fee_efectivo del modo actual.
+    // Si pagamos en BNB (FEE_efectivo=0) el clamp es invest≤availCash (igual que
+    // antes). Si pagamos en USDC (FEE_efectivo=0.001) el cash debitado es
+    // invest*(1+FEE_efectivo), así que debemos rebajar invest a
+    // availCash/(1+FEE_efectivo) para no dejar la capa en negativo.
+    // Nota: la predicción del fee depende de `invest`, y `invest` depende
+    // del fee sólo a través del clamp. Basta con calcular la predicción una
+    // vez con el invest pre-clamp — FEE_efectivo sólo varía por el modo
+    // (BNB vs USDC), que es independiente del tamaño del trade.
+    const feePredBuy = this._computeFeePrediction(invest);
+    const feeMult    = 1 + feePredBuy.FEE_efectivo;
+    if (invest * feeMult > availCash) invest = availCash / feeMult;
 
     // ── FIX-A + T0: Global committed cap check ATÓMICO ────────────────────
     // committed se computa aquí, y portfolio se muta más abajo SÍNCRONAMENTE
@@ -395,17 +423,32 @@ class SimpleBotEngine {
     }
     const price = this.prices[cfg.pair];
     if(!price) return;
-    const qty = invest*(1-FEE)/price;
+    // T0-FEE: log del fee predicho (mode BNB vs USDC) y recálculo final.
+    // Si el clamp de cash recortó `invest`, recalculamos la predicción
+    // con el invest definitivo para que bnbAmount esperado sea exacto.
+    const feePred = this._computeFeePrediction(invest);
+    this._lastFeeMode = feePred.mode;
+    console.log(`[SIMPLE][FEE] ${cfg.id} tradeValue=$${invest.toFixed(2)} mode=${feePred.mode} expectedFee=${feePred.feePaidInBnb ? feePred.expectedBnbFee.toFixed(6)+" BNB" : "$"+feePred.feeUsdcEquivalent.toFixed(4)}`);
+    // qty = invest/price (pura): en modo BNB la fee se cobra en BNB separate,
+    // el activo llega íntegro; en modo USDC la fee se cobra en el debit de
+    // cash más abajo (capa1Cash -= invest*(1+FEE_efectivo)) vía applyRealBuyFill
+    // se reconciliará con la realidad contra el fill exacto.
+    const qty = invest/price;
 
     // ── FIX-A atomicidad: mutar portfolio SYNC antes de cualquier _onBuy ──
     // No insertar await/callback entre este bloque y el fin de _onCandleClose.
-    if(cfg.capa===1) this.capa1Cash -= invest;
-    else             this.capa2Cash -= invest;
+    // T0-FEE: el debit de cash incluye el fee_efectivo (0 en modo BNB, 0.001
+    // en modo USDC). El cap invariant (committed+invest ≤ cap*1.005) sigue
+    // usando `invest` nominal sin fee, así que no hay doble conteo.
+    const cashDebit = invest * (1 + feePred.FEE_efectivo);
+    if(cfg.capa===1) this.capa1Cash -= cashDebit;
+    else             this.capa2Cash -= cashDebit;
     this.portfolio[cfg.id]={
       pair:cfg.pair,capa:cfg.capa,type:cfg.type,tf:cfg.tf,
       entryPrice:price,qty,stop:price*(1-cfg.stop),target:price*(1+cfg.target),
       openTs:Date.now(),invest,
       status:"pending", // se convierte en "filled" cuando applyRealFill reconcilia (FASE 3)
+      _feePredicted: feePred, // T0-FEE: para _checkFeeDiscrepancy post-fill
     };
     this.log.push({type:"BUY",symbol:cfg.pair,strategy:cfg.id,price,invest,ts:Date.now()});
     console.log(`[SIMPLE][BUY] ${cfg.pair} @ $${price.toFixed(4)} $${invest.toFixed(0)} [Capa${cfg.capa}] ${cfg.id}`);
@@ -528,6 +571,47 @@ class SimpleBotEngine {
     }
   }
 
+  // ── T0-FEE: predicción pura de fee antes de ejecutar un trade ─────────
+  // Devuelve cómo se PAGARÁ la fee asumiendo el estado actual del bot
+  // (_bnbFeeEnabled + _bnbBalance + precio cacheado de BNB). No muta nada.
+  // Se llama antes del cálculo virtual de qty/cash en BUY y SELL.
+  //
+  // Modos posibles:
+  //  - "BNB":   hay BNB suficiente y la opción está activa → FEE_efectivo=0
+  //             (el fee se cobra en BNB con 25% descuento, invisible para USDC)
+  //  - "USDC":  opción desactivada, o BNB insuficiente, o precio BNB no cacheado
+  //             → FEE_efectivo=0.001 (Binance cobra 0.1% sobre el activo)
+  //
+  // Nota: bnbBalancePre se guarda para la verificación post-fill que compara
+  // el delta real de BNB contra expectedBnbFee (ver _checkFeeDiscrepancy).
+  _computeFeePrediction(tradeValue) {
+    const bnbPrice = this.prices["BNBUSDC"] || 0;
+    const feeUsdcEquivalent = tradeValue * FEE_RATE_USDC;
+
+    let FEE_efectivo  = FEE_RATE_USDC;
+    let feePaidInBnb  = false;
+    let expectedBnbFee = 0;
+
+    if (this._bnbFeeEnabled && bnbPrice > 0) {
+      expectedBnbFee = (feeUsdcEquivalent / bnbPrice) * BNB_DISCOUNT;
+      if ((this._bnbBalance || 0) >= expectedBnbFee) {
+        FEE_efectivo = 0;
+        feePaidInBnb = true;
+      }
+    }
+
+    return {
+      mode:              feePaidInBnb ? "BNB" : "USDC",
+      FEE_efectivo,
+      feePaidInBnb,
+      expectedBnbFee:    +expectedBnbFee.toFixed(8),
+      feeUsdcEquivalent: +feeUsdcEquivalent.toFixed(6),
+      bnbBalancePre:     +(this._bnbBalance || 0).toFixed(8),
+      bnbPrice:          +bnbPrice.toFixed(4),
+      ts:                Date.now(),
+    };
+  }
+
   // FIX-M9: limpia posiciones stuck con status="pending".
   // Si el callback _onBuy crashea DESPUÉS de la mutación atómica del portfolio
   // (FIX-A: reservación sync antes del callback async), la posición queda en
@@ -579,7 +663,13 @@ class SimpleBotEngine {
       if(hitStop||hitTarget||timeStop){
         const reason=hitStop?"STOP":hitTarget?"TARGET":"TIME STOP";
         const gross=pos.qty*price;
-        const expectedNet = gross*(1-FEE);
+        // T0-FEE: usar FEE_efectivo según el modo actual (BNB=0, USDC=0.001).
+        // En modo BNB el bot recibe gross íntegro; la fee BNB se verifica
+        // post-fill vía _checkFeeDiscrepancy contra el delta real del balance.
+        const feePredSell = this._computeFeePrediction(gross);
+        this._lastFeeMode = feePredSell.mode;
+        console.log(`[SIMPLE][FEE] ${id} SELL gross=$${gross.toFixed(2)} mode=${feePredSell.mode} expectedFee=${feePredSell.feePaidInBnb ? feePredSell.expectedBnbFee.toFixed(6)+" BNB" : "$"+feePredSell.feeUsdcEquivalent.toFixed(4)}`);
+        const expectedNet = gross*(1-feePredSell.FEE_efectivo);
         if(pos.capa===1) this.capa1Cash+=expectedNet;
         else             this.capa2Cash+=expectedNet;
         // Record for Kelly
@@ -630,6 +720,9 @@ class SimpleBotEngine {
           expectedGross: gross,
           expectedNet,
           reason,
+          // T0-FEE: predicción usada para el expectedNet; placeLiveSell la usa
+          // tras el post-fill sync para llamar _checkFeeDiscrepancy(id,"SELL",...)
+          _feePredicted: feePredSell,
         };
         delete this.portfolio[id];
         if(typeof this._onSell === "function"){
