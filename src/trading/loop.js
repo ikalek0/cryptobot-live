@@ -135,7 +135,8 @@ setInterval(async()=>{
       }
     }
     S.bot._wasGlobalDefensive = cryptoPanic.globalDefensive;
-    S.bot._cryptoPanicFn = (symbol) => cryptoPanic.getSizeMultiplier(symbol);
+    // F28: S.bot._cryptoPanicFn eliminado — closure creada cada tick sin consumers.
+    // Si se revive cryptoPanic.start(), el consumer directo es cpGlobalMult (línea 115).
 
     S.bot.hourMultiplier = getTradingScore().score * momentumMult * cpGlobalMult;
 
