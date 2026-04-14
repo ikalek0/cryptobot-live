@@ -30,9 +30,12 @@ const crypto = require("crypto");
 class RateLimiter {
   constructor() {
     this.store = {}; // { key: { count, firstAttempt, blocked } }
-    // Limpiar cada 10 minutos
-    setInterval(() => this._cleanup(), 10 * 60 * 1000);
+    // Limpiar cada 10 minutos. .unref() para no bloquear process exit
+    // (tests limpios + no mantener proceso vivo sólo por el cleanup).
+    this._cleanupTimer = setInterval(() => this._cleanup(), 10 * 60 * 1000);
+    if (this._cleanupTimer.unref) this._cleanupTimer.unref();
   }
+  stop() { if(this._cleanupTimer) { clearInterval(this._cleanupTimer); this._cleanupTimer = null; } }
 
   _cleanup() {
     const now = Date.now();
