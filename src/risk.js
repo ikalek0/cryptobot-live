@@ -1,4 +1,24 @@
 // ─── RISK MANAGER v2 ──────────────────────────────────────────────────────────
+//
+// ESTADO (abril 2026): este módulo es 90% LEGACY / dead code.
+//
+//   VIVO:
+//     - CircuitBreaker      → engine.js zombie lo llama en evaluate()/getState() y
+//                              loop.js reconciliación lo resetea. Dashboard y
+//                              telegram /estado consumen su estado.
+//     - RISK_PROFILES       → engine.js muestra `profile` en getState() para el
+//                              dashboard (sólo display, no decisiones).
+//
+//   ZOMBIE (nunca invocado, preservado por backwards-compat del import en engine.js):
+//     - calcPositionSize    → simpleBot usa su propio Half-Kelly en engine_simple.js
+//     - TrailingStop.update → simpleBot no trailing stops; sólo `.highs` se persiste
+//     - AutoOptimizer       → `.recordTrade()/.optimize()` nunca llamados; sólo
+//                              `.params` se persiste y muestra en el dashboard
+//
+// Phase H (post-LIVE) eliminará engine.js + este módulo completo. Mientras tanto
+// NO borrar exports muertos — romperíamos el require() del zombie. Sólo hardening
+// defensivo para que lectores futuros no se confundan.
+//
 "use strict";
 
 const RISK_PROFILES = {
