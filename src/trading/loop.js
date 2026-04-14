@@ -211,6 +211,12 @@ setInterval(async()=>{
       }
     }
 
+    // F29 DEAD PATH: newTrades viene de S.bot.evaluate() (engine.js zombie) que
+    // devuelve siempre []. El loop nunca itera. FIX-A/B/C/D movió el ordering
+    // real a callbacks síncronos en server.js:109-124 (S.simpleBot._onBuy/_onSell
+    // → placeLiveBuy/placeLiveSell). Se mantiene por si Phase H revive engine.js
+    // con alguna estrategia adicional, pero lector nuevo debe saber que esto
+    // no se ejecuta en el paper-live actual.
     for(const trade of newTrades){
       if(trade.type==="SELL"){
         const liveCfg=global._alertConfig||{winPct:3,lossPct:3};
