@@ -171,11 +171,18 @@ class ClientBotManager {
     }
   }
 
+  // F36 helper: throttle entre orders para no saturar Binance (10 orders/sec
+  // per IP, compartido entre sub-accounts). 110ms = ~9 orders/sec con margen.
+  async _sleepBetweenOrders() {
+    await new Promise(r => setTimeout(r, 110));
+  }
+
   // Copy a BUY trade to all active clients
   async copyBuy(symbol, masterInvest, masterCapital) {
     const results = [];
     await this.syncClients();
 
+    let firstOrder = true;
     for (const [clientId, c] of Object.entries(this.clients)) {
       if (c.status !== "active" || !c.apiKey) continue;
       if (c.portfolio[symbol]) continue; // already has this position
@@ -190,6 +197,10 @@ class ClientBotManager {
           console.log(`[CLIENT] ${c.name}: sin balance para ${symbol} ($${clientInvest.toFixed(2)})`);
           continue;
         }
+
+        // F36: throttle — sleep antes de orders que no sean la primera
+        if (!firstOrder) await this._sleepBetweenOrders();
+        firstOrder = false;
 
         const result = await clientPlaceOrder(c.apiKey, c.apiSecret, symbol, "BUY", clientInvest);
         if (result.success) {
@@ -220,11 +231,15 @@ class ClientBotManager {
     const results = [];
     await this.syncClients();
 
+    let firstOrder = true;
     for (const [clientId, c] of Object.entries(this.clients)) {
       if (c.status !== "active" || !c.apiKey) continue;
       if (!c.portfolio[symbol]) continue; // doesn't have this position
 
       try {
+        // F36: throttle — sleep antes de orders que no sean la primera
+        if (!firstOrder) await this._sleepBetweenOrders();
+        firstOrder = false;
         // F34: vender sólo la qty tracked del fill BUY original, NO el balance
         // entero del wallet del cliente. Evita liquidar holdings manuales.
         const pos = c.portfolio[symbol];
