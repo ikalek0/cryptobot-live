@@ -26,8 +26,17 @@ function startLoop(deps) {
   const _sessionStartTs = Date.now(); // track session start for P&L
 
 // ── Capital Alert: aviso de añadir capital cuando condiciones son óptimas ───
-let _lastCapAlertTs = 0;
-let _prevRegime = null;
+// F27: persistimos timestamps en S.bot para sobrevivir PM2 restart. Antes, las
+// variables vivían sólo en closure del módulo → cada boot reiniciaba a 0 →
+// `now - 0 > 86400000` siempre cierto → cualquier condición "BULL || WR>=42"
+// disparaba alerta inmediatamente después de restart. Spam garantizado.
+// S.bot se serializa via save() cada 6 ticks, así que los timestamps viajan
+// con state.json / DB.
+function _getLastCapAlertTs() { return (S.bot && S.bot._lastCapAlertTs) || 0; }
+function _setLastCapAlertTs(v) { if (S.bot) S.bot._lastCapAlertTs = v; }
+function _getPrevRegime()      { return S.bot && S.bot._prevCapAlertRegime; }
+function _setPrevRegime(v)     { if (S.bot) S.bot._prevCapAlertRegime = v; }
+
 function checkCapitalAlert(s) {
   if(!s||s.loading) return;
   const now = Date.now();
@@ -35,11 +44,13 @@ function checkCapitalAlert(s) {
   const regime = s.marketRegime;
   const dd = s.drawdownPct||0;
   const tv = s.totalValue||0;
-  const regimeToBull = regime==="BULL" && _prevRegime!=="BULL";
-  _prevRegime = regime;
-  const shouldAlert = (regimeToBull || wr>=42) && dd<5 && (now-_lastCapAlertTs)>86400000;
+  const prevRegime = _getPrevRegime();
+  const regimeToBull = regime==="BULL" && prevRegime!=="BULL";
+  _setPrevRegime(regime);
+  const lastTs = _getLastCapAlertTs();
+  const shouldAlert = (regimeToBull || wr>=42) && dd<5 && (now-lastTs)>86400000;
   if(!shouldAlert) return;
-  _lastCapAlertTs = now;
+  _setLastCapAlertTs(now);
   const add = tv<150?100:tv<400?200:tv<800?500:1000;
   const why = regimeToBull?"🐂 MERCADO CAMBIA A BULL — momentum favorable":`📈 WR ${wr}% sostenido — sistema rentable`;
   tg.send && tg.send([
