@@ -170,6 +170,9 @@ class SimpleBotEngine {
     this._curBar    = saved.curBar     || {}; // key: "PAIR_tf"
     // Per-strategy trade history for Kelly
     this._stratTrades = saved.stratTrades || {};
+    // F2: paused flag persisted on disk. Source of truth for /pausa /reanudar.
+    // Sin esto, un PM2 restart tras /pausa reanuda el bot silenciosamente.
+    this.paused     = saved.paused     === true;
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -609,6 +612,7 @@ class SimpleBotEngine {
       candles:this._candles,
       curBar:this._curBar,
       stratTrades:this._stratTrades,
+      paused:this.paused === true, // F2: persisted across restarts
     };
   }
 }

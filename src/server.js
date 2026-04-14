@@ -174,7 +174,17 @@ for(const sp of simplePairs){
   () => ({...S.bot.getState(), instance:S.bot.mode, syncHistory: S.syncHistory, dailyPnlPct:S.bot._dailyPnlPct||0, momentumMult:S.bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
   {
     getBalance:    getAccountBalance,
-    setPaused:     (v) => { if(S.bot) S.bot._pausedByTelegram=v; },
+    // F2: source of truth for paused = simpleBot.paused (persisted on disk).
+    // setPaused mirrors to S.bot._pausedByTelegram (consumed by loop.js) AND
+    // force-flushes simpleState para evitar perder el toggle si PM2 reinicia
+    // antes del próximo tick de save (cada 6 ticks ~60s).
+    setPaused:     (v) => {
+      if(S.bot) S.bot._pausedByTelegram=v;
+      if(S.simpleBot) S.simpleBot.paused = v === true;
+      if(S.simpleBot?.saveState) {
+        saveSimpleState(S.simpleBot.saveState()).catch(e=>console.warn("[TG] save paused:", e.message));
+      }
+    },
     getSimpleState: () => S.simpleBot?.getState() || null,
     setCapital:    (v) => {
       S.CAPITAL_USDT = v;
@@ -185,7 +195,9 @@ for(const sp of simplePairs){
       }
       console.log("[TG] Capital actualizado a $"+v);
     },
-  }
+  },
+  // F2: initialPaused — boot con paused restaurado de disco
+  S.simpleBot?.paused === true
 );
 
   fetchFearGreed().then(fg => { S.bot.fearGreed=fg.value; S.bot.fearGreedPublished=fg.publishedAt; S.bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) publicado: ${fg.publishedAt||"?"}`); });

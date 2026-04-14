@@ -32,7 +32,10 @@ function notifyStartup(mode) {
 
 // ── Resúmenes ─────────────────────────────────────────────────────────────────
 function buildDaily(state) {
-  const tv=state.totalValue||10000,ret=state.returnPct||0;
+  // F5: usar ?? (nullish coalescing), no || — totalValue=0 es legítimo
+  // y ||10000 era el mismo anti-patrón que causó el bug del bot live
+  // ($10k de capital fantasma cuando dotenv no cargaba).
+  const tv=state.totalValue ?? 0,ret=state.returnPct ?? 0;
   const today=new Date().toDateString();
   const ts=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===today);
   const wins=ts.filter(l=>l.pnl>0).length,pnl=ts.reduce((s,l)=>s+(l.pnl||0),0),fees=ts.reduce((s,l)=>s+(l.fee||0),0);
@@ -45,7 +48,8 @@ function buildDaily(state) {
     `⚙️ Score mín: ${state.optimizerParams?.minScore||65} | EMA ${state.optimizerParams?.emaFast}/${state.optimizerParams?.emaSlow}`;
 }
 function buildWeekly(state) {
-  const tv=state.totalValue||10000,ret=state.returnPct||0;
+  // F5: idem buildDaily — ?? 0 evita mostrar "$10000" si totalValue=0.
+  const tv=state.totalValue ?? 0,ret=state.returnPct ?? 0;
   const wa=Date.now()-7*24*60*60*1000;
   const ws=(state.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).getTime()>wa);
   const wins=ws.filter(l=>l.pnl>0).length,pnl=ws.reduce((s,l)=>s+(l.pnl||0),0),fees=ws.reduce((s,l)=>s+(l.fee||0),0);
@@ -67,7 +71,18 @@ function notifyWeeklySummary(state) { send(buildWeekly(state)); }
 // ── Comandos Telegram ────────────────────────────────────────────────────────
 let lastUpdateId=0;
 let paused = false;
-function startCommandListener(getState, botControls) {
+function startCommandListener(getState, botControls, initialPaused=false) {
+  // F2: restaurar paused desde disco (simpleBot.paused) en boot.
+  // Si el bot fue pausado vía /pausa antes de un restart, debe arrancar pausado
+  // y notificar al usuario para que sepa que sigue en estado seguro.
+  if(initialPaused === true) {
+    paused = true;
+    // delay el send para que la cola HTTP de Telegram esté lista (poll todavía no arrancó)
+    setTimeout(() => {
+      send("⚠️ <b>Bot arrancado en estado PAUSADO</b>\nEstado restaurado de disco. Usa /reanudar para reactivar.");
+    }, 2000);
+    console.log("[TG] BOOT: paused=true restaurado de disco — notificación enviada");
+  }
   if(!TOKEN) return { isPaused: () => paused };
   function poll() {
     const req=https.get(`https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId+1}&timeout=20`,res=>{
@@ -185,11 +200,27 @@ function startCommandListener(getState, botControls) {
               }
               else if(text.startsWith("/capital ")) {
                 const val = parseFloat(text.split(" ")[1]);
-                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110"); }
-                else if(botControls?.setCapital) {
-                  botControls.setCapital(val);
-                  send(`✅ Capital actualizado a $${val} USDC`);
-                } else { send("❌ Comando no disponible"); }
+                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10)"); }
+                // F4: hard ceiling $500 (5× INITIAL). Sin techo, un typo
+                // /capital 10000 (en lugar de 100) escala el bot a $10k →
+                // Half-Kelly de $10k = posiciones de ~$1500 → órdenes BUY a
+                // Binance que vacían el balance real al primer trade. Para
+                // cambios mayores, editar .env directamente.
+                else if(val > 500) { send("❌ Capital máximo $500 (5× INITIAL). Para cambios mayores edita .env directamente."); }
+                else {
+                  // F3: rechazar si hay posiciones abiertas. Recalcular cash
+                  // descontando invested es semánticamente ambiguo (qué pasa
+                  // con stops mid-flight, con capa1 vs capa2, con reservas
+                  // pending). Reject simple es la única vía sin bugs.
+                  const simpleSnap = botControls?.getSimpleState?.();
+                  const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
+                  if(openPos > 0) {
+                    send(`❌ No puedo cambiar capital con ${openPos} posición(es) abiertas. Cierra posiciones primero o espera a que cierren solas.`);
+                  } else if(botControls?.setCapital) {
+                    botControls.setCapital(val);
+                    send(`✅ Capital actualizado a $${val} USDC`);
+                  } else { send("❌ Comando no disponible"); }
+                }
               }
               else if(text==="/semana") send(buildWeekly(s));
               else if(text==="/pausa") {
@@ -218,7 +249,13 @@ function startCommandListener(getState, botControls) {
               );
             }
           }
-        } catch(e){}
+        } catch(e){
+          // F7: antes era catch silencioso. Un comando con bug, JSON
+          // malformado de Telegram, o un send() roto desaparecía sin
+          // rastro. Log warn (no re-throw — un error en un comando
+          // Telegram NO debe crashear el bot, PM2 reiniciaría en loop).
+          console.warn("[TG] cmd failed:", e.message);
+        }
         setTimeout(poll,1000);
       });
     });
@@ -261,7 +298,10 @@ module.exports.notifyMaxDrawdown = notifyMaxDrawdown;
 
 // ── Explicabilidad de trades ───────────────────────────────────────────────────
 function explainTrade(trade, regime, patternWinRate) {
-  const sym = trade.symbol?.replace("USDT","") || "—";
+  // F6: trading es en USDC pero el strip viejo sólo eliminaba USDT
+  // (drift de la migración USDT→USDC). Resultado: símbolos quedaban
+  // como "SOLUSDC" en notificaciones en vez de "SOL".
+  const sym = trade.symbol?.replace(/USDT|USDC/g, "") || "—";
   const action = trade.type === "BUY" ? "Compré" : "Vendí";
   const reasons = [];
 
@@ -293,7 +333,8 @@ function notifyTradeWithExplanation(trade, regime, patternWinRate) {
   const emoji = pnl >= 3 ? "💰" : pnl >= 0 ? "✅" : pnl >= -3 ? "⚠️" : "📉";
   const explanation = explainTrade(trade, regime, patternWinRate);
   send(
-    `${emoji} <b>${trade.symbol?.replace("USDT","")} ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</b>\n` +
+    // F6: idem explainTrade, strip USDT|USDC.
+    `${emoji} <b>${trade.symbol?.replace(/USDT|USDC/g, "")} ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%</b>\n` +
     `${explanation}\n` +
     `Precio salida: $${trade.price} · ${trade.reason}`
   );
