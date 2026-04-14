@@ -67,7 +67,18 @@ function notifyWeeklySummary(state) { send(buildWeekly(state)); }
 // ── Comandos Telegram ────────────────────────────────────────────────────────
 let lastUpdateId=0;
 let paused = false;
-function startCommandListener(getState, botControls) {
+function startCommandListener(getState, botControls, initialPaused=false) {
+  // F2: restaurar paused desde disco (simpleBot.paused) en boot.
+  // Si el bot fue pausado vía /pausa antes de un restart, debe arrancar pausado
+  // y notificar al usuario para que sepa que sigue en estado seguro.
+  if(initialPaused === true) {
+    paused = true;
+    // delay el send para que la cola HTTP de Telegram esté lista (poll todavía no arrancó)
+    setTimeout(() => {
+      send("⚠️ <b>Bot arrancado en estado PAUSADO</b>\nEstado restaurado de disco. Usa /reanudar para reactivar.");
+    }, 2000);
+    console.log("[TG] BOOT: paused=true restaurado de disco — notificación enviada");
+  }
   if(!TOKEN) return { isPaused: () => paused };
   function poll() {
     const req=https.get(`https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastUpdateId+1}&timeout=20`,res=>{
