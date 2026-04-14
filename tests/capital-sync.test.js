@@ -33,6 +33,44 @@ function makeFailingBinance(reason="network down") {
 }
 
 describe("T0 — Capital dinámico", () => {
+  // ── H7: Boot fail-closed ────────────────────────────────────────────────
+  // Regression guard: el constructor debe dejar _capitalSyncPausedUntil en el
+  // futuro hasta que el primer sync tenga éxito. Un primer sync fallido (o
+  // ausente) mantiene BUYs bloqueados — mejor pausado que operando con datos
+  // stale del saved state post-restart (incidente 12-abril).
+  describe("H7: boot fail-closed default", () => {
+    it("new SimpleBotEngine({}) deja _capitalSyncPausedUntil en el futuro (≥9min, ≤11min)", () => {
+      const before = Date.now();
+      const eng = new SimpleBotEngine({});
+      const delta = eng._capitalSyncPausedUntil - before;
+      assert.ok(delta >= 9*60*1000, `pausedUntil debe ser al menos 9min en el futuro, delta=${delta}ms`);
+      assert.ok(delta <= 11*60*1000, `pausedUntil debe ser como mucho 11min en el futuro, delta=${delta}ms`);
+    });
+
+    it("primer sync exitoso resetea _capitalSyncPausedUntil a 0", async () => {
+      const eng = new SimpleBotEngine({});
+      assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre-sync: paused");
+      const r = await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFakeBinance(100),
+      });
+      assert.equal(r.ok, true);
+      assert.equal(eng._capitalSyncPausedUntil, 0, "post-sync OK: unpaused");
+    });
+
+    it("primer sync fallido sobreescribe el default con pausa de 5min (no extiende los 10min)", async () => {
+      const eng = new SimpleBotEngine({});
+      const before = Date.now();
+      const r = await eng.syncCapitalFromBinance({
+        binanceReadOnlyRequest: makeFailingBinance("down"),
+      });
+      assert.equal(r.ok, false);
+      // tras el fallo, el catch setea a now + 5min, lo que es < el default de 10min.
+      const delta = eng._capitalSyncPausedUntil - before;
+      assert.ok(delta >= 4*60*1000 && delta <= 6*60*1000,
+        `post-fail: pausedUntil=${delta}ms debe caer en ventana 5min ±1`);
+    });
+  });
+
   describe("Escenario 1: real < declarado → efectivo = real", () => {
     it("$50 real vs $100 declarado → efectivo=$50, capa1=$30, capa2=$20", async () => {
       const eng = new SimpleBotEngine({});

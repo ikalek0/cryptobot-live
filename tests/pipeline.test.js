@@ -138,6 +138,7 @@ describe("Candle mechanics", () => {
 
   it("_onCandleClose skips if not enough candles", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     const cfg = STRATEGIES[0]; // BNB_1h_RSI needs 50 candles
     const key = `${cfg.pair}_${cfg.tf}`;
     bot._candles[key] = []; // 0 candles
@@ -152,6 +153,7 @@ describe("Candle mechanics", () => {
 
   it("_onCandleClose skips if position already open for strategy", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     const cfg = STRATEGIES[0]; // BNB_1h_RSI
     const key = `${cfg.pair}_${cfg.tf}`;
     // Add enough candles
@@ -206,6 +208,7 @@ describe("Full pipeline: candle close triggers evaluation", () => {
 
   it("correlation groups prevent >2 positions per group", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     // Open 2 MAJOR_ALT positions (SOL + BNB)
     bot.portfolio["SOL_1h_EMA"] = { pair: "SOLUSDC", capa: 1 };
     bot.portfolio["BNB_1h_RSI"] = { pair: "BNBUSDC", capa: 1 };

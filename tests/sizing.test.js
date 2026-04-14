@@ -160,6 +160,7 @@ describe("FIX-A: atomic committed cap check", () => {
 
   it("blocks new BUY when committed + invest would exceed cap * 1.005", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default; este test es sobre cap check, no sync gate.
     // Pre-populate portfolio with 92% of CAP committed across 3 phantom positions.
     bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 32*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
     bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 1, invest: 30*K, qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
@@ -185,6 +186,7 @@ describe("FIX-A: atomic committed cap check", () => {
 
   it("shrinks new invest to headroom when committed near cap", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     // Commit 85% of CAP → headroom = CAP_LIMIT - 85% of CAP = 15.5% of CAP
     bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 55*K, qty: 0.5, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
     bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 2, invest: 30*K, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now() };
@@ -215,6 +217,7 @@ describe("FIX-A: atomic committed cap check", () => {
 
   it("new position has status='pending' marker (FIX-A + FASE 3 contract)", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
     bot.prices["BNBUSDC"] = 95.5;
     const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
@@ -227,6 +230,7 @@ describe("FIX-A: atomic committed cap check", () => {
 
   it("_onBuy callback is invoked AFTER portfolio mutation (atomicity contract)", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
     bot.prices["BNBUSDC"] = 95.5;
     let seenPortfolioAtCallback = null;
@@ -510,6 +514,7 @@ describe("FIX-D: applyRealSellFill reconciles SELL slippage to correct capa", ()
 describe("FIX-B: sizing base is min(tv, INITIAL_CAPITAL)", () => {
   it("blocks mark-to-market inflation: tv inflated, sizingBase=INITIAL_CAPITAL", () => {
     const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0; // H7: bypass fail-closed boot default.
     // Inflate an existing position: entry 100, qty 1.0, current price 200 → mark-to-market = 200
     bot.portfolio["INFLATED"] = {
       pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 1.0,

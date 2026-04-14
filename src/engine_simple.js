@@ -196,7 +196,11 @@ class SimpleBotEngine {
     this._lastCapitalSyncTs     = 0;
     this._lastCapitalSyncOk     = true;
     this._capitalSyncFailCount  = 0;
-    this._capitalSyncPausedUntil = 0; // epoch ms; bloquea BUYs hasta este ts
+    // H7 fail-closed: al boot, BUYs bloqueados 10min hasta que el primer
+    // syncCapitalFromBinance tenga éxito (lo resetea a 0). Si el sync falla
+    // repetidamente, la pausa se mantiene → mejor pausado que operando con
+    // datos stale post-restart (incidente 12-abril).
+    this._capitalSyncPausedUntil = Date.now() + 10*60*1000; // epoch ms; bloquea BUYs hasta este ts
     // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
     // Iñigo confirma que la opción está activa en su cuenta → default true.
     // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
