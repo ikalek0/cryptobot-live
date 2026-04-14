@@ -82,6 +82,9 @@ function calcKellyFraction(winRate, avgWinPct, avgLossPct) {
 }
 
 function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyData=null) {
+  // Defensive: inputs inválidos → sizing 0 (nunca negativo)
+  if(!Number.isFinite(availableCash)||availableCash<=0) return 0;
+  if(!profile||!Number.isFinite(profile.maxPositionSize)) return 0;
   // Base: Kelly Criterion si tenemos suficientes datos, sino usar max% fijo
   let base;
   if(kellyData && kellyData.trades>=20) {
@@ -90,10 +93,13 @@ function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyDat
   } else {
     base = availableCash * profile.maxPositionSize;
   }
-  const scoreFactor = 0.6 + ((score-50)/50)*0.8;
+  // Clamp score a [0,100] para evitar scoreFactor negativo con score<12.5
+  const safeScore = Math.min(100, Math.max(0, Number(score)||0));
+  const scoreFactor = Math.max(0, 0.6 + ((safeScore-50)/50)*0.8);
   const atrFactor   = atrPct>5 ? 0.5 : atrPct>3 ? 0.75 : 1.0;
   const openFactor  = Math.max(0.4, 1 - nOpen*0.15);
-  return Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
+  const size = Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
+  return Math.max(0, size);
 }
 
 class AutoOptimizer {
