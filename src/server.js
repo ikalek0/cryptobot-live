@@ -1071,12 +1071,58 @@ async function placeLiveSell(symbol, quantity, ctx) {
         delete S.bot.portfolio[symbol];
         console.log(`[LIVE] Posición virtual ${symbol} cerrada por -2010 (no existe en Binance)`);
       }
+      // H9: rollback del crédito virtual (evaluate ya acreditó expectedNet antes
+      // del _onSell callback). Sin esto el simpleBot queda con cash fantasma
+      // hasta el próximo sync periódico de 5min.
+      _rollbackVirtualSellCredit(symbol, ctx, `orderId null (code ${order?.code||"?"} ${order?.msg||""})`);
     }
     return order;
   } catch(e) {
     console.error(`[LIVE][SELL] Error ${symbol}:`, e.message);
+    // H9: mismo rollback para el path de excepción (timeout, network, -2010
+    // que venga como throw). Si no se rollback, el simpleBot autoriza BUYs
+    // basándose en cash inflado durante la ventana hasta el próximo sync.
+    _rollbackVirtualSellCredit(symbol, ctx, e.message);
     return null;
   }
+}
+
+// ── H9: helper de rollback para placeLiveSell falla ──────────────────────
+// simpleBot.evaluate() acredita expectedNet a capa1Cash/capa2Cash y borra
+// portfolio[id] ANTES de llamar _onSell → placeLiveSell. Si la orden real
+// falla, ese crédito virtual debe revertirse o el cash fantasma permite
+// autorizar BUYs que no existen en Binance.
+//
+// Estrategia:
+// 1. Decrementar capa cash por ctx.expectedNet (reverse del crédito).
+// 2. Forzar syncCapitalFromBinance inmediato — la sincronización con el
+//    balance real de Binance es la única fuente de verdad definitiva.
+// 3. Alerta Telegram CRITICAL para que el operador sepa que una venta
+//    falló y revise manualmente.
+//
+// NO se intenta reinsertar la posición: el engine ya la borró y no
+// tenemos datos completos (MAE/MFE/etc). El sync reconcilia contra la
+// realidad del balance Binance.
+function _rollbackVirtualSellCredit(symbol, ctx, errReason) {
+  if (!S.simpleBot || !ctx?.strategyId || typeof ctx?.expectedNet !== "number") {
+    console.warn(`[LIVE][SELL-ROLLBACK] ${symbol} ctx incompleto, skip rollback (strategyId=${ctx?.strategyId} expectedNet=${ctx?.expectedNet})`);
+    return;
+  }
+  const capa = ctx.capa || 1;
+  if (capa === 1) S.simpleBot.capa1Cash -= ctx.expectedNet;
+  else            S.simpleBot.capa2Cash -= ctx.expectedNet;
+  console.error(`[LIVE][SELL-ROLLBACK] ${ctx.strategyId} capa${capa} -= $${ctx.expectedNet.toFixed(2)} (reason: ${errReason})`);
+
+  if (typeof S.simpleBot.syncCapitalFromBinance === "function") {
+    S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())
+      .then((r) => {
+        console.log(`[LIVE][SELL-ROLLBACK] ${ctx.strategyId} sync post-rollback ok=${r?.ok}`);
+      })
+      .catch(() => {});
+  }
+  try {
+    tg.send && tg.send(`🚨 <b>[LIVE] SELL falló</b>\n${symbol} (${ctx.strategyId})\nError: ${errReason}\nLedger: -$${ctx.expectedNet.toFixed(2)} capa${capa} + sync forzado.\nRevisa posición en Binance manualmente.`);
+  } catch {}
 }
 
 async function getAccountBalance() {

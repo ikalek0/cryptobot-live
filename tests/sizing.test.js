@@ -880,3 +880,80 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9, "capa2 fully restored");
   });
 });
+
+// ── H9: placeLiveSell error path rollbackea el crédito virtual ─────────────
+// simpleBot.evaluate() acredita expectedNet a la capa virtual ANTES de
+// disparar _onSell → placeLiveSell. Si la orden real falla (timeout, -2010,
+// network), el ledger queda con cash fantasma. El fix rollbackea ese crédito.
+// Replicamos la lógica de _rollbackVirtualSellCredit como función pura para
+// aislarla del setup LIVE_MODE + mock Binance.
+function simulateSellRollback(bot, ctx) {
+  if (!ctx?.strategyId || typeof ctx?.expectedNet !== "number") return false;
+  const capa = ctx.capa || 1;
+  if (capa === 1) bot.capa1Cash -= ctx.expectedNet;
+  else            bot.capa2Cash -= ctx.expectedNet;
+  return true;
+}
+
+describe("H9: placeLiveSell error rollbackea crédito virtual", () => {
+  it("capa1: rollback decrementa capa1Cash por expectedNet", () => {
+    const bot = new SimpleBotEngine({});
+    const beforeCapa1 = bot.capa1Cash;
+    // Simular estado post-evaluate: acreditado + portfolio borrado
+    bot.capa1Cash += 15.5; // crédito virtual de la SELL
+    const ctx = { strategyId: "BNB_1h_RSI", capa: 1, expectedNet: 15.5 };
+
+    const ok = simulateSellRollback(bot, ctx);
+
+    assert.equal(ok, true);
+    assert.ok(Math.abs(bot.capa1Cash - beforeCapa1) < 1e-9,
+      `capa1Cash debe restaurarse al valor previo al crédito: ${beforeCapa1}, got ${bot.capa1Cash}`);
+  });
+
+  it("capa2: rollback decrementa capa2Cash por expectedNet (aislamiento capa)", () => {
+    const bot = new SimpleBotEngine({});
+    const beforeCapa1 = bot.capa1Cash;
+    const beforeCapa2 = bot.capa2Cash;
+    bot.capa2Cash += 22.3;
+    const ctx = { strategyId: "XRP_4h_EMA", capa: 2, expectedNet: 22.3 };
+
+    simulateSellRollback(bot, ctx);
+
+    assert.ok(Math.abs(bot.capa2Cash - beforeCapa2) < 1e-9, "capa2 restaurada");
+    assert.equal(bot.capa1Cash, beforeCapa1, "capa1 intacta — aislamiento");
+  });
+
+  it("ctx incompleto (sin strategyId o expectedNet): rollback no toca nada", () => {
+    const bot = new SimpleBotEngine({});
+    const beforeCapa1 = bot.capa1Cash;
+    const beforeCapa2 = bot.capa2Cash;
+
+    assert.equal(simulateSellRollback(bot, {}), false);
+    assert.equal(simulateSellRollback(bot, { strategyId: "X" }), false);
+    assert.equal(simulateSellRollback(bot, null), false);
+
+    assert.equal(bot.capa1Cash, beforeCapa1);
+    assert.equal(bot.capa2Cash, beforeCapa2);
+  });
+
+  it("regression guard: server.js contiene _rollbackVirtualSellCredit + ambos paths lo llaman", () => {
+    // Si alguien quita el helper o alguno de los dos call sites, este test falla.
+    const fs = require("fs");
+    const path = require("path");
+    const src = fs.readFileSync(path.resolve(__dirname, "../src/server.js"), "utf-8");
+
+    assert.ok(src.includes("function _rollbackVirtualSellCredit"),
+      "server.js debe definir _rollbackVirtualSellCredit");
+    // El helper se debe llamar desde AMBOS paths (else orderId null + outer catch)
+    const calls = (src.match(/_rollbackVirtualSellCredit\(/g) || []).length;
+    assert.ok(calls >= 3,
+      `_rollbackVirtualSellCredit debe llamarse al menos desde 2 call sites (1 def + 2 calls = 3 matches), found ${calls}`);
+    // El helper debe forzar sync + mandar telegram
+    const helperIdx = src.indexOf("function _rollbackVirtualSellCredit");
+    const helperBody = src.slice(helperIdx, helperIdx + 2000);
+    assert.ok(helperBody.includes("syncCapitalFromBinance"),
+      "_rollbackVirtualSellCredit debe forzar sync post-rollback");
+    assert.ok(helperBody.includes("tg.send"),
+      "_rollbackVirtualSellCredit debe mandar alerta Telegram");
+  });
+});
