@@ -287,6 +287,63 @@ class SimpleBotEngine {
   }
 
   // Seed backtested trades per strategy so Kelly gate starts positive
+  //
+  // ── BUG-6: sesgo conocido del Kelly seed (documentación, sin fix) ─────
+  //
+  // MOTIVO DEL SEED:
+  // El Kelly gate bloquea estrategias con kelly<=0 y n>=10. Sin seed,
+  // cualquier estrategia sin trades históricos arrancaría con kelly=0 y
+  // sería bloqueada, o con n<10 operaría sin control. El seed inicializa
+  // _stratTrades[cfg.id] con 20 trades sintéticos que replican el WR del
+  // backtest, de manera que el bot arranca con kelly positivo y gate
+  // activo desde el primer tick.
+  //
+  // SESGO DE SELECCIÓN — CLAVE:
+  // Los WR del seed ({BNB_1h_RSI:0.58, SOL_1h_EMA:0.54, ...}) vienen del
+  // backtest OOS (70/30 split, fees 0.2%, >100 trades). Estos valores son
+  // OPTIMISTAS por construcción:
+  //   1. Las 8 estrategias fueron seleccionadas PORQUE performaron bien
+  //      en el OOS — hay sesgo de selección explícito (look-ahead bias).
+  //   2. Los fees modelados (0.2%) asumen VIP0 sin rebate BNB; el bot
+  //      real usa fees efectivos ~0.075% con BNB, lo que ayuda, pero
+  //      tampoco refleja slippage real ni latencia de señal.
+  //   3. Los PnLs son sintéticos: +target si win, -stop si loss. No
+  //      capturan la varianza real del backtest (winners truncados por
+  //      time stop, losers por volatilidad adversa intra-vela, etc).
+  //
+  // CONSECUENCIA:
+  // El kelly inicial sembrado es sistemáticamente MAYOR que el kelly real
+  // que se observará en producción. Para BNB_1h_RSI, el seed produce
+  // kelly~0.325 (cfg.kelly del struct), que baja a valores reales ~0.15-
+  // 0.20 tras ~30 trades reales. Durante este periodo de warm-up, el
+  // sizing Half-Kelly es menos conservador que lo óptimo.
+  //
+  // MITIGACIÓN YA PRESENTE:
+  // - kellyFrac está CAPEADA a min(0.5, kelly) antes del Half-Kelly, así
+  //   que el upside del seed queda limitado.
+  // - Cap del 30% del capital por trade.
+  // - Rolling window de 30 trades: el seed se DILUYE rápidamente — tras
+  //   30 trades reales, los 20 sintéticos más antiguos son desplazados.
+  // - Circuit breaker A5 (DD15%) aborta si el bias produce drawdown real.
+  // - WR seeds son conservadores vs WR in-sample del backtest (se usó
+  //   OOS = ~7-10pp más bajos que IS).
+  //
+  // POR QUÉ NO SE "FIXEA":
+  // Un fix "puro" sería: (a) no sembrar, y bloquear hasta 10+ trades
+  // reales (imposible: tarda semanas, y el gate bloquea la acumulación);
+  // (b) sembrar con WR penalizado (ej. WR*0.9), pero eso es arbitrario y
+  // reintroduce sesgo en dirección opuesta. La opción actual — seed
+  // backtest-OOS + rolling window rápida + cap Half-Kelly — es el
+  // compromiso pragmático. Este comentario existe para que futuros
+  // operadores NO interpreten el kelly inicial como una estimación
+  // "calibrada" — es un arranque intencionalmente optimista con
+  // mecanismos de corrección downstream.
+  //
+  // AUDITABILIDAD:
+  // Cada seed se loguea con `[SIMPLE][KELLY-SEED]` al arrancar, y
+  // `/api/simple` expone `stratKelly[cfg.id]` en todo momento. Comparar
+  // kelly post-30-trades-reales vs seed inicial es el test operativo
+  // para validar que el bias ha convergido.
   _seedStratTrades() {
     const now = Date.now();
     // WR from backtests: BNB_RSI 58%, SOL_EMA 54%, BTC_RSI 55%, BTC_EMA 52%, XRP_EMA 56%, SOL4h 53%, BNB1d 54%
