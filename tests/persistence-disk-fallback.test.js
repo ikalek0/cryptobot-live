@@ -106,7 +106,7 @@ describe("BATCH-1 CRIT-1 — persistence disk fallback", () => {
     });
   });
 
-  describe("deleteState limpia ambos ficheros", () => {
+  describe("deleteState limpia ambos ficheros + .bak + .tmp", () => {
     it("deleteState borra state.json y simple_state.json", async () => {
       await DB.saveState({ x: 1 });
       await DB.saveSimpleState({ y: 2 });
@@ -115,6 +115,63 @@ describe("BATCH-1 CRIT-1 — persistence disk fallback", () => {
       await DB.deleteState();
       assert.ok(!fs.existsSync(STATE_FILE), "state.json borrado");
       assert.ok(!fs.existsSync(SIMPLE_STATE_FILE), "simple_state.json borrado");
+    });
+
+    it("deleteState también limpia .bak residuales", async () => {
+      // Crear 2 versiones para generar .bak
+      await DB.saveState({ x: 1 });
+      await DB.saveState({ x: 2 });
+      await DB.saveSimpleState({ y: 1 });
+      await DB.saveSimpleState({ y: 2 });
+      assert.ok(fs.existsSync(STATE_FILE + ".bak"), "pre: state.bak existe");
+      assert.ok(fs.existsSync(SIMPLE_STATE_FILE + ".bak"), "pre: simple_state.bak existe");
+      await DB.deleteState();
+      assert.ok(!fs.existsSync(STATE_FILE + ".bak"));
+      assert.ok(!fs.existsSync(SIMPLE_STATE_FILE + ".bak"));
+    });
+  });
+
+  // ── BATCH-1 CRIT-2 integración: atomic write + recovery via saveX/loadX
+  describe("CRIT-2: saveState/loadState integración atómica", () => {
+    it("saveState crea .bak tras segunda escritura", async () => {
+      await DB.saveState({ bot: { v: 1 } });
+      await DB.saveState({ bot: { v: 2 } });
+      assert.ok(fs.existsSync(STATE_FILE));
+      assert.ok(fs.existsSync(STATE_FILE + ".bak"));
+      const main = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+      assert.equal(main.bot.v, 2);
+    });
+
+    it("loadState recupera desde .bak si el principal está corrupto", async () => {
+      await DB.saveState({ bot: { v: 1 } });
+      await DB.saveState({ bot: { v: 2 } });
+      // Simular crash a mitad de escritura: principal con garbage
+      fs.writeFileSync(STATE_FILE, "{corrupted", "utf8");
+      const loaded = await DB.loadState();
+      assert.deepEqual(loaded, { bot: { v: 1 } },
+        "loadState debe recuperar v=1 desde .bak");
+    });
+
+    it("saveSimpleState atómico + loadSimpleState recovery desde .bak", async () => {
+      await DB.saveSimpleState({ portfolio: {}, v: 1 });
+      await DB.saveSimpleState({ portfolio: { X: 1 }, v: 2 });
+      // Corromper principal
+      fs.writeFileSync(SIMPLE_STATE_FILE, "NOT_JSON", "utf8");
+      const loaded = await DB.loadSimpleState();
+      assert.equal(loaded.v, 1,
+        "loadSimpleState debe recuperar v=1 desde .bak");
+      // Rehidratación: principal ahora parseable
+      const rehydrated = JSON.parse(fs.readFileSync(SIMPLE_STATE_FILE, "utf8"));
+      assert.equal(rehydrated.v, 1);
+    });
+
+    it("ambos corruptos → loadState devuelve null sin crash", async () => {
+      await DB.saveState({ v: 1 });
+      await DB.saveState({ v: 2 });
+      fs.writeFileSync(STATE_FILE,          "garbage1", "utf8");
+      fs.writeFileSync(STATE_FILE + ".bak", "garbage2", "utf8");
+      const loaded = await DB.loadState();
+      assert.equal(loaded, null);
     });
   });
 });
