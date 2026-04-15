@@ -449,3 +449,227 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 });
+
+// ── A5: drawdown alerts + circuit breaker ─────────────────────────────
+// Helper para disparar getState() con un DD controlado sin tener que
+// simular trades reales. Usamos:
+//   - capa1Cash + capa2Cash + portfolio vacío → totalValue() = suma
+//   - _peakTv seteado al peak artificial
+//   - drawdownPct resultante = (peak - tv) / peak * 100
+function setDrawdown(eng, drawdownPct) {
+  // tv = peak * (1 - dd/100)
+  const peak = 100;
+  const tv = peak * (1 - drawdownPct / 100);
+  eng.capa1Cash = tv;
+  eng.capa2Cash = 0;
+  eng.portfolio = {};
+  eng._peakTv = peak;
+  // baseline también a 100 para que returnPct tenga sentido
+  eng._capitalEfectivo = 100;
+}
+
+function makeEngWithTelegram() {
+  const eng = new SimpleBotEngine({});
+  eng._capitalSyncPausedUntil = 0; // no fail-closed
+  const sent = [];
+  eng.setTelegramSend((msg) => sent.push(msg));
+  return { eng, sent };
+}
+
+describe("A5 — drawdown alerts + circuit breaker", () => {
+  describe("setTelegramSend", () => {
+    it("por defecto _telegramSend es null (sends no-op en tests)", () => {
+      const eng = new SimpleBotEngine({});
+      assert.equal(eng._telegramSend, null);
+    });
+
+    it("setTelegramSend guarda función si es callable", () => {
+      const eng = new SimpleBotEngine({});
+      const fn = () => {};
+      eng.setTelegramSend(fn);
+      assert.equal(eng._telegramSend, fn);
+    });
+
+    it("setTelegramSend(null) o inválido deja _telegramSend en null", () => {
+      const eng = new SimpleBotEngine({});
+      eng.setTelegramSend(null);
+      assert.equal(eng._telegramSend, null);
+      eng.setTelegramSend("not-a-fn");
+      assert.equal(eng._telegramSend, null);
+    });
+  });
+
+  describe("umbrales de alerta escalados", () => {
+    it("drawdown 2% NO dispara ninguna alerta", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 2);
+      eng.getState();
+      assert.equal(sent.length, 0, "DD 2% no debe alertar");
+      assert.equal(eng._ddAlert3, false);
+      assert.equal(eng._ddAlert5, false);
+      assert.equal(eng._ddAlert10, false);
+    });
+
+    it("drawdown 3.1% dispara ddAlert3 una sola vez", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 3.1);
+      eng.getState();
+      eng.getState(); // segunda llamada: latch evita re-send
+      assert.equal(eng._ddAlert3, true);
+      assert.equal(eng._ddAlert5, false);
+      assert.equal(sent.length, 1, "exactamente 1 alerta tras 2 getState()");
+      assert.ok(/drawdown/i.test(sent[0]));
+    });
+
+    it("drawdown 5.5% dispara ddAlert5 Y ddAlert3 (ambos thresholds)", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 5.5);
+      eng.getState();
+      assert.equal(eng._ddAlert3, true);
+      assert.equal(eng._ddAlert5, true);
+      assert.equal(eng._ddAlert10, false);
+      assert.equal(sent.length, 2, "DD 5.5% dispara ddAlert5 + ddAlert3");
+    });
+
+    it("drawdown 10.2% dispara ddAlert10 + 5 + 3", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 10.2);
+      eng.getState();
+      assert.equal(eng._ddAlert10, true);
+      assert.equal(eng._ddAlert5, true);
+      assert.equal(eng._ddAlert3, true);
+      assert.equal(eng._ddCircuitBreakerTripped, false);
+      assert.equal(sent.length, 3, "DD 10.2% dispara 3 alertas");
+    });
+
+    it("drawdown 15% dispara circuit breaker + pausedUntil=Infinity", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 15.5);
+      eng.getState();
+      assert.equal(eng._ddCircuitBreakerTripped, true);
+      assert.equal(eng._capitalSyncPausedUntil, Infinity,
+        "CB debe setear _capitalSyncPausedUntil a Infinity");
+      // Se envían 4 mensajes: CB + DD10 + DD5 + DD3
+      assert.equal(sent.length, 4);
+      assert.ok(sent.some(m => /CIRCUIT BREAKER/i.test(m)),
+        "debe enviarse mensaje de CIRCUIT BREAKER");
+    });
+  });
+
+  describe("latch reset con histéresis", () => {
+    it("ddAlert3 se resetea cuando DD baja < 2.5%", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 3.5);
+      eng.getState();
+      assert.equal(eng._ddAlert3, true);
+      assert.equal(sent.length, 1);
+      // DD cae
+      setDrawdown(eng, 2);
+      eng.getState();
+      assert.equal(eng._ddAlert3, false, "latch reseteado");
+      // DD sube de nuevo → vuelve a disparar
+      setDrawdown(eng, 3.5);
+      eng.getState();
+      assert.equal(eng._ddAlert3, true);
+      assert.equal(sent.length, 2, "segunda alerta tras reset");
+    });
+
+    it("ddAlert5 se resetea con histéresis 4.5%, vuelve a disparar", () => {
+      const { eng, sent } = makeEngWithTelegram();
+      setDrawdown(eng, 6);
+      eng.getState();
+      const initial = sent.length;
+      setDrawdown(eng, 4);
+      eng.getState();
+      assert.equal(eng._ddAlert5, false);
+      setDrawdown(eng, 6);
+      eng.getState();
+      assert.equal(eng._ddAlert5, true);
+      assert.ok(sent.length > initial, "re-dispara tras reset");
+    });
+
+    it("ddAlert10 se resetea con histéresis 9.5%", () => {
+      const { eng } = makeEngWithTelegram();
+      setDrawdown(eng, 10.5);
+      eng.getState();
+      assert.equal(eng._ddAlert10, true);
+      setDrawdown(eng, 9);
+      eng.getState();
+      assert.equal(eng._ddAlert10, false);
+    });
+
+    it("circuit breaker NO se resetea automáticamente aunque drawdown baje a 0", () => {
+      const { eng } = makeEngWithTelegram();
+      setDrawdown(eng, 16);
+      eng.getState();
+      assert.equal(eng._ddCircuitBreakerTripped, true);
+      // DD cae a 0
+      setDrawdown(eng, 0);
+      eng.getState();
+      assert.equal(eng._ddCircuitBreakerTripped, true,
+        "CB NO se resetea automáticamente — requiere intervención manual");
+      assert.equal(eng._capitalSyncPausedUntil, Infinity,
+        "pausedUntil sigue en Infinity");
+    });
+  });
+
+  describe("persistencia del CB across restart", () => {
+    it("saveState persiste los 4 flags A5", () => {
+      const { eng } = makeEngWithTelegram();
+      setDrawdown(eng, 16);
+      eng.getState(); // dispara CB + otros latches
+      const saved = eng.saveState();
+      assert.equal(saved.ddAlert3, true);
+      assert.equal(saved.ddAlert5, true);
+      assert.equal(saved.ddAlert10, true);
+      assert.equal(saved.ddCircuitBreakerTripped, true);
+    });
+
+    it("constructor restaura ddCircuitBreakerTripped + aplica Infinity", () => {
+      // Simula post-JSON.stringify/parse: Infinity → null
+      const savedRaw = {
+        ddCircuitBreakerTripped: true,
+        ddAlert3: true, ddAlert5: true, ddAlert10: true,
+        capitalSyncPausedUntil: null, // JSON dropped
+      };
+      // Forzar parse round-trip para mimear disco real
+      const saved = JSON.parse(JSON.stringify(savedRaw));
+      const eng = new SimpleBotEngine(saved);
+      assert.equal(eng._ddCircuitBreakerTripped, true,
+        "flag CB debe restaurarse");
+      assert.equal(eng._capitalSyncPausedUntil, Infinity,
+        "constructor debe re-aplicar Infinity tras detectar CB tripped");
+    });
+
+    it("sin CB tripped en saved, el fail-closed de H7 sigue siendo finito", () => {
+      const saved = { ddCircuitBreakerTripped: false };
+      const eng = new SimpleBotEngine(saved);
+      assert.equal(eng._ddCircuitBreakerTripped, false);
+      assert.ok(Number.isFinite(eng._capitalSyncPausedUntil),
+        "pausedUntil debe ser finito (H7 default 10min)");
+    });
+
+    it("round-trip completo: save → JSON.stringify/parse → new instance preserva CB", () => {
+      const { eng: eng1 } = makeEngWithTelegram();
+      setDrawdown(eng1, 15.5);
+      eng1.getState();
+      const saved = JSON.parse(JSON.stringify(eng1.saveState()));
+      const eng2 = new SimpleBotEngine(saved);
+      assert.equal(eng2._ddCircuitBreakerTripped, true);
+      assert.equal(eng2._capitalSyncPausedUntil, Infinity);
+    });
+  });
+
+  describe("sin _telegramSend inyectado: sends son no-op silenciosos", () => {
+    it("getState con DD 16% NO crashea aunque _telegramSend sea null", () => {
+      const eng = new SimpleBotEngine({});
+      eng._capitalSyncPausedUntil = 0;
+      // NO llamar setTelegramSend
+      setDrawdown(eng, 16);
+      // No debe lanzar
+      const st = eng.getState();
+      assert.equal(eng._ddCircuitBreakerTripped, true);
+      assert.ok(st.drawdownPct >= 15);
+    });
+  });
+});

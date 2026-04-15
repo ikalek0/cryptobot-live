@@ -125,6 +125,16 @@ if (typeof binanceReadOnlyRequest === "function") {
   S.simpleBot._binanceReadOnlyRequest = binanceReadOnlyRequest;
 }
 
+// A5: inyectar tg.send para que _checkDrawdownAlerts pueda notificar
+// umbrales de drawdown + circuit breaker. Análogo a _binanceReadOnlyRequest
+// arriba. Wrapper try/catch para blindar contra tg no listo (lo envuelve
+// telegram.send mismo, pero doble guard no hace daño).
+if (S.simpleBot && typeof S.simpleBot.setTelegramSend === "function") {
+  S.simpleBot.setTelegramSend((msg) => {
+    try { tg.send && tg.send(msg); } catch {}
+  });
+}
+
 S.simpleBot._onBuy = (pair, invest, ctx) => {
   // ── C1 defense in depth: rollback si pausa detectada aquí ──────────────
   // _onCandleClose ya aplica el pause gate antes de mutar portfolio (primera

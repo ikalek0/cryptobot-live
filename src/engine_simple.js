@@ -226,6 +226,37 @@ class SimpleBotEngine {
     // (fallback INITIAL_CAPITAL si aún no hubo sync). null como sentinela
     // hasta el primer tick de getState() que llama totalValue().
     this._peakTv = saved.peakTv ?? null;
+    // ── A5: drawdown alerts + circuit breaker ────────────────────────────
+    // Latches anti-spam por umbral. Cada alerta dispara UNA vez por ciclo
+    // de drawdown y se resetea cuando el DD baja por debajo del umbral con
+    // una pequeña histéresis (3→2.5, 5→4.5, 10→9.5). El circuit breaker
+    // del 15% NO se resetea automáticamente: requiere intervención manual.
+    //
+    // Recovery manual del circuit breaker (cuando CB esté tripped):
+    //   1) pm2 stop live
+    //   2) editar data/state.json (o fila simple_state en PostgreSQL):
+    //      poner capitalSyncPausedUntil a 0 y ddCircuitBreakerTripped a false
+    //   3) pm2 start live --update-env
+    //   ⚠️ SOLO HACERLO TRAS DIAGNÓSTICO COMPLETO de la causa del DD 15%.
+    //      Un reset ciego sin entender qué estrategia falló = mismo DD en
+    //      la próxima sesión. Revisar logs, trades, Kelly gates antes.
+    this._ddAlert3             = saved.ddAlert3             === true;
+    this._ddAlert5             = saved.ddAlert5             === true;
+    this._ddAlert10            = saved.ddAlert10            === true;
+    this._ddCircuitBreakerTripped = saved.ddCircuitBreakerTripped === true;
+    // A5: re-aplicar la pausa infinita del CB tras restart. JSON.stringify
+    // convierte Infinity en null, así que _capitalSyncPausedUntil no sobrevive
+    // directamente. El flag del CB es la fuente de verdad persistida; si es
+    // true, reestablecemos Infinity (override del fail-closed de 10min que
+    // H7 habría aplicado por Math.max más arriba).
+    if (this._ddCircuitBreakerTripped) {
+      this._capitalSyncPausedUntil = Infinity;
+      console.warn("[SIMPLE][CB] Circuit breaker persistido: _capitalSyncPausedUntil = Infinity (restart con CB tripped)");
+    }
+    // Inyectable por server.js tras construir el engine (análogo a
+    // _binanceReadOnlyRequest). Si el test no lo setea, los sends son no-op
+    // gracias al guard typeof === "function".
+    this._telegramSend = null;
     // ── T0-FEE: estado de "Use BNB for fees" ─────────────────────────────
     // Iñigo confirma que la opción está activa en su cuenta → default true.
     // Se re-detecta en cada syncCapitalFromBinance mirando commissionAsset
@@ -552,6 +583,59 @@ class SimpleBotEngine {
     this._botName = botName;
     this._regime = regime;
     this._fearGreed = fearGreed;
+  }
+
+  // A5: setter para inyectar tg.send desde server.js (análogo a cómo
+  // _binanceReadOnlyRequest se setea en server.js tras la construcción).
+  // Sin esto, el engine no puede alertar drawdown thresholds ni circuit
+  // breaker. Los tests no inyectan el setter → guard typeof === "function"
+  // hace que los sends sean no-op silenciosos.
+  setTelegramSend(fn) {
+    this._telegramSend = (typeof fn === "function") ? fn : null;
+  }
+
+  // ── A5: drawdown alerts + circuit breaker ─────────────────────────────
+  // Llamado desde getState() tras recalcular drawdownPct contra el peak.
+  // Implementa el flujo de 4 umbrales escalados con latch anti-spam e
+  // histéresis, y el circuit breaker del 15% que pausa BUYs
+  // indefinidamente via _capitalSyncPausedUntil = Infinity.
+  _checkDrawdownAlerts(drawdownPct) {
+    const tgSend = (msg) => {
+      if (typeof this._telegramSend === "function") {
+        try { this._telegramSend(msg); } catch {}
+      }
+    };
+    // Circuit breaker 15% — pausa indefinidamente
+    if (drawdownPct >= 15 && !this._ddCircuitBreakerTripped) {
+      this._capitalSyncPausedUntil = Infinity;
+      this._ddCircuitBreakerTripped = true;
+      console.error(`[SIMPLE][CB] 🚨 DRAWDOWN ${drawdownPct.toFixed(2)}% ≥ 15% — CIRCUIT BREAKER TRIPPED, BUYs pausados indefinidamente`);
+      tgSend(`🚨 <b>CIRCUIT BREAKER</b>\nDrawdown ${drawdownPct.toFixed(2)}% ≥ 15%\nBUYs pausados INDEFINIDAMENTE hasta intervención manual.\n\nRecovery: ver comentario A5 en constructor de engine_simple.js.`);
+    }
+    // Umbral 10% — crítico
+    if (drawdownPct >= 10 && !this._ddAlert10) {
+      this._ddAlert10 = true;
+      console.warn(`[SIMPLE][DD] 🔴 Drawdown ${drawdownPct.toFixed(2)}% ≥ 10% — alerta crítica`);
+      tgSend(`🔴 <b>Drawdown ${drawdownPct.toFixed(2)}%</b>\nRevisa el bot manualmente.`);
+    }
+    // Umbral 5% — warning
+    if (drawdownPct >= 5 && !this._ddAlert5) {
+      this._ddAlert5 = true;
+      console.warn(`[SIMPLE][DD] 🟡 Drawdown ${drawdownPct.toFixed(2)}% ≥ 5% — warning`);
+      tgSend(`🟡 <b>Drawdown ${drawdownPct.toFixed(2)}%</b>\nConsidera revisar estrategias.`);
+    }
+    // Umbral 3% — info
+    if (drawdownPct >= 3 && !this._ddAlert3) {
+      this._ddAlert3 = true;
+      console.log(`[SIMPLE][DD] 🟢 Drawdown ${drawdownPct.toFixed(2)}% ≥ 3% — info`);
+      tgSend(`🟢 <b>Info</b>: drawdown ${drawdownPct.toFixed(2)}%`);
+    }
+    // Reset latches con histéresis (evita oscilación en el borde)
+    if (drawdownPct < 2.5)  this._ddAlert3  = false;
+    if (drawdownPct < 4.5)  this._ddAlert5  = false;
+    if (drawdownPct < 9.5)  this._ddAlert10 = false;
+    // NOTA: _ddCircuitBreakerTripped NO se resetea automáticamente.
+    // Requiere edición manual de state.json + restart (ver constructor).
   }
 
   // ── T0: Capital dinámico — sincronización contra Binance ───────────────
@@ -1109,6 +1193,18 @@ class SimpleBotEngine {
     const drawdownPct = (this._peakTv && this._peakTv > 0)
       ? +((this._peakTv - tv) / this._peakTv * 100).toFixed(3)
       : 0;
+    // ── A5: drawdown alerts + circuit breaker ──────────────────────────
+    // Escalado progresivo: 3% info, 5% warning, 10% crítico, 15% circuit
+    // breaker (pausa BUYs indefinidamente). Latch anti-spam: cada umbral
+    // dispara UNA vez por ciclo. Los latches de 3/5/10% se resetean con
+    // histéresis (2.5/4.5/9.5). El CB del 15% NO se resetea automáticamente
+    // — requiere intervención manual (ver recovery steps en constructor).
+    //
+    // Evaluamos en orden de mayor a menor para que un DD del 17% dispare
+    // el CB antes de chequear el 10% (sino el CB queda en la siguiente
+    // iteración). La consecuencia del CB (pausa infinita) también garantiza
+    // que subsecuentes getState() no repitan el send.
+    this._checkDrawdownAlerts(drawdownPct);
     return{
       totalValue:tv,
       capa1Cash:this.capa1Cash,
@@ -1185,6 +1281,16 @@ class SimpleBotEngine {
       // aunque el bot esté realmente en drawdown. Con persistencia, el peak
       // sobrevive PM2 restarts y las alertas de drawdown siguen siendo válidas.
       peakTv:                 this._peakTv,
+      // ── A5: drawdown alert latches + circuit breaker flag ─────────────
+      // Los latches evitan re-alerta tras restart dentro del mismo ciclo
+      // de DD. El flag del CB es la fuente de verdad: el constructor
+      // reconstruye _capitalSyncPausedUntil=Infinity si ve el flag true
+      // (porque JSON.stringify(Infinity)===null, así que no se puede
+      // persistir el Infinity directamente).
+      ddAlert3:               this._ddAlert3             === true,
+      ddAlert5:               this._ddAlert5             === true,
+      ddAlert10:              this._ddAlert10            === true,
+      ddCircuitBreakerTripped: this._ddCircuitBreakerTripped === true,
     };
   }
 }
