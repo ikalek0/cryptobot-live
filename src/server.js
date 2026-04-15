@@ -879,24 +879,19 @@ const https2   = require("https");
 // todas las órdenes se ejecutan en esa sub-cuenta
 const BINANCE_SUBACCOUNT = process.env.BINANCE_SUBACCOUNT || "";
 
-function binanceRequest(method, path, params={}) {
+// ── BATCH-1 HIGH-3: binanceRequest robustness ───────────────────────────
+// Los helpers signed y retry están en src/binance_client.js (módulo puro,
+// testable en aislamiento). Aquí creamos las cierres (closures) sobre la
+// config actual del proceso (LIVE_MODE, API keys).
+const binanceClient = require("./binance_client");
+
+function binanceRequest(method, path, params = {}) {
   if (!LIVE_MODE) return Promise.resolve(null);
-  const ts  = Date.now();
-  const all = { ...params, timestamp: ts };
-  const qs  = new URLSearchParams(all).toString();
-  const sig = crypto2.createHmac("sha256", BINANCE_API_SECRET).update(qs).digest("hex");
-  const fullPath = `/api/v3/${path}?${qs}&signature=${sig}`;
-  return new Promise((resolve, reject) => {
-    const req = https2.request({
-      hostname: "api.binance.com", path: fullPath, method,
-      headers: { "X-MBX-APIKEY": BINANCE_API_KEY }
-    }, res => {
-      let d = ""; res.on("data", c => d+=c);
-      res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
-    });
-    req.on("error", reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
-    req.end();
+  return binanceClient.signedRequest({
+    method, path, params,
+    apiKey: BINANCE_API_KEY,
+    apiSecret: BINANCE_API_SECRET,
+    readOnly: false,
   });
 }
 
@@ -904,34 +899,12 @@ function binanceRequest(method, path, params={}) {
 // Sólo GET, sólo para sincronización de capital / auditoría. Nunca toca
 // fondos. Falla explícito si no hay API keys (para que syncCapitalFromBinance
 // pueda pausar BUYs en vez de operar con datos stale).
-function binanceReadOnlyRequest(method, path, params={}) {
-  if (!BINANCE_API_KEY || !BINANCE_API_SECRET)
-    return Promise.reject(new Error("Binance API keys missing"));
-  if (method !== "GET")
-    return Promise.reject(new Error("read-only: only GET allowed"));
-  const ts  = Date.now();
-  const all = { ...params, timestamp: ts };
-  const qs  = new URLSearchParams(all).toString();
-  const sig = crypto2.createHmac("sha256", BINANCE_API_SECRET).update(qs).digest("hex");
-  const fullPath = `/api/v3/${path}?${qs}&signature=${sig}`;
-  return new Promise((resolve, reject) => {
-    const req = https2.request({
-      hostname: "api.binance.com", path: fullPath, method,
-      headers: { "X-MBX-APIKEY": BINANCE_API_KEY }
-    }, res => {
-      let d = ""; res.on("data", c => d+=c);
-      res.on("end", () => {
-        try {
-          const parsed = JSON.parse(d);
-          if (parsed && typeof parsed.code === "number" && parsed.code < 0)
-            return reject(new Error(`Binance error ${parsed.code}: ${parsed.msg}`));
-          resolve(parsed);
-        } catch(e) { reject(e); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error("Timeout")); });
-    req.end();
+function binanceReadOnlyRequest(method, path, params = {}) {
+  return binanceClient.signedRequest({
+    method, path, params,
+    apiKey: BINANCE_API_KEY,
+    apiSecret: BINANCE_API_SECRET,
+    readOnly: true,
   });
 }
 
