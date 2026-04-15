@@ -277,6 +277,24 @@ if (BINANCE_API_KEY && BINANCE_API_SECRET) {
 } else {
   console.log("[SIMPLE][CAPITAL-SYNC] sin API keys — modo legacy, capitalEfectivo = declarado");
 }
+
+// ── A7: validación de invariante al boot (Opus M17) ──────────────────
+// Tras el primer sync (o su ausencia), verificamos que el ledger virtual
+// post-restart no exceda el capital efectivo. Si excede: CORRUPCIÓN —
+// pausar BUYs indefinidamente y alertar. Corre independiente de LIVE_MODE
+// porque es check puro de estado interno del simpleBot.
+if (S.simpleBot && typeof S.simpleBot.validateBootInvariant === "function") {
+  try {
+    const inv = S.simpleBot.validateBootInvariant();
+    if (inv.skipped) {
+      console.log(`[BOOT][INVARIANT] ⏭ skipped: ${inv.reason}`);
+    } else if (!inv.ok) {
+      console.error(`[BOOT][INVARIANT] ❌ VIOLATED: ${inv.reason}`);
+    }
+  } catch(e) {
+    console.warn("[BOOT][INVARIANT] check lanzó:", e.message);
+  }
+}
 // Verificar sufijos de pares vs streams de Binance
 const streamSymbols = new Set(PAIRS.map(p=>p.symbol));
 const simplePairs = [...new Set((S.simpleBot.getState?.()?.strategies||[]).map(s=>s.pair))];

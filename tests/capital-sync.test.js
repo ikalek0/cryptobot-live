@@ -673,3 +673,124 @@ describe("A5 — drawdown alerts + circuit breaker", () => {
     });
   });
 });
+
+// ── A7: validación de invariante al boot (Opus M17) ───────────────────
+// server.js initBot llama eng.validateBootInvariant() tras el primer
+// sync. El método es puro — no depende de red ni de LIVE_MODE. Verifica
+// que el ledger virtual (capa1+capa2+committed) no exceda capEfectivo*1.02.
+
+describe("A7 — boot invariant check (Opus M17)", () => {
+  it("OK: ledger consistente — no pausa", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 60;
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, true);
+    assert.equal(eng._capitalSyncPausedUntil, 0, "sin violación, pausedUntil queda en 0");
+    assert.equal(sent.length, 0);
+  });
+
+  it("OK: ledger con committed legítimo (posición abierta)", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 40;
+    eng.capa2Cash = 40;
+    // Committed de $20 → total 100 → exactamente capEfectivo
+    eng.portfolio = {
+      "POS_1": { pair: "BTCUSDC", capa: 1, invest: 20, qty: 0.001, entryPrice: 20000, stop: 19000, target: 21000, openTs: Date.now(), status: "filled" },
+    };
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, true);
+    assert.equal(r.totalLedger, 100);
+  });
+
+  it("OK: drift 1.5% dentro del tolerance 1.02", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 61; // 1% de drift
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const r = eng.validateBootInvariant();
+    // 101 ≤ 100*1.02 = 102 → OK
+    assert.equal(r.ok, true);
+  });
+
+  it("VIOLATED: ledger > capEfectivo*1.02 → pausedUntil=Infinity + alerta", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 150; // GROSS corruption
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, false);
+    assert.equal(r.totalLedger, 190);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "violación debe setear pausedUntil a Infinity");
+    assert.equal(sent.length, 1);
+    assert.ok(/INVARIANT VIOLATED/.test(sent[0]));
+  });
+
+  it("VIOLATED: committed inflado (portfolio corrupto) dispara la guard", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 30;
+    eng.capa2Cash = 30;
+    eng.portfolio = {
+      "POS_1": { pair: "X1", capa: 1, invest: 70, qty: 1, entryPrice: 70, stop: 65, target: 75, openTs: Date.now() },
+      "POS_2": { pair: "X2", capa: 2, invest: 60, qty: 1, entryPrice: 60, stop: 55, target: 65, openTs: Date.now() },
+    };
+    // total = 30 + 30 + 70 + 60 = 190 >> 100*1.02 = 102
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, false);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity);
+  });
+
+  it("SKIPPED: capEfectivo=0 (sync pendiente) → sin violación", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 0; // sin sync
+    eng.capa1Cash = 60;
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, true);
+    assert.equal(r.skipped, true);
+    assert.ok(/sync pendiente/.test(r.reason));
+  });
+
+  it("sin _telegramSend inyectado: violación no crashea aunque no envíe alerta", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 200;
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    // NO setTelegramSend
+    const r = eng.validateBootInvariant();
+    assert.equal(r.ok, false);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity);
+  });
+
+  it("server.js initBot llama validateBootInvariant tras syncCapitalFromBinance", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const src = fs.readFileSync(path.join(__dirname, "..", "src", "server.js"), "utf-8");
+    // Orden: syncCapitalFromBinance aparece antes de validateBootInvariant
+    const syncIdx = src.indexOf("S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())");
+    const invIdx  = src.indexOf("validateBootInvariant");
+    assert.ok(syncIdx > 0, "sync call debe existir en server.js");
+    assert.ok(invIdx > syncIdx,
+      "validateBootInvariant debe llamarse DESPUÉS del primer sync");
+  });
+});

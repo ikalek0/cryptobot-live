@@ -594,6 +594,53 @@ class SimpleBotEngine {
     this._telegramSend = (typeof fn === "function") ? fn : null;
   }
 
+  // ── A7: validación de invariante al boot (Opus M17) ──────────────────
+  // Llamado desde server.js initBot() tras el primer syncCapitalFromBinance.
+  // Verifica que el ledger virtual (capa1Cash + capa2Cash + committed) no
+  // exceda el capital efectivo (lo que Binance dice que tenemos). Si excede,
+  // pausa BUYs indefinidamente vía _capitalSyncPausedUntil=Infinity.
+  //
+  // Tolerance 1.02 (no 1.005 como el cap runtime) porque al boot puede
+  // haber drift de fills reconciliados antes del shutdown previo. El
+  // invariante runtime es más estricto porque está sincronizado tick a
+  // tick; este es el check inicial, más permisivo.
+  //
+  // NO intenta auto-reparar. Si el invariante se viola, la hipótesis más
+  // probable es corrupción de state.json (edición manual, crash mid-write)
+  // o un bug de reconciliación — ambos requieren intervención humana.
+  //
+  // Retorna: { ok: bool, totalLedger, capEfectivo, reason? }
+  validateBootInvariant() {
+    const capa1 = this.capa1Cash || 0;
+    const capa2 = this.capa2Cash || 0;
+    // A7 usa .invest nominal (no _investWithFee) para ser consistente con
+    // cómo se reconcilia el ledger en syncCapitalFromBinance (committedC1/C2
+    // suman invest plano). Si se usara _investWithFee, el invariante sería
+    // más estricto pero falso-positivo en bots post-restart legacy.
+    const committed = Object.values(this.portfolio || {}).reduce((s, p) => s + (p.invest || 0), 0);
+    const totalLedger = capa1 + capa2 + committed;
+    const capEfectivo = this._capitalEfectivo || 0;
+    // Si no hay capEfectivo conocido (sync aún no hecho), no podemos
+    // validar — devolver ok:true con skipped:true como sentinela.
+    if (!(capEfectivo > 0)) {
+      return { ok: true, skipped: true, reason: "capEfectivo=0 (sync pendiente)" };
+    }
+    const limit = capEfectivo * 1.02;
+    if (totalLedger > limit) {
+      this._capitalSyncPausedUntil = Infinity;
+      const tgSend = (msg) => {
+        if (typeof this._telegramSend === "function") {
+          try { this._telegramSend(msg); } catch {}
+        }
+      };
+      console.error(`[SIMPLE][BOOT][INVARIANT] ❌ totalLedger=$${totalLedger.toFixed(4)} > capEfectivo=$${capEfectivo.toFixed(4)} * 1.02 — BUYs pausados indefinidamente`);
+      tgSend(`🚨 <b>[BOOT] INVARIANT VIOLATED</b>\ntotalLedger=$${totalLedger.toFixed(2)} > capEfectivo=$${capEfectivo.toFixed(2)}\nBUYs pausados INDEFINIDAMENTE hasta intervención manual.\n\nProbable: state.json corrupto o bug de reconciliación. No auto-reparar.`);
+      return { ok: false, totalLedger, capEfectivo, limit, reason: "totalLedger > capEfectivo*1.02" };
+    }
+    console.log(`[SIMPLE][BOOT][INVARIANT] ✓ totalLedger=$${totalLedger.toFixed(4)} ≤ capEfectivo=$${capEfectivo.toFixed(4)} * 1.02`);
+    return { ok: true, totalLedger, capEfectivo, limit };
+  }
+
   // ── A5: drawdown alerts + circuit breaker ─────────────────────────────
   // Llamado desde getState() tras recalcular drawdownPct contra el peak.
   // Implementa el flujo de 4 umbrales escalados con latch anti-spam e
