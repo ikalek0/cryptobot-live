@@ -32,9 +32,28 @@ const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más c
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
 const BINANCE_API_KEY    = process.env.BINANCE_API_KEY    || "";
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET || "";
-// Fallback: si LIVE_MODE no viene del env, inferir de las API keys
+// BUG-5: LIVE_MODE DEBE ser explícito en .env — NO inferir de las API keys.
+// Antes existía un fallback: si LIVE_MODE no estaba definido, el bot inferia
+// LIVE_MODE=true cuando había API keys configuradas. Esto era un footgun
+// peligroso: cualquier operador que copiara .env de producción (con keys)
+// a un entorno nuevo sin setear LIVE_MODE, arrancaba ejecutando trades
+// reales sin consentimiento explícito. Cambiar a fail-closed: si LIVE_MODE
+// no está definido, ABORT boot. Si LIVE_MODE=false explícito, PAPER-LIVE.
+// Si LIVE_MODE=true explícito, LIVE.
+//
+// Permitimos bypass sólo en NODE_ENV=test para no romper `node --test`
+// (los tests pueden cargar server.js indirectamente vía require-time).
 const _lm = process.env.LIVE_MODE;
-const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "");
+if (typeof _lm === "undefined" && process.env.NODE_ENV !== "test") {
+  const banner = "!".repeat(70);
+  console.error(banner);
+  console.error("[BOOT] ❌ LIVE_MODE no definido en .env — debe ser 'true' o 'false' explícito");
+  console.error("[BOOT] ❌ Ya no se infiere de las API keys (footgun: copiar .env arrancaba LIVE)");
+  console.error("[BOOT] ❌ Aborto boot por seguridad. Define LIVE_MODE en .env y reintenta.");
+  console.error(banner);
+  process.exit(1);
+}
+const LIVE_MODE = _lm === "true";
 console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
 const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
 const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";

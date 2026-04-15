@@ -219,14 +219,46 @@ describe("LIVE_MODE safety", () => {
     assert.ok(content.includes("API_KEY"), "Must log API_KEY status at boot");
   });
 
-  it("LIVE_MODE defaults to false when env is undefined", () => {
+  it("LIVE_MODE requiere 'true' string explícito (no truthy)", () => {
     const content = fs.readFileSync(path.join(SRC, "server.js"), "utf-8");
-    // When LIVE_MODE env is undefined AND no API keys: should be false
-    // Code: const LIVE_MODE = _lm !== undefined ? _lm === "true" : (BINANCE_API_KEY !== "" && ...)
-    // With empty keys -> false. Good.
     assert.ok(
       content.includes('_lm === "true"'),
       'LIVE_MODE must require explicit "true" string, not truthy'
+    );
+  });
+
+  // ── BUG-5: LIVE_MODE explícito requerido (no inferir de API keys) ─────
+
+  it("BUG-5: server.js aborta boot si LIVE_MODE no está definido", () => {
+    const content = fs.readFileSync(path.join(SRC, "server.js"), "utf-8");
+    // Debe existir el check explícito que aborta boot si LIVE_MODE undefined
+    assert.ok(
+      /typeof\s+_lm\s*===\s*["']undefined["']/.test(content),
+      "Debe checkear typeof _lm === 'undefined' para abortar boot"
+    );
+    assert.ok(
+      content.includes("process.exit(1)"),
+      "Debe process.exit(1) cuando LIVE_MODE undefined (fail-closed)"
+    );
+    assert.ok(
+      /LIVE_MODE\s+no\s+definido/.test(content),
+      "Debe logear mensaje claro: LIVE_MODE no definido"
+    );
+  });
+
+  it("BUG-5: server.js NO infiere LIVE_MODE de BINANCE_API_KEY", () => {
+    const content = fs.readFileSync(path.join(SRC, "server.js"), "utf-8");
+    // Ya NO debe existir el fallback que infería LIVE_MODE de las API keys.
+    // Patrón antiguo: (BINANCE_API_KEY !== "" && BINANCE_API_SECRET !== "")
+    // como RHS del ternario que define LIVE_MODE.
+    assert.ok(
+      !/_lm\s*!==\s*undefined\s*\?\s*_lm\s*===\s*["']true["']\s*:\s*\(\s*BINANCE_API_KEY/.test(content),
+      "NO debe inferir LIVE_MODE de API keys — debe ser explícito en .env"
+    );
+    // El assignment final debe ser directo: LIVE_MODE = _lm === "true"
+    assert.ok(
+      /const\s+LIVE_MODE\s*=\s*_lm\s*===\s*["']true["']\s*;/.test(content),
+      "LIVE_MODE debe asignarse directo sin fallback de keys"
     );
   });
 });
