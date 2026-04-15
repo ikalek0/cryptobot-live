@@ -413,6 +413,17 @@ app.get("/api/simple", (_,res) => res.json(S.simpleBot ? S.simpleBot.getState() 
 // ── Endpoint compacto orientado a watchdog/invariantes ─────────────────
 // Devuelve el estado real del SimpleBotEngine (no el zombie ledger de S.bot),
 // incluyendo el invariante del cap estricto $100 para alertas externas.
+//
+// A10 OPERATIONAL SECURITY NOTE: el endpoint expone el estado de pausa
+// (`paused` = simpleBot mirror via /pausa Telegram, `tgControlsPaused` =
+// flag del listener de Telegram) para que un watchdog externo pueda
+// verificar si el bot está operando sin tener que consultar Telegram.
+// También se expone `capitalSyncPausedUntil` en raíz para detectar el
+// circuit breaker de drawdown (A5: `Infinity` cuando el CB de DD15% se
+// dispara). La distinción entre `paused` y `tgControlsPaused` importa
+// porque son fuentes de verdad distintas — la primera es el flag
+// persistido en disco (source of truth post-F2), la segunda es el
+// in-memory del listener de Telegram.
 app.get("/api/simpleBot/state", (_,res) => {
   const sb = S.simpleBot;
   if (!sb) return res.status(503).json({ loading: true, instance: LIVE_MODE?"LIVE":"PAPER-LIVE" });
@@ -423,6 +434,11 @@ app.get("/api/simpleBot/state", (_,res) => {
   const totalLedger = capa1Cash + capa2Cash + committed;
   const cap        = S.CAPITAL_USDT;
   const tv         = s.totalValue || 0;
+  // A10: distinguir pausa "simpleBot.paused" (persistida, vía /pausa
+  // Telegram) de "tgControlsPaused" (in-memory del listener). Un watchdog
+  // externo puede alertar si alguna de las dos está true.
+  const paused          = sb.paused === true;
+  const tgControlsPaused = !!(S.tgControls && typeof S.tgControls.isPaused === "function" && S.tgControls.isPaused());
   // M14: drawdownPct viene del engine (contra peak histórico, no contra
   // cap declarado). Antes este endpoint recalculaba drawdown = (cap-tv)/cap
   // lo que reportaba 86% con capital real $14 sin haber perdido nada.
@@ -445,17 +461,24 @@ app.get("/api/simpleBot/state", (_,res) => {
     trades:       s.trades,
     winRate:      s.winRate,
     returnPct:    s.returnPct,
+    // ── A10: pause flags para watchdog externo ────────────────────────
+    paused,
+    tgControlsPaused,
     // ── T0: capital dinámico (min(declarado, real)) ───────────────────
     capitalDeclarado: sb._capitalDeclarado,
     capitalReal:      sb._capitalReal,
     capitalEfectivo:  sb._capitalEfectivo,
     usdcLibre:        sb._usdcLibre,
     valorPosiciones:  sb._valorPosiciones,
+    // A10: alias en raíz para watchdogs que no quieran navegar capitalSync.
+    // Infinity (cuando A5 dispara CB) se serializa como null en JSON, así
+    // que usamos el número raw y documentamos que null = CB tripped.
+    capitalSyncPausedUntil: Number.isFinite(sb._capitalSyncPausedUntil) ? (sb._capitalSyncPausedUntil || 0) : null,
     capitalSync: {
       lastTs:      sb._lastCapitalSyncTs || 0,
       ok:          sb._lastCapitalSyncOk !== false,
       failCount:   sb._capitalSyncFailCount || 0,
-      pausedUntil: sb._capitalSyncPausedUntil || 0,
+      pausedUntil: Number.isFinite(sb._capitalSyncPausedUntil) ? (sb._capitalSyncPausedUntil || 0) : null,
       pausedNow:   Date.now() < (sb._capitalSyncPausedUntil || 0),
     },
     // ── T0-FEE: fee mode + BNB balance ────────────────────────────────
