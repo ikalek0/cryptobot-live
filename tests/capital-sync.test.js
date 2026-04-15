@@ -794,3 +794,110 @@ describe("A7 — boot invariant check (Opus M17)", () => {
       "validateBootInvariant debe llamarse DESPUÉS del primer sync");
   });
 });
+
+// ── BUG-1: sync success path NO debe borrar pausa si CB o boot invariant ─
+// Regression guard del bug detectado en auditoría adversarial: el éxito
+// del sync reseteaba _capitalSyncPausedUntil=0 incondicionalmente, borrando
+// la pausa Infinity seteada por el CB (A5) o por validateBootInvariant (A7).
+// El efecto era que el CB solo duraba hasta el próximo sync exitoso (~5min).
+
+describe("BUG-1 — sync success respeta CB + boot invariant", () => {
+  it("CB tripped + sync exitoso → pausedUntil sigue Infinity", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    setDrawdown(eng, 16);
+    eng.getState(); // dispara CB
+    assert.equal(eng._ddCircuitBreakerTripped, true, "pre: CB debe estar tripped");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity, "pre: pausedUntil=Infinity");
+    // Ahora un sync exitoso
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinance(100),
+    });
+    assert.equal(r.ok, true, "sync ok");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "POST-sync: pausedUntil DEBE seguir en Infinity (CB tripped)");
+    assert.equal(eng._ddCircuitBreakerTripped, true, "CB sigue tripped");
+  });
+
+  it("boot invariant violated + sync exitoso → pausedUntil sigue Infinity", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 200; // corrupted ledger
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const r1 = eng.validateBootInvariant();
+    assert.equal(r1.ok, false, "pre: invariante violado");
+    assert.equal(eng._bootInvariantViolated, true, "pre: flag seteado");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity, "pre: pausedUntil=Infinity");
+    // Sync exitoso — NO debe borrar la pausa
+    const r2 = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinance(100),
+    });
+    assert.equal(r2.ok, true, "sync ok");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "POST-sync: pausedUntil DEBE seguir en Infinity (boot invariant)");
+    assert.equal(eng._bootInvariantViolated, true, "flag sigue true");
+  });
+
+  it("sin CB ni boot invariant → sync exitoso resetea a 0 (comportamiento normal)", async () => {
+    const eng = new SimpleBotEngine({});
+    assert.equal(eng._ddCircuitBreakerTripped, false);
+    assert.equal(eng._bootInvariantViolated, false);
+    assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre: fail-closed default (10min)");
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinance(100),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(eng._capitalSyncPausedUntil, 0,
+      "POST-sync sin flags: pausedUntil debe ir a 0");
+  });
+
+  it("saveState persiste bootInvariantViolated", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 200;
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    eng.validateBootInvariant();
+    assert.equal(eng._bootInvariantViolated, true);
+    const saved = eng.saveState();
+    assert.equal(saved.bootInvariantViolated, true,
+      "saveState debe incluir bootInvariantViolated=true");
+  });
+
+  it("constructor restaura bootInvariantViolated + reaplica Infinity", () => {
+    // Mimic post-JSON round-trip: Infinity dropped a null
+    const savedRaw = {
+      bootInvariantViolated: true,
+      capitalSyncPausedUntil: null, // JSON dropped
+    };
+    const saved = JSON.parse(JSON.stringify(savedRaw));
+    const eng = new SimpleBotEngine(saved);
+    assert.equal(eng._bootInvariantViolated, true,
+      "flag debe restaurarse");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "constructor debe reaplicar Infinity al boot con flag tripped");
+  });
+
+  it("round-trip completo: save → parse → new instance preserva boot invariant", () => {
+    const eng1 = new SimpleBotEngine({});
+    eng1._capitalEfectivo = 100;
+    eng1.capa1Cash = 200;
+    eng1.capa2Cash = 40;
+    eng1.portfolio = {};
+    eng1.validateBootInvariant();
+    const saved = JSON.parse(JSON.stringify(eng1.saveState()));
+    const eng2 = new SimpleBotEngine(saved);
+    assert.equal(eng2._bootInvariantViolated, true);
+    assert.equal(eng2._capitalSyncPausedUntil, Infinity);
+  });
+
+  it("sin bootInvariantViolated en saved, el fail-closed de H7 sigue siendo finito", () => {
+    const saved = { bootInvariantViolated: false };
+    const eng = new SimpleBotEngine(saved);
+    assert.equal(eng._bootInvariantViolated, false);
+    assert.ok(Number.isFinite(eng._capitalSyncPausedUntil),
+      "sin flag: pausedUntil finito (H7 default)");
+  });
+});

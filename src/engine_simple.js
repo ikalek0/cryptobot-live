@@ -244,14 +244,25 @@ class SimpleBotEngine {
     this._ddAlert5             = saved.ddAlert5             === true;
     this._ddAlert10            = saved.ddAlert10            === true;
     this._ddCircuitBreakerTripped = saved.ddCircuitBreakerTripped === true;
-    // A5: re-aplicar la pausa infinita del CB tras restart. JSON.stringify
-    // convierte Infinity en null, así que _capitalSyncPausedUntil no sobrevive
-    // directamente. El flag del CB es la fuente de verdad persistida; si es
-    // true, reestablecemos Infinity (override del fail-closed de 10min que
-    // H7 habría aplicado por Math.max más arriba).
+    // BUG-1 (A7 hardening): flag persistido análogo al CB para el boot
+    // invariant violation. validateBootInvariant() lo setea a true si
+    // detecta ledger corrupto al arrancar, y pausa BUYs indefinidamente
+    // vía _capitalSyncPausedUntil = Infinity. Al igual que el CB, requiere
+    // reset manual (data/state.json → bootInvariantViolated: false).
+    this._bootInvariantViolated = saved.bootInvariantViolated === true;
+    // A5 + BUG-1: re-aplicar la pausa infinita del CB/boot-invariant tras
+    // restart. JSON.stringify convierte Infinity en null, así que
+    // _capitalSyncPausedUntil no sobrevive directamente. Los flags son la
+    // fuente de verdad persistida; si cualquiera es true, reestablecemos
+    // Infinity (override del fail-closed de 10min que H7 habría aplicado
+    // por Math.max más arriba).
     if (this._ddCircuitBreakerTripped) {
       this._capitalSyncPausedUntil = Infinity;
       console.warn("[SIMPLE][CB] Circuit breaker persistido: _capitalSyncPausedUntil = Infinity (restart con CB tripped)");
+    }
+    if (this._bootInvariantViolated) {
+      this._capitalSyncPausedUntil = Infinity;
+      console.warn("[SIMPLE][BOOT][INVARIANT] Boot invariant violation persistida: _capitalSyncPausedUntil = Infinity (restart con flag tripped)");
     }
     // Inyectable por server.js tras construir el engine (análogo a
     // _binanceReadOnlyRequest). Si el test no lo setea, los sends son no-op
@@ -627,6 +638,10 @@ class SimpleBotEngine {
     }
     const limit = capEfectivo * 1.02;
     if (totalLedger > limit) {
+      // BUG-1: setear flag ANTES de Infinity para que el sync success path
+      // guard (línea 804) no borre la pausa en el próximo sync exitoso.
+      // El flag también sobrevive restarts vía saveState.
+      this._bootInvariantViolated = true;
       this._capitalSyncPausedUntil = Infinity;
       const tgSend = (msg) => {
         if (typeof this._telegramSend === "function") {
@@ -801,7 +816,17 @@ class SimpleBotEngine {
       this._lastCapitalSyncTs    = Date.now();
       this._lastCapitalSyncOk    = true;
       this._capitalSyncFailCount = 0;
-      this._capitalSyncPausedUntil = 0;
+      // BUG-1: si el CB (A5) o el boot invariant (A7) están tripped, el sync
+      // exitoso NO debe borrar la pausa indefinida. Antes: el sync corría cada
+      // ~5min y el primer éxito post-trip reseteaba _capitalSyncPausedUntil a 0,
+      // permitiendo BUYs durante el flash crash o con ledger corrupto. Ambos
+      // flags requieren recovery manual (editar data/state.json o state DB).
+      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated) {
+        this._capitalSyncPausedUntil = 0;
+      } else {
+        const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
+        console.warn(`[SIMPLE][CAPITAL-SYNC] sync OK pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity hasta recovery manual`);
+      }
 
       console.log(`[SIMPLE][CAPITAL-SYNC] declarado=$${declarado.toFixed(2)} real=$${real.toFixed(2)} efectivo=$${efectivo.toFixed(2)} usdcLibre=$${usdcLibre.toFixed(2)} valorPos=$${valorPosiciones.toFixed(2)} capa1=$${this.capa1Cash.toFixed(2)} capa2=$${this.capa2Cash.toFixed(2)}${changed?" (ajustado)":""}`);
 
@@ -1338,6 +1363,11 @@ class SimpleBotEngine {
       ddAlert5:               this._ddAlert5             === true,
       ddAlert10:              this._ddAlert10            === true,
       ddCircuitBreakerTripped: this._ddCircuitBreakerTripped === true,
+      // BUG-1 (A7 hardening): persistir violación de boot invariant para que
+      // el constructor reaplique _capitalSyncPausedUntil=Infinity tras
+      // restart. Misma razón que ddCircuitBreakerTripped: JSON no preserva
+      // Infinity. Requiere recovery manual (editar el flag a false).
+      bootInvariantViolated:  this._bootInvariantViolated === true,
     };
   }
 }
