@@ -1240,6 +1240,23 @@ class SimpleBotEngine {
     }
   }
 
+  // ── CONTRATO evaluate() ────────────────────────────────────────────────
+  // Responsabilidades:
+  //   - Reconciliar pending stuck (_cleanupStalePending)
+  //   - Evaluar drawdown alerts + CB
+  //   - Iterar portfolio abierto para stops/targets/time-stops (cierra
+  //     posiciones si se cumplen)
+  //
+  // NO responsabilidad de evaluate():
+  //   - Crear nuevas posiciones. Eso lo hace _onCandleClose via
+  //     updatePrice(). _onCandleClose tiene su propio pause gate (línea 484)
+  //     para bloquear BUYs cuando this.paused === true.
+  //
+  // BATCH-1 FIX #3 (bug #10): evaluate() DEBE ejecutarse incluso cuando el
+  // bot está pausado (this.paused === true). Si nos saltamos evaluate()
+  // durante la pausa, los stops/targets de posiciones ya abiertas no se
+  // disparan y el usuario queda atrapado en un crash de mercado. /pausa
+  // bloquea NUEVAS entradas, no atrapa las existentes.
   async evaluate(){
     await this._cleanupStalePending(); // FIX-M9 + C4: rollback/reconcile pending stuck
     // BUG-2: garantizar que _checkDrawdownAlerts se evalúa cada tick, no solo

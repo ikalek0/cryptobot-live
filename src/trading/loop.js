@@ -244,12 +244,26 @@ setInterval(async()=>{
     // el race del dispatcher basado en log.filter y garantiza que:
     //   - placeLiveBuy ve el portfolio ya mutado con status="pending" (ctx.strategyId)
     //   - applyRealBuyFill / applyRealSellFill pueden reconciliar contra la reserva
-    if(S.simpleBot && !S.tgControls?.isPaused() && !S.bot._pausedByTelegram) {
+    //
+    // BATCH-1 FIX #3 (bug #10): evaluate() debe ejecutarse SIEMPRE, incluso
+    // cuando el usuario pausa el bot con /pausa. evaluate() sólo procesa
+    // stops/targets/time-stops de posiciones YA ABIERTAS — no crea nuevas.
+    // La creación de nuevas posiciones está gobernada por _onCandleClose
+    // que tiene su propio pause gate en engine_simple.js:484
+    // (`if (this.paused === true) return;`).
+    //
+    // Bug previo: si el usuario pausaba durante una crisis, el bot no podía
+    // vender sus posiciones. Un stop-loss a -3% nunca disparaba porque
+    // evaluate() se saltaba y el precio seguía cayendo. El /pausa debe
+    // bloquear NUEVAS entradas, no atrapar las existentes.
+    if(S.simpleBot) {
       // C4: evaluate() es ahora async (cleanupStalePending puede hacer
       // GET myTrades antes del rollback). El try/catch del tick completo
       // captura excepciones para que no maten el loop.
       await S.simpleBot.evaluate();
-      // Save simple state every 6 ticks
+      // Save simple state every 6 ticks — persistencia debe continuar
+      // aunque el bot esté pausado (sino los stops ejecutados durante la
+      // pausa se perderían en el próximo restart).
       if(ticks%6===0) {
         S.simpleBot.saveState && saveSimpleState(S.simpleBot.saveState()).catch(()=>{});
       }
