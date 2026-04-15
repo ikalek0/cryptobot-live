@@ -493,9 +493,32 @@ class SimpleBotEngine {
     // ── T0 capital sync gate: si la sincronización contra Binance falló,
     // bloqueamos NUEVOS BUYs durante 5min. Las SELLs (evaluate() → stops/
     // targets) siguen ejecutándose para no dejar posiciones atrapadas.
-    if (Date.now() < (this._capitalSyncPausedUntil || 0)) {
-      const remaining = Math.ceil(((this._capitalSyncPausedUntil||0) - Date.now())/1000);
-      console.log(`[SIMPLE][CAPITAL-SYNC] ${cfg.id} bloqueado — sync falló hace ${remaining}s restantes`);
+    //
+    // ── H10-CRITICAL follow-up: defense in depth ─────────────────────────
+    // Además del timestamp, revisamos latches persistentes. Caso de borde:
+    // PM2 restart durante depeg severo. _depegPauseActive=true se persiste
+    // vía saveState, pero _capitalSyncPausedUntil (T+1h serializado a JSON)
+    // se reemplaza por H7 fail-closed en el constructor (now+10min). Una
+    // vez vencidos los 10min, un gate que sólo mire timestamp permitiría
+    // BUYs con el peg aún roto. A diferencia de CB/bootInvariant que el
+    // constructor re-fuerza a Infinity, _depegPauseActive es time-bound,
+    // así que lo tratamos como fuente de verdad adicional. Este patrón
+    // también cubre futuras pausas que setean flag pero no pueden mantener
+    // un timestamp estable a través de restarts.
+    const pausedByTimestamp = Date.now() < (this._capitalSyncPausedUntil || 0);
+    const pausedByLatch = this._ddCircuitBreakerTripped
+                       || this._bootInvariantViolated
+                       || this._depegPauseActive;
+    if (pausedByTimestamp || pausedByLatch) {
+      if (pausedByLatch && !pausedByTimestamp) {
+        const reason = this._ddCircuitBreakerTripped
+          ? "CB tripped"
+          : (this._bootInvariantViolated ? "boot invariant" : "depeg pause");
+        console.warn(`[SIMPLE][GATE] ${cfg.id} BUY blocked by latch (${reason}) — timestamp expired but flag still active`);
+      } else {
+        const remaining = Math.ceil(((this._capitalSyncPausedUntil||0) - Date.now())/1000);
+        console.log(`[SIMPLE][CAPITAL-SYNC] ${cfg.id} bloqueado — sync falló hace ${remaining}s restantes`);
+      }
       return;
     }
     // ── C2 stream-dead gate: si el WebSocket de Binance no emite ticks

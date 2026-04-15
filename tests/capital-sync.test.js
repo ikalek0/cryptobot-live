@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 process.env.CAPITAL_USDC = "100";
 process.env.CAPITAL_USDT = "100";
 
-const { SimpleBotEngine } = require("../src/engine_simple");
+const { SimpleBotEngine, STRATEGIES, evalSignal } = require("../src/engine_simple");
 
 // Helper: crea un fake binanceReadOnlyRequest que devuelve balances dados.
 function makeFakeBinance(usdcFree) {
@@ -1328,5 +1328,136 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
       "pausa persistida NO debe borrarse por el success path post-restart");
     assert.equal(eng2._depegPauseActive, true,
       "flag sigue true post-restart tras sync con ticker fail");
+  });
+});
+
+// ── H10-CRITICAL follow-up: defense in depth en _onCandleClose ──────────
+// El guard anterior del capital-sync gate miraba SOLO el timestamp. Edge
+// case: PM2 restart durante depeg severo. saveState persiste
+// _depegPauseActive=true PERO _capitalSyncPausedUntil (T+1h) se serializa
+// a un número que luego H7 fail-closed restaura a now+10min. Tras los
+// 10min, el gate anterior permitía BUYs porque el flag estaba ignorado.
+//
+// Misma clase de bug afecta _ddCircuitBreakerTripped y
+// _bootInvariantViolated — en sus casos el constructor re-fuerza
+// pausedUntil a Infinity, así que el timestamp-only check funcionaba por
+// accidente. Pero cualquier futuro latch time-bound tendría el mismo
+// agujero. Fix: el gate ahora evalúa (timestamp || latch) como trigger.
+//
+// Estos 3 tests cubren: depeg latch sin timestamp, CB latch sin
+// timestamp, y path normal sin latch (sanity: no falsos positivos).
+function buyCandlesRSI_for_gate() {
+  // Fixture que dispara BUY para RSI_MR_ADX en BNB_1h_RSI — 22 flat +
+  // 14 subida + 13 bajada + 1 sharp drop. Copiado literal de
+  // pause-gate.test.js para mantener los tests self-contained.
+  const c = [];
+  for (let i = 0; i < 22; i++) {
+    c.push({ open: 100, high: 100.1, low: 99.9, close: 100, start: 0 });
+  }
+  for (let i = 0; i < 14; i++) {
+    const p = 100 + i * 0.5;
+    c.push({ open: p, high: p + 0.3, low: p - 0.3, close: p + 0.3, start: 0 });
+  }
+  for (let i = 0; i < 13; i++) {
+    const p = 106.5 - i * 0.7;
+    c.push({ open: p, high: p + 0.3, low: p - 0.3, close: p - 0.3, start: 0 });
+  }
+  c.push({ open: 97.5, high: 97.7, low: 95.5, close: 95.5, start: 0 });
+  return c;
+}
+
+describe("H10-CRITICAL follow-up — _onCandleClose gate revisa latches además del timestamp", () => {
+  it("depeg latch activo + timestamp expirado → BUY bloqueado (post-restart edge case)", () => {
+    // Simulamos el estado post-restart tras H7 fail-closed: flag persistido
+    // true, pero pausedUntil ya venció (0 para simplificar — el gate no
+    // distingue entre <now y 0).
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;      // timestamp expirado
+    bot._depegPauseActive = true;         // latch restaurado desde saveState
+    bot._ddCircuitBreakerTripped = false;
+    bot._bootInvariantViolated = false;
+    bot.paused = false;
+
+    // Fixture disparando BUY — sin el fix, el gate solo miraría timestamp
+    // (que es 0) y dejaría pasar el tick → se abriría posición con peg roto.
+    assert.equal(evalSignal("RSI_MR_ADX", buyCandlesRSI_for_gate()), "BUY",
+      "pre-condition: fixture dispara BUY");
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI_for_gate();
+    bot.prices["BNBUSDC"] = 95.5;
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+
+    // Interceptar warn para verificar el log de defense-in-depth
+    const origWarn = console.warn;
+    const warns = [];
+    console.warn = (...args) => warns.push(args.join(" "));
+
+    const portfolioBefore = Object.keys(bot.portfolio).length;
+    try {
+      bot._onCandleClose(cfg, "BNBUSDC_1h");
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.equal(Object.keys(bot.portfolio).length, portfolioBefore,
+      "portfolio NO debe mutarse: latch de depeg debe bloquear BUY");
+    assert.ok(!bot.portfolio["BNB_1h_RSI"],
+      "no debe haberse abierto posición BNB_1h_RSI");
+    const gateWarn = warns.find(l => l.includes("[SIMPLE][GATE]") && l.includes("depeg pause"));
+    assert.ok(gateWarn,
+      `debe loguearse warn del gate latch (depeg). warns=${JSON.stringify(warns)}`);
+  });
+
+  it("CB latch activo + timestamp expirado → BUY bloqueado", () => {
+    // Aunque el constructor normalmente re-fuerza pausedUntil a Infinity
+    // cuando CB está trippeado, aquí testeamos el gate en aislamiento:
+    // si por cualquier razón llegamos a un estado con flag=true y
+    // timestamp=0, el gate debe bloquear igualmente.
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    bot._ddCircuitBreakerTripped = true;
+    bot._depegPauseActive = false;
+    bot._bootInvariantViolated = false;
+    bot.paused = false;
+
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI_for_gate();
+    bot.prices["BNBUSDC"] = 95.5;
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+
+    const origWarn = console.warn;
+    const warns = [];
+    console.warn = (...args) => warns.push(args.join(" "));
+
+    const portfolioBefore = Object.keys(bot.portfolio).length;
+    try {
+      bot._onCandleClose(cfg, "BNBUSDC_1h");
+    } finally {
+      console.warn = origWarn;
+    }
+
+    assert.equal(Object.keys(bot.portfolio).length, portfolioBefore,
+      "portfolio NO debe mutarse: CB latch debe bloquear BUY");
+    const gateWarn = warns.find(l => l.includes("[SIMPLE][GATE]") && l.includes("CB tripped"));
+    assert.ok(gateWarn,
+      `debe loguearse warn del gate latch (CB). warns=${JSON.stringify(warns)}`);
+  });
+
+  it("sanity: sin latches + timestamp expirado → BUY ejecuta (gate NO bloquea falsos positivos)", () => {
+    // Verifica que el fix no introduce una regresión: el path feliz
+    // (ningún flag activo, sync OK) sigue permitiendo BUYs.
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;       // timestamp OK (no paused)
+    bot._ddCircuitBreakerTripped = false;  // sin latches
+    bot._bootInvariantViolated = false;
+    bot._depegPauseActive = false;
+    bot.paused = false;
+
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI_for_gate();
+    bot.prices["BNBUSDC"] = 95.5;
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+
+    assert.ok(bot.portfolio["BNB_1h_RSI"],
+      "sanity: sin latches ni timestamp activo, BUY debe ejecutarse");
   });
 });
