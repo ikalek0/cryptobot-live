@@ -160,6 +160,56 @@ describe("A8 — config.js single source of truth", () => {
   });
 });
 
+// ── A9: unhandledRejection handler con Telegram notification ───────────────
+// Regression guard: el handler existe + persiste (FIX-M10 throttle) + envía
+// aviso Telegram con contexto (A9). Antes de A9 el handler solo loggeaba y
+// guardaba silenciosamente — ops se enteraba horas después.
+
+describe("A9 — unhandledRejection handler", () => {
+  const serverContent = fs.readFileSync(path.join(SRC, "server.js"), "utf-8");
+
+  it("server.js registra process.on('unhandledRejection', ...)", () => {
+    assert.ok(
+      /process\.on\s*\(\s*["']unhandledRejection["']/.test(serverContent),
+      "server.js debe registrar handler de unhandledRejection"
+    );
+  });
+
+  it("solo existe UN handler de unhandledRejection (no duplicado)", () => {
+    const matches = serverContent.match(/process\.on\s*\(\s*["']unhandledRejection["']/g) || [];
+    assert.equal(matches.length, 1, `esperaba 1 handler, encontré ${matches.length}`);
+  });
+
+  it("handler envía tg.send con marker UNHANDLED REJECTION (A9)", () => {
+    // Localizar el bloque del handler y verificar que contiene tg.send
+    const idx = serverContent.indexOf('process.on("unhandledRejection"');
+    assert.ok(idx > 0, "handler debe existir");
+    // El cuerpo del handler se extiende hasta unos 1500 chars adelante
+    const body = serverContent.slice(idx, idx + 1800);
+    assert.ok(body.includes("tg.send"),       "handler debe invocar tg.send");
+    assert.ok(body.includes("UNHANDLED REJECTION"), "handler debe incluir marker claro");
+    // El tg.send debe estar dentro de try/catch por si tg no está listo
+    assert.ok(/try\s*\{[^}]*tg\.send/s.test(body), "tg.send debe estar dentro de try (tg puede no estar listo)");
+  });
+
+  it("handler preserva throttle FIX-M10 (30s entre saves)", () => {
+    assert.ok(
+      serverContent.includes("REJECTION_SAVE_THROTTLE_MS"),
+      "throttle FIX-M10 debe preservarse — no hacer spam de writes"
+    );
+  });
+
+  it("handler NO llama process.exit (decisión PM2)", () => {
+    const idx = serverContent.indexOf('process.on("unhandledRejection"');
+    const body = serverContent.slice(idx, idx + 1800);
+    // Debe NO contener process.exit dentro del handler
+    assert.ok(
+      !/process\.exit/.test(body),
+      "handler NO debe llamar process.exit — PM2 decide si reiniciar"
+    );
+  });
+});
+
 // ── LIVE_MODE safety ────────────────────────────────────────────────────────
 
 describe("LIVE_MODE safety", () => {

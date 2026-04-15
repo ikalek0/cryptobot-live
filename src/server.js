@@ -729,10 +729,30 @@ process.on("uncaughtException", async (err) => {
 // Sin throttle: 100+ writes a disco/DB por minuto → desgaste SSD + posible
 // bottleneck I/O. Con throttle de 30s: logging siempre, persistencia como mucho
 // cada 30s (suficiente para recovery tras crash sin matar el disco).
+//
+// A9: enhance con Telegram notification. Antes este handler solo loggeaba y
+// persistía silenciosamente — ops no veía nada en Telegram y podía pasarse
+// horas sin enterarse de una promise rejection recurrente (network blip,
+// API key inválida, bug de código). Ahora envía un mensaje resumido con
+// stack trunco. El envío es try/catch porque `tg` puede no estar listo
+// (rejection durante el propio boot antes de initBot) — en ese caso sólo
+// queda el console.error, que siempre funciona. El throttle de save NO se
+// aplica al Telegram send porque queremos visibilidad inmediata de cada
+// rejection única; si hay storm, el rate limit del propio telegram.send
+// (400ms entre mensajes) absorbe el burst sin tirar el handler.
 let _lastRejectionSave = 0;
 const REJECTION_SAVE_THROTTLE_MS = 30 * 1000;
 process.on("unhandledRejection", async (reason) => {
+  const msg = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
   console.error("[CRASH] unhandledRejection:", reason?.message||reason);
+  // A9: aviso Telegram con contexto truncado a 500 chars para no exceder
+  // el límite de 4096 de la API. try/catch interno por si tg no está listo
+  // (handler registra antes que initBot termine).
+  try {
+    if (typeof tg !== "undefined" && tg && typeof tg.send === "function") {
+      tg.send(`🚨 <b>[LIVE] UNHANDLED REJECTION</b>\n<code>${msg.slice(0, 500)}</code>\n\nProceso continúa. Revisar logs PM2.`);
+    }
+  } catch {}
   // Menos agresivo que uncaughtException: muchas unhandled rejections vienen de
   // fetches opcionales (F&G, news, etc). Solo persistimos por seguridad, sin exit.
   const now = Date.now();
