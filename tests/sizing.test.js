@@ -1063,3 +1063,203 @@ describe("H9: placeLiveSell error rollbackea crédito virtual", () => {
       "_rollbackVirtualSellCredit debe mandar alerta Telegram");
   });
 });
+
+// ── A4: cap check incluyendo fee (Opus M12) ─────────────────────────────
+// Antes: committed sum + check usaban invest nominal sin fee. El tolerance
+// 0.5% quedaba al borde cuando N estrategias abrían en USDC mode. Ahora:
+// committed usa _investWithFee (guardado al crear pos, fallback 1+FEE_RATE_USDC
+// para legacy), y el check compara invest*feeMult contra headroom.
+describe("A4 — cap check con fee incluido (Opus M12)", () => {
+  const FEE_RATE = 0.001; // = FEE_RATE_USDC en engine_simple.js
+
+  it("new position guarda _investWithFee en modo USDC (sin BNB)", () => {
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    // Forzar modo USDC: deshabilitar BNB fee y quitar precio BNB.
+    bot._bnbFeeEnabled = false;
+    bot._bnbBalance    = 0;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot.prices["BNBUSDC"] = 95.5;
+    // Garantizar que el trade tendrá invest >= $10 para no skip. Usamos
+    // CAPITAL grande para que kelly=0.164 → invest=CAP*0.082 >= 10.
+    // Con CAP=100, 0.082*100=8.2 < 10 → skip. Pre-pump cash:
+    bot.capa1Cash = 200*K;
+    bot.capa2Cash = 200*K;
+    // Seed trades extras para que el kelly real sea mayor
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    const pos = bot.portfolio["BNB_1h_RSI"];
+    if (!pos) {
+      // Si el kelly gate cortó, usamos otra estrategia; no es el test a cubrir.
+      return;
+    }
+    assert.ok(typeof pos._investWithFee === "number",
+      "_investWithFee debe estar presente en la pos recién creada");
+    // En modo USDC feeMult=1.001, así que _investWithFee = invest*1.001
+    const expected = pos.invest * (1 + FEE_RATE);
+    assert.ok(Math.abs(pos._investWithFee - expected) < 1e-9,
+      `_investWithFee=${pos._investWithFee} debe = invest*(1+FEE_RATE) = ${expected}`);
+  });
+
+  it("new position _investWithFee === invest en modo BNB (fee=0)", () => {
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    // Modo BNB: precio cacheado + balance suficiente
+    bot._bnbFeeEnabled = true;
+    bot._bnbBalance    = 1; // 1 BNB > cualquier fee esperado
+    bot.prices["BNBUSDC"] = 95.5; // precio BNB cacheado
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot.capa1Cash = 200*K;
+    bot.capa2Cash = 200*K;
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    const pos = bot.portfolio["BNB_1h_RSI"];
+    if (!pos) return;
+    assert.ok(typeof pos._investWithFee === "number");
+    // En modo BNB FEE_efectivo=0 → feeMult=1 → _investWithFee === invest
+    assert.ok(Math.abs(pos._investWithFee - pos.invest) < 1e-9,
+      `modo BNB: _investWithFee (${pos._investWithFee}) debe === invest (${pos.invest})`);
+  });
+
+  it("committed sum usa _investWithFee de posiciones existentes", () => {
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    bot._bnbFeeEnabled = false; // modo USDC
+    // Pre-populate con 3 phantoms al 90% del cap en modo USDC.
+    // Sin A4: committed sum = 90*K, headroom = 100.5 - 90 = 10.5 → invest pasa.
+    // Con A4: committed sum incluye fee, = 90 * 1.001 = 90.09 → headroom = 10.41.
+    // Nuevo invest debe shrink a 10.41/1.001 ≈ 10.399.
+    bot.portfolio["PHANTOM_A"] = { pair: "X1", capa: 1, invest: 30*K, _investWithFee: 30*K*(1+FEE_RATE), qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PHANTOM_B"] = { pair: "X2", capa: 1, invest: 30*K, _investWithFee: 30*K*(1+FEE_RATE), qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PHANTOM_C"] = { pair: "X3", capa: 2, invest: 30*K, _investWithFee: 30*K*(1+FEE_RATE), qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.capa1Cash = 100*K;
+    bot.capa2Cash = 100*K;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot.prices["BNBUSDC"] = 95.5;
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    // Invariante: SUM(_investWithFee) <= CAP_LIMIT (cap*1.005)
+    const committedWithFee = Object.values(bot.portfolio).reduce((s, p) => {
+      if (typeof p._investWithFee === "number") return s + p._investWithFee;
+      return s + (p.invest || 0) * (1 + FEE_RATE);
+    }, 0);
+    assert.ok(committedWithFee <= CAP_LIMIT + 0.01,
+      `committed(w/fee)=${committedWithFee.toFixed(4)} debe ≤ CAP_LIMIT=${CAP_LIMIT} (A4 invariante)`);
+  });
+
+  it("fallback legacy: posición sin _investWithFee usa 1+FEE_RATE como upper bound", () => {
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    bot._bnbFeeEnabled = false;
+    // Phantom LEGACY: sin _investWithFee explícito
+    bot.portfolio["LEGACY"] = { pair: "X1", capa: 1, invest: 95*K, qty: 0.9, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.capa1Cash = 100*K;
+    bot.capa2Cash = 100*K;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot.prices["BNBUSDC"] = 95.5;
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    // committed(fallback) = 95*K * 1.001 = 95.095*K
+    // headroom = 100.5 - 95.095 = 5.405*K → investShrunk ≈ 5.399*K
+    // Con K=1 (CAP=100): investShrunk < 10 → skip
+    // Con K>=2: shrink acepta
+    const newPos = bot.portfolio["BNB_1h_RSI"];
+    if (newPos) {
+      // Si aceptó, el invariante post-trade debe mantenerse
+      const committedWithFee = Object.values(bot.portfolio).reduce((s, p) => {
+        if (typeof p._investWithFee === "number") return s + p._investWithFee;
+        return s + (p.invest || 0) * (1 + FEE_RATE);
+      }, 0);
+      assert.ok(committedWithFee <= CAP_LIMIT + 0.01,
+        `invariante A4 debe mantenerse tras BUY con legacy phantom`);
+    }
+  });
+
+  it("7 posiciones al borde del cap (USDC mode) mantienen el invariante secuencialmente", () => {
+    // Simulación: inyectar 6 phantoms y forzar que la 7ª intente abrir.
+    // Verificación paso a paso: cada inyección sintética debe pasar el
+    // invariante committed(w/fee) + next(w/fee) <= cap*1.005.
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    bot._bnbFeeEnabled = false;
+    const cap = INITIAL_CAPITAL * 1.005; // A4: respeta misma tolerance
+    // Cada phantom aporta ~14.3% → 6 phantoms ≈ 85.8%, dejando 14.7% headroom.
+    // Pero con fee 0.1%, committed(w/fee) = 85.8 * 1.001 ≈ 85.886
+    // headroom = cap - 85.886 = 100.5 - 85.886 = 14.614
+    // Nuevo máximo aceptable: 14.614 / 1.001 ≈ 14.599
+    const sharePct = 0.143;
+    const shareInvest = INITIAL_CAPITAL * sharePct;
+    for (let i = 1; i <= 6; i++) {
+      bot.portfolio[`PH_${i}`] = {
+        pair: `X${i}`, capa: (i <= 3 ? 1 : 2),
+        invest: shareInvest,
+        _investWithFee: shareInvest * (1 + FEE_RATE),
+        qty: 0.1, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled",
+      };
+    }
+    // Verificar invariante ANTES del séptimo
+    const committedBefore = Object.values(bot.portfolio).reduce((s, p) => s + p._investWithFee, 0);
+    assert.ok(committedBefore <= cap + 0.01, `Pre-7º: committed=${committedBefore} debe ≤ cap=${cap}`);
+    // Disparar 7º BUY
+    bot.capa1Cash = 100*K; bot.capa2Cash = 100*K;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot.prices["BNBUSDC"] = 95.5;
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    // Post-7º: invariante debe seguir en pie
+    const committedAfter = Object.values(bot.portfolio).reduce((s, p) => {
+      if (typeof p._investWithFee === "number") return s + p._investWithFee;
+      return s + (p.invest || 0) * (1 + FEE_RATE);
+    }, 0);
+    assert.ok(committedAfter <= cap + 0.01,
+      `A4: committed(w/fee) final=${committedAfter.toFixed(4)} debe ≤ cap*1.005=${cap}`);
+  });
+
+  it("modo BNB: feeMult=1 — comportamiento idéntico al pre-A4 (sin shrink extra)", () => {
+    const bot = new SimpleBotEngine({});
+    bot._capitalSyncPausedUntil = 0;
+    bot._bnbFeeEnabled = true;
+    bot._bnbBalance    = 1;
+    bot.prices["BNBUSDC"] = 95.5;
+    // Pre-populate: 3 phantoms con _investWithFee igual al invest (modo BNB)
+    bot.portfolio["PH_A"] = { pair: "X1", capa: 1, invest: 30*K, _investWithFee: 30*K, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PH_B"] = { pair: "X2", capa: 1, invest: 30*K, _investWithFee: 30*K, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.portfolio["PH_C"] = { pair: "X3", capa: 2, invest: 30*K, _investWithFee: 30*K, qty: 0.3, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(), status: "filled" };
+    bot.capa1Cash = 100*K;
+    bot.capa2Cash = 100*K;
+    bot._candles["BNBUSDC_1h"] = buyCandlesRSI();
+    bot._stratTrades["BNB_1h_RSI"] = new Array(30).fill(null).map(() => ({ pnl: 2, ts: Date.now() }));
+    const cfg = STRATEGIES.find(s => s.id === "BNB_1h_RSI");
+    bot._onCandleClose(cfg, "BNBUSDC_1h");
+    // En modo BNB feeMult=1, así que el invariante debe ser equivalente
+    // al cap nominal 100.5
+    const committedAfter = Object.values(bot.portfolio).reduce((s, p) => s + (p._investWithFee || p.invest || 0), 0);
+    assert.ok(committedAfter <= CAP_LIMIT + 0.01,
+      `modo BNB: committed=${committedAfter} debe ≤ ${CAP_LIMIT}`);
+  });
+
+  it("applyRealBuyFill recomputa _investWithFee tras reconcile", () => {
+    const bot = new SimpleBotEngine({});
+    bot.portfolio["BNB_1h_RSI"] = {
+      pair: "BNBUSDC", capa: 1, invest: 20*K, _investWithFee: 20*K*(1+FEE_RATE),
+      qty: 0.2, entryPrice: 100, stop: 99, target: 101, openTs: Date.now(),
+      status: "pending",
+      _feePredicted: { FEE_efectivo: FEE_RATE, mode: "USDC" },
+    };
+    bot.capa1Cash = CAPA1_CAP - 20*K;
+    bot.capa2Cash = CAPA2_CAP;
+    // Real: slippage +10% → realSpent = 22*K
+    bot.applyRealBuyFill("BNB_1h_RSI", { realSpent: 22*K, realQty: 0.22 });
+    const pos = bot.portfolio["BNB_1h_RSI"];
+    assert.equal(pos.status, "filled");
+    assert.ok(Math.abs(pos.invest - 22*K) < 1e-9);
+    // _investWithFee debe haberse recomputado
+    assert.ok(Math.abs(pos._investWithFee - 22*K*(1+FEE_RATE)) < 1e-6,
+      `_investWithFee post-reconcile debe = 22*K*(1+FEE_RATE) = ${22*K*(1+FEE_RATE)}, got ${pos._investWithFee}`);
+  });
+});

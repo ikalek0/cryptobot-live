@@ -447,21 +447,51 @@ class SimpleBotEngine {
     const feeMult    = 1 + feePredBuy.FEE_efectivo;
     if (invest * feeMult > availCash) invest = availCash / feeMult;
 
-    // ── FIX-A + T0: Global committed cap check ATÓMICO ────────────────────
+    // ── FIX-A + T0 + A4: Global committed cap check ATÓMICO (con fee) ────
     // committed se computa aquí, y portfolio se muta más abajo SÍNCRONAMENTE
     // (antes de cualquier callback async). Eso garantiza que, si varias
     // estrategias cierran vela en el mismo tick, la segunda ve el committed
-    // actualizado por la primera. El capLimit ahora usa capRef dinámico.
-    const committed = Object.values(this.portfolio).reduce((s,p) => s + (p.invest || 0), 0);
-    const capLimit = capRef * 1.005; // 0.5% tolerancia para fees/slippage micro
-    if(committed + invest > capLimit){
+    // actualizado por la primera. El capLimit usa capRef dinámico.
+    //
+    // A4 (Opus M12): el invariante real es "dinero comprometido INCLUYENDO
+    // fees ≤ cap*1.005". Antes el committed sumaba `p.invest` nominal sin
+    // incluir fee, y el check comparaba contra `invest` nominal también,
+    // lo que dejaba exactamente el margen del fee (~0.1% en USDC mode, 0
+    // en BNB mode) al borde del tolerance de 0.5%. Con 7 estrategias
+    // abriendo simultáneamente en USDC mode, el margen se estrecha a ~0.1%,
+    // peligroso en pips precisos.
+    //
+    // Fix:
+    //  1. Sumar `p._investWithFee` al committed. Fallback a `p.invest *
+    //     (1+FEE_RATE_USDC)` para posiciones legacy sin el campo — upper
+    //     bound conservador (peor caso USDC). Esto es regresivo en BNB
+    //     mode (sobreestima por 0.1%) pero seguro.
+    //  2. Comparar `committed + invest*feeMult` contra capLimit.
+    //  3. Shrink path: `invest = headroom / feeMult` (no headroom directo),
+    //     para que `invest_new * feeMult + committed <= capLimit`.
+    //  4. Check de mínimo $10 sobre el INVEST base (no sobre headroom).
+    //
+    // En modo BNB (feeMult=1) el comportamiento es idéntico al anterior —
+    // divido por 1 y comparo igual. Sólo en modo USDC hay diferencia real.
+    const committed = Object.values(this.portfolio).reduce((s,p) => {
+      // A4: usar _investWithFee si está (posiciones post-fix), sino
+      // fallback conservador con FEE_RATE_USDC como upper bound.
+      if (typeof p._investWithFee === "number") return s + p._investWithFee;
+      return s + (p.invest || 0) * (1 + FEE_RATE_USDC);
+    }, 0);
+    const capLimit     = capRef * 1.005; // 0.5% tolerancia para slippage micro
+    const investWithFee = invest * feeMult;
+    if(committed + investWithFee > capLimit){
+      // headroom = capacidad en "valor con fee" restante; invest base
+      // resultante = headroom/feeMult para preservar el invariante.
       const headroom = capLimit - committed;
-      if(headroom < 10){
-        console.log(`[SIMPLE][CAP] ${cfg.id} bloqueado — committed=$${committed.toFixed(2)} + new=$${invest.toFixed(2)} > cap=$${capLimit.toFixed(2)} (headroom $${headroom.toFixed(2)} < $10)`);
+      const investShrunk = headroom / feeMult;
+      if(investShrunk < 10){
+        console.log(`[SIMPLE][CAP] ${cfg.id} bloqueado — committed(w/fee)=$${committed.toFixed(2)} + new(w/fee)=$${investWithFee.toFixed(2)} > cap=$${capLimit.toFixed(2)} (investShrunk=$${investShrunk.toFixed(2)} < $10)`);
         return;
       }
-      console.log(`[SIMPLE][CAP] ${cfg.id} shrink invest $${invest.toFixed(2)} → $${headroom.toFixed(2)} (committed=$${committed.toFixed(2)} cap=$${capLimit.toFixed(2)})`);
-      invest = headroom;
+      console.log(`[SIMPLE][CAP] ${cfg.id} shrink invest $${invest.toFixed(2)} → $${investShrunk.toFixed(2)} (committed(w/fee)=$${committed.toFixed(2)} cap=$${capLimit.toFixed(2)} feeMult=${feeMult.toFixed(4)})`);
+      invest = investShrunk;
     }
 
     console.log(`[SIMPLE][SIZING] ${cfg.id} base=$${sizingBase.toFixed(2)} committed=$${committed.toFixed(2)} kelly=${kellyFrac.toFixed(3)} → invest=$${invest.toFixed(2)}`);
@@ -486,8 +516,8 @@ class SimpleBotEngine {
     // ── FIX-A atomicidad: mutar portfolio SYNC antes de cualquier _onBuy ──
     // No insertar await/callback entre este bloque y el fin de _onCandleClose.
     // T0-FEE: el debit de cash incluye el fee_efectivo (0 en modo BNB, 0.001
-    // en modo USDC). El cap invariant (committed+invest ≤ cap*1.005) sigue
-    // usando `invest` nominal sin fee, así que no hay doble conteo.
+    // en modo USDC). A4: el cap invariant ahora sí incluye fee — committed
+    // se suma con _investWithFee y el check usa invest*feeMult.
     const cashDebit = invest * (1 + feePred.FEE_efectivo);
     if(cfg.capa===1) this.capa1Cash -= cashDebit;
     else             this.capa2Cash -= cashDebit;
@@ -495,6 +525,10 @@ class SimpleBotEngine {
       pair:cfg.pair,capa:cfg.capa,type:cfg.type,tf:cfg.tf,
       entryPrice:price,qty,stop:price*(1-cfg.stop),target:price*(1+cfg.target),
       openTs:Date.now(),invest,
+      // A4: _investWithFee = invest * (1 + FEE_efectivo). Guarda explícita
+      // para el próximo committed sum del cap check. Sin esto, la siguiente
+      // estrategia que evalúe en el mismo tick cae al fallback conservador.
+      _investWithFee: cashDebit,
       status:"pending", // se convierte en "filled" cuando applyRealFill reconcilia (FASE 3)
       _feePredicted: feePred, // T0-FEE: para _checkFeeDiscrepancy post-fill
     };
@@ -953,6 +987,14 @@ class SimpleBotEngine {
     pos.target     = realPrice * (1 + targetPct);
     pos.qty    = realQty  || pos.qty;
     pos.invest = realSpent || pos.invest;
+    // A4: recomputar _investWithFee tras reconcile. El fee_efectivo del
+    // _feePredicted sigue vigente porque Binance no cambia de modo BNB↔USDC
+    // mid-fill — siempre es el mismo mode entre predicción y fill real.
+    // Si no hay predicción (legacy), cae al upper bound conservador.
+    const feeEfectivoReal = (pos._feePredicted && typeof pos._feePredicted.FEE_efectivo === "number")
+      ? pos._feePredicted.FEE_efectivo
+      : FEE_RATE_USDC;
+    pos._investWithFee = pos.invest * (1 + feeEfectivoReal);
     pos.status = "filled";
     console.log(`[SIMPLE][RECONCILE-BUY] ${strategyId} expected=$${expectedSpent.toFixed(2)} real=$${realSpent.toFixed(2)} drift=${drift>=0?"+":""}${drift.toFixed(4)} entry=$${realPrice.toFixed(4)} stop=$${pos.stop.toFixed(4)} target=$${pos.target.toFixed(4)} qty=${pos.qty.toFixed(6)}`);
   }
