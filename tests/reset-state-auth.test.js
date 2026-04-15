@@ -16,10 +16,15 @@ const http = require("http");
 process.env.CAPITAL_USDC = "100";
 process.env.CAPITAL_USDT = "100";
 
-// ── Replica LITERAL de la lógica de auth en src/server.js /api/reset-state
-// Si esta implementación diverge del handler real, el test no protege
-// nada — por eso cualquier cambio en server.js debe reflejarse aquí.
+// ── BATCH-1 FIX #8: replica de la lógica del handler real en server.js,
+// ahora usando el mismo checker de src/secrets.js. Si esto diverge del
+// handler real, el test no protege nada — por eso importamos el módulo
+// directamente en vez de replicar el check.
+const secretsModule = require("../src/secrets");
 function makeResetStateHandler({ deleteStateMock, saveSimpleStateMock }) {
+  const checkBotSecret = secretsModule.makeBotSecretChecker(
+    () => process.env.BOT_SECRET,
+  );
   return async (req, res) => {
     // parse body como JSON mínimo
     let body = "";
@@ -27,7 +32,7 @@ function makeResetStateHandler({ deleteStateMock, saveSimpleStateMock }) {
     let parsed = {};
     try { parsed = body ? JSON.parse(body) : {}; } catch {}
     const { secret } = parsed;
-    if (secret !== (process.env.BOT_SECRET || "bafir_bot_secret")) {
+    if (!checkBotSecret(secret)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "No autorizado" }));
       return;
@@ -70,8 +75,8 @@ describe("C3: /api/reset-state auth", () => {
   const ORIG_BOT_SECRET = process.env.BOT_SECRET;
 
   before(async () => {
-    // Fijar BOT_SECRET a un valor conocido para el test
-    process.env.BOT_SECRET = "test-bot-secret-c3";
+    // BATCH-1 FIX #8: BOT_SECRET debe ser ≥16 chars, no predictable
+    process.env.BOT_SECRET = "test-bot-secret-c3-longer-than-16";
     deleteStateCalls = 0;
     saveSimpleStateCalls = 0;
     const handler = makeResetStateHandler({
@@ -110,7 +115,7 @@ describe("C3: /api/reset-state auth", () => {
   it("POST con secret correcto devuelve 200 y ejecuta deleteState + saveSimpleState", async () => {
     const beforeDel = deleteStateCalls;
     const beforeSave = saveSimpleStateCalls;
-    const res = await postJson(port, "/api/reset-state", { secret: "test-bot-secret-c3" });
+    const res = await postJson(port, "/api/reset-state", { secret: "test-bot-secret-c3-longer-than-16" });
     assert.equal(res.status, 200);
     assert.equal(res.body.ok, true);
     assert.equal(deleteStateCalls, beforeDel + 1);
@@ -130,10 +135,13 @@ describe("C3: /api/reset-state handler in server.js source (regression guard)", 
     assert.ok(idx >= 0, "handler de /api/reset-state debe existir");
     // Los siguientes 600 chars deben contener el patrón de auth
     const window = src.slice(idx, idx + 600);
-    assert.ok(window.includes("secret") && window.includes("BOT_SECRET"),
-      "/api/reset-state debe tener secret check (BOT_SECRET) en el handler");
+    // BATCH-1 FIX #8: el handler ahora delega a checkBotSecret (definido
+    // a nivel de módulo). La referencia al BOT_SECRET vive en src/secrets.js,
+    // no en el handler. El regression guard verifica que sigue habiendo
+    // lectura del campo `secret` del body + delegación a checkBotSecret.
+    assert.ok(window.includes("secret") && window.includes("checkBotSecret"),
+      "/api/reset-state debe leer secret y llamar a checkBotSecret");
     // BATCH-1 FIX #7: el 401 ahora se emite dentro de onAuthFailure(req,res).
-    // El handler debe delegar a ese helper en vez de inline res.status(401).
     assert.ok(window.includes("onAuthFailure") || window.includes("401"),
       "/api/reset-state debe rechazar auth inválida (vía onAuthFailure o 401 inline)");
   });
@@ -145,7 +153,7 @@ describe("C3: /api/reset-state handler in server.js source (regression guard)", 
     // Debe haber process.exit(1) guardado por LIVE_MODE dentro de warnPredictableSecrets
     const idx = src.indexOf("warnPredictableSecrets");
     assert.ok(idx >= 0);
-    const window = src.slice(idx, idx + 2000);
+    const window = src.slice(idx, idx + 3000);
     assert.ok(window.includes("if (LIVE_MODE)"),
       "warnPredictableSecrets debe checkear LIVE_MODE");
     assert.ok(window.includes("process.exit(1)"),

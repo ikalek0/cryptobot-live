@@ -26,6 +26,7 @@ const tg         = require("./telegram");
 const S = require("./trading/state");
 const wsAuth     = require("./ws_auth");
 const { SlidingWindowLimiter, extractIp } = require("./rate_limit");
+const secrets    = require("./secrets");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
@@ -57,39 +58,56 @@ if (typeof _lm === "undefined" && process.env.NODE_ENV !== "test") {
 }
 const LIVE_MODE = _lm === "true";
 console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
-const SYNC_SECRET        = process.env.SYNC_SECRET || "paper_live_sync_secret";
+const SYNC_SECRET        = process.env.SYNC_SECRET || "";
 const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
-const BAFIR_SECRET       = process.env.BAFIR_SECRET|| "bafir_bot_secret";
-// F13: ruido en boot si cualquier secret cae al default literal (histórico bug F0:
-// dotenv no cargaba → todos los defaults estaban en source público de git, permitiendo
-// bypass de /api/set-capital, /api/sync/*, /api/shadow/*). Se avisa SIEMPRE, no sólo
-// en LIVE_MODE, porque el paper-live también expone estos endpoints en el mismo puerto.
+// BATCH-1 FIX #8 (#5): eliminado literal "bafir_bot_secret" — BAFIR_SECRET
+// y SYNC_SECRET ya no tienen default hardcoded. warnPredictableSecrets los
+// valida vía secrets.validateBootSecret() y aborta boot en LIVE_MODE si
+// cualquiera cae en empty/predictable/too_short.
+const BAFIR_SECRET       = process.env.BAFIR_SECRET || "";
+// BATCH-1 FIX #8: warnPredictableSecrets ahora:
+//   1) detecta ademas de env vacío, secrets en la lista PREDICTABLE_SECRETS
+//      (incluyendo el literal "bafir_bot_secret" que estuvo en git público)
+//      y secrets con length<16;
+//   2) aborta boot en LIVE_MODE con cualquiera de esos motivos;
+//   3) en paper-live sigue logueando warning pero no aborta.
 (function warnPredictableSecrets(){
+  const checks = [
+    { name: "SYNC_SECRET",  value: process.env.SYNC_SECRET  },
+    { name: "BOT_SECRET",   value: process.env.BOT_SECRET   },
+    { name: "BAFIR_SECRET", value: process.env.BAFIR_SECRET },
+  ];
   const bad = [];
-  if(!process.env.SYNC_SECRET)  bad.push("SYNC_SECRET");
-  if(!process.env.BOT_SECRET)   bad.push("BOT_SECRET");
-  if(!process.env.BAFIR_SECRET) bad.push("BAFIR_SECRET");
+  for (const c of checks) {
+    const v = secrets.validateBootSecret(c.value);
+    if (!v.ok) bad.push(`${c.name} [${v.reason}]`);
+  }
   if(bad.length){
     const banner = "!".repeat(70);
     console.warn(banner);
-    console.warn(`[SECURITY] ⚠️  Secrets en default literal: ${bad.join(", ")}`);
-    console.warn(`[SECURITY] ⚠️  Estos valores están hardcoded en src/server.js (git público)`);
+    console.warn(`[SECURITY] ⚠️  Secrets inválidos o predecibles: ${bad.join(", ")}`);
+    console.warn(`[SECURITY] ⚠️  Requisitos: no-empty, no en lista predictable, ≥16 chars`);
     console.warn(`[SECURITY] ⚠️  Endpoints /api/sync/*, /api/shadow/*, /api/set-capital, /api/reset-state BYPASSABLES`);
-    console.warn(`[SECURITY] ⚠️  Fix: exportar ${bad.join(", ")} en .env o PM2 ecosystem`);
+    console.warn(`[SECURITY] ⚠️  Fix: exportar valores fuertes en .env o PM2 ecosystem`);
     console.warn(banner);
     // C3: fail-closed en LIVE_MODE. Antes solo loguearse — con LIVE_MODE=true
     // un atacante que alcance el puerto puede bypass endpoints críticos.
     // ABORT boot con mensaje claro + guardrail operativo del firewall.
     if (LIVE_MODE) {
       console.error(banner);
-      console.error(`[SECURITY] ❌ LIVE_MODE=true con secrets default — ABORT boot.`);
-      console.error(`[SECURITY] ❌ Define ${bad.join(", ")} en .env antes de arrancar.`);
+      console.error(`[SECURITY] ❌ LIVE_MODE=true con secrets inválidos — ABORT boot.`);
+      console.error(`[SECURITY] ❌ Corrige: ${bad.join(", ")}`);
       console.error(`[SECURITY] ❌ Verifica también que ufw status muestra puerto 3001 bloqueado antes de activar LIVE_MODE.`);
       console.error(banner);
       process.exit(1);
     }
   }
 })();
+
+// BATCH-1 FIX #8: checker del BOT_SECRET con crypto.timingSafeEqual +
+// fail-closed si el env value no es válido. Reemplaza los 5 checks
+// inline `secret !== (process.env.BOT_SECRET || "bafir_bot_secret")`.
+const checkBotSecret = secrets.makeBotSecretChecker(() => process.env.BOT_SECRET);
 
 // Umbral para adoptar parámetros del PAPER
 // 7 días consecutivos donde paper > live en WR Y avgPnl
@@ -633,7 +651,7 @@ app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAP
 // /api/set-capital (BOT_SECRET).
 app.post("/api/reset-state", mutationLimiter, async (req, res) => {
   const { secret } = req.body || {};
-  if (secret !== (process.env.BOT_SECRET || "bafir_bot_secret"))
+  if (!checkBotSecret(secret))
     return onAuthFailure(req, res);
   try {
     await deleteState();
@@ -791,14 +809,14 @@ app.post("/api/sync/daily", mutationLimiter, (req,res) => {
 // Paper notifica a live cuando abre/cierra una posición
 app.post("/api/shadow/entry", mutationLimiter, (req,res) => {
   const {secret, symbol, entryPrice, strategy, regime, stateKey} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
+  if(!checkBotSecret(secret)) return onAuthFailure(req, res);
   shadow.shadowEntry(symbol, entryPrice, strategy, regime, stateKey);
   res.json({ok:true, adopted: shadow.shouldExecute(strategy, regime), confidence: shadow.getConfidence(strategy, regime)});
 });
 
 app.post("/api/shadow/exit", mutationLimiter, (req,res) => {
   const {secret, symbol, exitPrice, pnl} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
+  if(!checkBotSecret(secret)) return onAuthFailure(req, res);
   shadow.shadowExit(symbol, exitPrice, pnl);
   res.json({ok:true, stats: shadow.getStats()});
 });
@@ -810,7 +828,7 @@ app.get("/api/shadow/status", (req,res) => {
 // ── Alert config from Bafir ────────────────────────────────────────────────────
 app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
   const {secret, alertConfig} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
+  if(!checkBotSecret(secret)) return onAuthFailure(req, res);
   if(alertConfig) {
     global._alertConfig = alertConfig;
     console.log(`[ALERT-CFG] Win: ${alertConfig.winPct}% Loss: ${alertConfig.lossPct}%`);
@@ -820,7 +838,7 @@ app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
 
 app.post("/api/set-capital", mutationLimiter, (req,res) => {
   const { secret, capitalUSD } = req.body;
-  if (secret !== (process.env.BOT_SECRET||"bafir_bot_secret"))
+  if (!checkBotSecret(secret))
     return onAuthFailure(req, res);
   if (!capitalUSD || capitalUSD <= 0)
     return res.status(400).json({error:"Capital inválido"});
