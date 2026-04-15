@@ -362,13 +362,14 @@ for(const sp of simplePairs){
     },
     getSimpleState: () => S.simpleBot?.getState() || null,
     setCapital:    (v) => {
-      S.CAPITAL_USDT = v;
-      if(S.bot) { if(S.bot.cash>v) S.bot.cash=v; }
-      if(S.simpleBot) {
-        S.simpleBot.capa1Cash = v*0.60;
-        S.simpleBot.capa2Cash = v*0.40;
+      // BATCH-1 FIX #9 (#2): delega en setCapitalEverywhere para propagar
+      // a simpleBot._capitalDeclarado y respetar invest comprometido.
+      try {
+        setCapitalEverywhere(Number(v));
+      } catch (e) {
+        console.warn("[TG] setCapital rechazado:", e.message);
+        throw e;
       }
-      console.log("[TG] Capital actualizado a $"+v);
     },
   },
   // F2: initialPaused — boot con paused restaurado de disco
@@ -837,23 +838,31 @@ app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
 });
 
 app.post("/api/set-capital", mutationLimiter, (req,res) => {
-  const { secret, capitalUSD } = req.body;
+  const { secret, capitalUSD } = req.body || {};
   if (!checkBotSecret(secret))
     return onAuthFailure(req, res);
-  if (!capitalUSD || capitalUSD <= 0)
-    return res.status(400).json({error:"Capital inválido"});
-
-  // Actualizar capital operativo
-  S.CAPITAL_USDT = capitalUSD;
-  if (S.bot) {
-    // Respetar reserva mínima del 15%
-    const reserve = capitalUSD * 0.15;
-    const maxOperable = capitalUSD - reserve;
-    // Si el bot tiene más cash del capital declarado, limitar
-    if (S.bot.cash > capitalUSD) S.bot.cash = capitalUSD;
-    console.log(`[LIVE] Capital operativo actualizado: $${capitalUSD.toFixed(2)} (reserva: $${reserve.toFixed(2)}, máx operable: $${maxOperable.toFixed(2)})`);
+  // BATCH-1 FIX #9 (#2): input validation + propagación a simpleBot.
+  // Antes este endpoint solo tocaba S.CAPITAL_USDT y S.bot.cash (zombie),
+  // nunca simpleBot._capitalDeclarado — el pipeline real seguía operando
+  // con INITIAL_CAPITAL. setCapitalEverywhere hace ambos + respeta invest.
+  const n = Number(capitalUSD);
+  if (!Number.isFinite(n) || n <= 0) {
+    return res.status(400).json({ error: "Capital inválido" });
   }
-  res.json({ok:true, capitalUSD, reserve:+(capitalUSD*0.15).toFixed(2), maxOperable:+(capitalUSD*0.85).toFixed(2)});
+  if (n > 1e6) {
+    return res.status(400).json({ error: "Capital sanity check failed (>$1M)" });
+  }
+  try {
+    setCapitalEverywhere(n);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  res.json({
+    ok: true,
+    capitalUSD: n,
+    reserve: +(n * 0.15).toFixed(2),
+    maxOperable: +(n * 0.85).toFixed(2),
+  });
 });
 
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
@@ -1007,6 +1016,60 @@ function _capitalSyncDeps() {
     binanceReadOnlyRequest,
     telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
   };
+}
+
+// ── BATCH-1 FIX #9 (#2): setCapitalEverywhere ────────────────────────────
+// Antes había DOS paths para actualizar capital (TG callback + HTTP
+// /api/set-capital) y cada uno tenía un bug distinto:
+//   - TG callback: sobrescribía capa1Cash/capa2Cash ignorando `invest`
+//     comprometido en posiciones abiertas (dinero fantasma).
+//   - HTTP endpoint: NO tocaba simpleBot en absoluto. El simpleBot seguía
+//     operando con INITIAL_CAPITAL del boot. Cambiar via HTTP era no-op
+//     para el pipeline real de trades.
+// Además, ninguno actualizaba `_capitalDeclarado`, por lo que el próximo
+// tick de syncCapitalFromBinance revertía cualquier cambio a INITIAL_CAPITAL.
+//
+// Esta helper es la ÚNICA forma legítima de cambiar capital en runtime:
+//   1) Valida el input (>0 y <$1M como sanity check operativo)
+//   2) Actualiza S.CAPITAL_USDT (display/reporte)
+//   3) Actualiza S.bot.cash (zombie engine, no opera pero se muestra)
+//   4) Actualiza S.simpleBot._capitalDeclarado (source of truth del engine)
+//   5) Recalcula capa1Cash/capa2Cash RESPETANDO el invest comprometido
+//   6) Dispara syncCapitalFromBinance inmediatamente (fire-and-forget)
+function setCapitalEverywhere(newCap) {
+  if (typeof newCap !== "number" || !Number.isFinite(newCap) || newCap <= 0) {
+    throw new Error("capital must be a finite number > 0");
+  }
+  if (newCap > 1e6) {
+    throw new Error("capital sanity check failed (>$1M)");
+  }
+  S.CAPITAL_USDT = newCap;
+  if (S.bot) {
+    // Si el bot tenía más cash declarado del que ahora permitimos, bajarlo.
+    if (typeof S.bot.cash === "number" && S.bot.cash > newCap) S.bot.cash = newCap;
+  }
+  if (S.simpleBot) {
+    S.simpleBot._capitalDeclarado = newCap;
+    // Respetar `invest` comprometido por capa.
+    const portfolio = S.simpleBot.portfolio || {};
+    const committedC1 = Object.values(portfolio)
+      .filter(p => p && p.capa === 1)
+      .reduce((s, p) => s + (Number(p.invest) || 0), 0);
+    const committedC2 = Object.values(portfolio)
+      .filter(p => p && p.capa === 2)
+      .reduce((s, p) => s + (Number(p.invest) || 0), 0);
+    S.simpleBot.capa1Cash = Math.max(0, newCap * 0.60 - committedC1);
+    S.simpleBot.capa2Cash = Math.max(0, newCap * 0.40 - committedC2);
+    // Sync inmediato con Binance (fire-and-forget). Si falla, el safety-check
+    // periódico lo retoma en 5min; mientras tanto opera con lo que acabamos
+    // de setear.
+    if (typeof S.simpleBot.syncCapitalFromBinance === "function") {
+      Promise.resolve(S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()))
+        .catch(e => console.warn("[SET-CAPITAL] sync failed:", e && e.message));
+    }
+  }
+  console.log(`[SET-CAPITAL] Capital actualizado a $${newCap.toFixed(2)}`);
+  return { ok: true, capital: newCap };
 }
 
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
