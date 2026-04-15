@@ -24,6 +24,7 @@ const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 const S = require("./trading/state");
+const wsAuth     = require("./ws_auth");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
@@ -409,11 +410,46 @@ const cryptoPanic = new CryptoPanicDefense();
 
 const app    = express();
 const server = http.createServer(app);
-const wss    = new WebSocketServer({ server });
 
-// Servir index.html SIN cache para que siempre cargue la última versión
-app.get("/", (req,res) => res.sendFile(path.join(__dirname,"../public/index.html"), {headers:{"Cache-Control":"no-store"}}));
-app.get("/index.html", (req,res) => res.sendFile(path.join(__dirname,"../public/index.html"), {headers:{"Cache-Control":"no-store"}}));
+// ── BATCH-1 FIX #6 (H2): WebSocket authentication ─────────────────────
+// El WebSocket difunde estado del bot (portfolio, ledger, trades) a
+// todos los clientes conectados. Antes NO validaba nada: cualquier
+// cliente en la red/puerto podía conectar y escuchar. Gate añadido vía
+// verifyClient + crypto.timingSafeEqual (ver src/ws_auth.js). Cuando
+// WS_SECRET (o BOT_SECRET como fallback) está seteado, toda conexión
+// debe incluir ?token=<valor> en la URL. Fail-open sólo si el env var
+// está vacío (dev/test).
+const _getWsToken = () => process.env.WS_SECRET || process.env.BOT_SECRET || "";
+if (!_getWsToken()) {
+  console.warn("[BOOT] ⚠️  WS_SECRET y BOT_SECRET vacíos — WebSocket acepta conexiones sin auth (dev mode). En producción setear WS_SECRET.");
+}
+const wss    = new WebSocketServer({
+  server,
+  verifyClient: wsAuth.makeVerifyClient(_getWsToken),
+});
+
+// BATCH-1 FIX #6: index.html recibe el token vía injection server-side
+// en un <script> antes de </head>. El cliente lee window.__WS_TOKEN__
+// y lo añade al query string de la URL del WebSocket. De este modo el
+// token nunca se hardcodea en el HTML estático.
+function serveIndex(req, res) {
+  const fs = require("fs");
+  const file = path.join(__dirname, "../public/index.html");
+  fs.readFile(file, "utf-8", (err, html) => {
+    if (err) {
+      res.status(500).send("index read error");
+      return;
+    }
+    const token = _getWsToken();
+    const inject = `<script>window.__WS_TOKEN__=${JSON.stringify(token)};</script>`;
+    const out = html.includes("</head>")
+      ? html.replace("</head>", `${inject}</head>`)
+      : inject + html;
+    res.set("Cache-Control", "no-store").type("html").send(out);
+  });
+}
+app.get("/", serveIndex);
+app.get("/index.html", serveIndex);
 app.use(express.static(path.join(__dirname,"../public")));
 app.use(express.json());
 

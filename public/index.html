@@ -514,12 +514,17 @@ setTimeout(() => {
 }, 3000);
 
 // ── WebSocket: plus para actualizaciones rápidas (no reemplaza HTTP) ─────────
+// BATCH-1 FIX #6: el servidor inyecta window.__WS_TOKEN__ en el HTML
+// al servirlo. Lo añadimos al query string para que verifyClient lo
+// acepte. Si el server está en dev mode (token vacío) se omite el ?token.
 let _ws = null;
 let _wsRetry = 0;
 function connectWS() {
   try {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    _ws = new WebSocket(`${proto}//${location.host}`);
+    const token = (typeof window !== 'undefined' && window.__WS_TOKEN__) || '';
+    const q = token ? `?token=${encodeURIComponent(token)}` : '';
+    _ws = new WebSocket(`${proto}//${location.host}${q}`);
     _ws.onopen = () => {
       _wsConnected = true;
       _wsRetry = 0;
