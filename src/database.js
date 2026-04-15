@@ -2,13 +2,23 @@
 // Usa PostgreSQL si está disponible, sino guarda en disco (data/state.json).
 // Circuit breaker: si PG falla una vez (DNS, timeout, conexión cerrada), queda
 // DESACTIVADO hasta el próximo restart — evita spam de reintentos en el log.
+//
+// BATCH-1 CRIT-1: saveSimpleState/loadSimpleState ahora tienen fallback a
+// disco en data/simple_state.json. Sin este fallback, cuando DATABASE_URL
+// estaba vacía (el caso actual de cryptobot-live), la persistencia del
+// simpleBot NO escribía NADA a disco — cada restart de PM2 perdía el estado
+// de los 7 strategies (kellyGate, portfolio abierto, capa1Cash/capa2Cash,
+// ddAlerts/CB, depegPauseActive, boot invariant, capital sync pause,
+// candles acumuladas). El bug era silencioso porque saveSimpleState
+// "tenía éxito" (el try no lanzaba) sin persistir nada.
 "use strict";
 
 const fs   = require("fs");
 const path = require("path");
 
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const STATE_FILE   = path.join(__dirname, "../data/state.json");
+const STATE_FILE        = path.join(__dirname, "../data/state.json");
+const SIMPLE_STATE_FILE = path.join(__dirname, "../data/simple_state.json");
 
 // Hosts conocidos como muertos: bail out sin esperar al timeout de DNS
 const DEAD_HOSTS = ["railway.internal", "railway.app"];
@@ -112,6 +122,8 @@ async function deleteState() {
     if (client) await client.query(`DELETE FROM bot_state WHERE key = 'live_main'`);
   } catch(e) { disablePg(`deleteState query falló: ${e.message}`); }
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+  // También borrar simple_state.json para restart limpio
+  if (fs.existsSync(SIMPLE_STATE_FILE)) fs.unlinkSync(SIMPLE_STATE_FILE);
 }
 
 
@@ -125,17 +137,38 @@ async function saveSimpleState(state) {
          ON CONFLICT (key) DO UPDATE SET value=$1, ts=NOW()`,
         [json]
       );
+      return;
     }
   } catch(e) { disablePg(`saveSimpleState query falló: ${e.message}`); }
+  // Fallback a disco — CRIT-1: sin esta rama, el estado del simpleBot NO se
+  // persistía cuando DATABASE_URL estaba vacía (caso actual de cryptobot-live).
+  fs.mkdirSync(path.dirname(SIMPLE_STATE_FILE), { recursive: true });
+  fs.writeFileSync(SIMPLE_STATE_FILE, json, "utf8");
 }
 
 async function loadSimpleState() {
   try {
     const client = await getClient();
-    if (!client) return null;
-    const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
-    return r.rows[0] ? JSON.parse(r.rows[0].value) : null;
-  } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); return null; }
+    if (client) {
+      const r = await client.query(`SELECT value FROM bot_state WHERE key='simple_state'`);
+      if (r.rows[0]) {
+        console.log("[DB] SimpleBot estado cargado desde PostgreSQL ✓");
+        return JSON.parse(r.rows[0].value);
+      }
+      // PG vivo pero sin fila — caer al fallback de disco por si había uno anterior
+    }
+  } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); }
+  // Fallback a disco — CRIT-1: sin esta rama, el simpleBot arrancaba con
+  // estado vacío tras cada restart aunque saveSimpleState hubiera escrito a disco.
+  if (fs.existsSync(SIMPLE_STATE_FILE)) {
+    try {
+      console.log("[DB] SimpleBot estado cargado desde disco ✓");
+      return JSON.parse(fs.readFileSync(SIMPLE_STATE_FILE, "utf8"));
+    } catch(e) {
+      console.log(`[DB] loadSimpleState parse falló: ${e.message}`);
+    }
+  }
+  return null;
 }
 
 module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState };
