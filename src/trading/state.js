@@ -9,7 +9,11 @@
 // como threshold (`virtualFree > S.CAPITAL_USDT * 2`) → con mismatch,
 // destruía portfolio en caliente. CLAUDE.md:101 y safety.test.js:43
 // documentan el orden canónico.
-const _capital = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
+//
+// A8: el parse vive ahora en src/config.js (single source of truth). Aquí
+// sólo se importa. F24 sigue siendo válido: config.CAPITAL usa exactamente
+// la misma fallback chain (CAPITAL_USDC → CAPITAL_USDT → "100").
+const { CAPITAL: _capital } = require("../config");
 
 const S = {
   bot: null,

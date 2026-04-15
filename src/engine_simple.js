@@ -19,7 +19,13 @@
 "use strict";
 const https = require("https");
 
-const INITIAL_CAPITAL = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100");
+// ── A8: CAPITAL viene del single source of truth (src/config.js). Antes
+// estaba duplicado aquí con la misma cadena que en trading/state.js —
+// cualquier refactor divergente rompía el invariante S.CAPITAL_USDT ===
+// INITIAL_CAPITAL. Los tests que setean process.env.CAPITAL_USDC antes del
+// require siguen funcionando porque hacen delete require.cache, lo que
+// provoca una relectura del env en config.js en la siguiente carga.
+const { CAPITAL: INITIAL_CAPITAL } = require("./config");
 const FEE = 0.001;
 
 // ── T0-FEE: fees con "Use BNB for fees" activo ────────────────────────────

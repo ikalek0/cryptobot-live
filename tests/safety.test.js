@@ -36,16 +36,35 @@ describe("dotenv protection", () => {
 // ── INITIAL_CAPITAL defaults ────────────────────────────────────────────────
 
 describe("INITIAL_CAPITAL fallback chain", () => {
-  it("engine_simple.js has correct fallback: CAPITAL_USDC -> CAPITAL_USDT -> 100", () => {
-    const content = fs.readFileSync(path.join(SRC, "engine_simple.js"), "utf-8");
-    // Must have the exact fallback chain
+  // A8: la cadena literal vive ahora sólo en src/config.js. engine_simple.js
+  // y trading/state.js importan de allí. engine.js (viejo, no-op) todavía
+  // lee el env directamente porque no está en el scope del refactor A8.
+  it("config.js has the canonical fallback: CAPITAL_USDC -> CAPITAL_USDT -> 100", () => {
+    const content = fs.readFileSync(path.join(SRC, "config.js"), "utf-8");
     assert.ok(
       content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
-      "INITIAL_CAPITAL must fallback: CAPITAL_USDC -> CAPITAL_USDT -> 100"
+      "config.js CAPITAL must use canonical fallback chain"
     );
   });
 
-  it("engine.js has the same fallback chain", () => {
+  it("engine_simple.js imports CAPITAL from config.js (A8)", () => {
+    const content = fs.readFileSync(path.join(SRC, "engine_simple.js"), "utf-8");
+    assert.ok(
+      content.includes('require("./config")') || content.includes("require('./config')"),
+      "engine_simple.js must require ./config"
+    );
+    assert.ok(
+      content.includes("CAPITAL: INITIAL_CAPITAL"),
+      "engine_simple.js must destructure CAPITAL as INITIAL_CAPITAL from config"
+    );
+    // Regression: no debe quedar la cadena literal duplicada en engine_simple.js
+    assert.ok(
+      !content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
+      "engine_simple.js debe delegar en config.js, no duplicar la cadena literal"
+    );
+  });
+
+  it("engine.js has the same fallback chain (no-op engine, queda fuera del scope A8)", () => {
     const content = fs.readFileSync(path.join(SRC, "engine.js"), "utf-8");
     assert.ok(
       content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
@@ -53,18 +72,27 @@ describe("INITIAL_CAPITAL fallback chain", () => {
     );
   });
 
-  it("trading/state.js has the same fallback chain (F24)", () => {
+  it("trading/state.js imports CAPITAL from config.js (A8)", () => {
     const content = fs.readFileSync(path.join(SRC, "trading", "state.js"), "utf-8");
     assert.ok(
-      content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
-      "state.js CAPITAL_USDT must share fallback chain with engine.js/engine_simple.js"
+      content.includes('require("../config")') || content.includes("require('../config')"),
+      "state.js must require ../config"
+    );
+    // Regression: no debe quedar la cadena literal duplicada en state.js
+    assert.ok(
+      !content.includes('process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "100"'),
+      "state.js debe delegar en config.js, no duplicar la cadena literal"
     );
   });
 
-  it("F24 runtime: CAPITAL_USDC env propagates to S.CAPITAL_USDT", () => {
-    // Limpiar cache + setear env ANTES del require
-    const modPath = require.resolve("../src/trading/state");
-    delete require.cache[modPath];
+  it("F24 runtime: CAPITAL_USDC env propagates to S.CAPITAL_USDT (via config)", () => {
+    // Limpiar cache + setear env ANTES del require. config.js lee dotenv
+    // pero no sobreescribe valores ya presentes en process.env, así que
+    // este patrón sigue siendo válido tras A8.
+    const statePath  = require.resolve("../src/trading/state");
+    const configPath = require.resolve("../src/config");
+    delete require.cache[statePath];
+    delete require.cache[configPath];
     const prevC = process.env.CAPITAL_USDC;
     const prevT = process.env.CAPITAL_USDT;
     process.env.CAPITAL_USDC = "250";
@@ -73,20 +101,62 @@ describe("INITIAL_CAPITAL fallback chain", () => {
       const S = require("../src/trading/state");
       assert.equal(S.CAPITAL_USDT, 250, "CAPITAL_USDC=250 (no USDT) must set S.CAPITAL_USDT=250");
     } finally {
-      // Restaurar y recargar module para no contaminar otros tests
       if (prevC === undefined) delete process.env.CAPITAL_USDC; else process.env.CAPITAL_USDC = prevC;
       if (prevT === undefined) delete process.env.CAPITAL_USDT; else process.env.CAPITAL_USDT = prevT;
-      delete require.cache[modPath];
+      delete require.cache[statePath];
+      delete require.cache[configPath];
     }
   });
 
-  it("default fallback is 100, NOT 10000", () => {
-    const content = fs.readFileSync(path.join(SRC, "engine_simple.js"), "utf-8");
+  it("default fallback is 100, NOT 10000 (via config.js)", () => {
+    const content = fs.readFileSync(path.join(SRC, "config.js"), "utf-8");
     // The old bug was defaulting to 10000
-    const match = content.match(/INITIAL_CAPITAL\s*=\s*parseFloat\(([^)]+)\)/);
-    assert.ok(match, "INITIAL_CAPITAL should use parseFloat");
-    assert.ok(!match[1].includes("10000"), "INITIAL_CAPITAL must NOT default to 10000");
-    assert.ok(match[1].includes('"100"'), "INITIAL_CAPITAL must default to 100");
+    const match = content.match(/CAPITAL\s*=\s*parseFloat\(([^)]+)\)/);
+    assert.ok(match, "config.js CAPITAL should use parseFloat");
+    assert.ok(!match[1].includes("10000"), "config.js CAPITAL must NOT default to 10000");
+    assert.ok(match[1].includes('"100"'), "config.js CAPITAL must default to 100");
+  });
+});
+
+// A8: Single source of truth — engine_simple, state y config deben devolver
+// el MISMO valor de CAPITAL en runtime. Regression directa contra divergencia.
+describe("A8 — config.js single source of truth", () => {
+  it("config.CAPITAL === engine_simple.INITIAL_CAPITAL === S.CAPITAL_USDT", () => {
+    const configPath  = require.resolve("../src/config");
+    const statePath   = require.resolve("../src/trading/state");
+    const enginePath  = require.resolve("../src/engine_simple");
+    delete require.cache[configPath];
+    delete require.cache[statePath];
+    delete require.cache[enginePath];
+    const prevC = process.env.CAPITAL_USDC;
+    const prevT = process.env.CAPITAL_USDT;
+    process.env.CAPITAL_USDC = "317";
+    delete process.env.CAPITAL_USDT;
+    try {
+      const cfg     = require("../src/config");
+      const S       = require("../src/trading/state");
+      const engine  = require("../src/engine_simple");
+      assert.equal(cfg.CAPITAL, 317, "config.CAPITAL debe leer CAPITAL_USDC=317");
+      assert.equal(S.CAPITAL_USDT, 317, "S.CAPITAL_USDT debe coincidir con config.CAPITAL");
+      assert.equal(engine.INITIAL_CAPITAL, 317, "engine_simple.INITIAL_CAPITAL debe coincidir con config.CAPITAL");
+    } finally {
+      if (prevC === undefined) delete process.env.CAPITAL_USDC; else process.env.CAPITAL_USDC = prevC;
+      if (prevT === undefined) delete process.env.CAPITAL_USDT; else process.env.CAPITAL_USDT = prevT;
+      delete require.cache[configPath];
+      delete require.cache[statePath];
+      delete require.cache[enginePath];
+    }
+  });
+
+  it("config.js object is frozen (no mutación accidental)", () => {
+    const configPath = require.resolve("../src/config");
+    delete require.cache[configPath];
+    const cfg = require("../src/config");
+    assert.ok(Object.isFrozen(cfg), "config export debe estar frozen");
+    // Intento de mutación debe ser no-op (strict mode lanza)
+    try { cfg.CAPITAL = 99999; } catch {}
+    assert.notEqual(cfg.CAPITAL, 99999, "CAPITAL no debe poder mutarse");
+    delete require.cache[configPath];
   });
 });
 
