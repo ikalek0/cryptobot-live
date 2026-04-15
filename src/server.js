@@ -455,6 +455,17 @@ app.get("/api/simple", (_,res) => res.json(S.simpleBot ? S.simpleBot.getState() 
 app.get("/api/simpleBot/state", (_,res) => {
   const sb = S.simpleBot;
   if (!sb) return res.status(503).json({ loading: true, instance: LIVE_MODE?"LIVE":"PAPER-LIVE" });
+  // BUG-4: sentinel numérico para pausa indefinida. Antes se devolvía `null`
+  // cuando _capitalSyncPausedUntil=Infinity (CB A5 o boot invariant A7 tripped),
+  // pero un watchdog externo puede interpretar null como "no pausado" o
+  // "dato ausente" silenciosamente y no detectar el trip. Con el sentinel
+  // FAR_FUTURE (año 2286), `Date.now() < pausedUntil` sigue siendo true
+  // indefinidamente, y el watchdog puede detectarlo explícitamente con
+  // `pausedUntil >= FAR_FUTURE` o `ddCircuitBreakerTripped === true`.
+  const FAR_FUTURE = 9999999999999; // ~año 2286, sentinel para pausa indefinida
+  const _capSync = Number.isFinite(sb._capitalSyncPausedUntil)
+    ? (sb._capitalSyncPausedUntil || 0)
+    : FAR_FUTURE;
   const s          = sb.getState();
   const committed  = Object.values(sb.portfolio||{}).reduce((a,p)=>a+(p.invest||0), 0);
   const capa1Cash  = sb.capa1Cash || 0;
@@ -498,15 +509,19 @@ app.get("/api/simpleBot/state", (_,res) => {
     capitalEfectivo:  sb._capitalEfectivo,
     usdcLibre:        sb._usdcLibre,
     valorPosiciones:  sb._valorPosiciones,
-    // A10: alias en raíz para watchdogs que no quieran navegar capitalSync.
-    // Infinity (cuando A5 dispara CB) se serializa como null en JSON, así
-    // que usamos el número raw y documentamos que null = CB tripped.
-    capitalSyncPausedUntil: Number.isFinite(sb._capitalSyncPausedUntil) ? (sb._capitalSyncPausedUntil || 0) : null,
+    // BUG-4: alias en raíz para watchdogs que no quieran navegar capitalSync.
+    // Ahora usa sentinel FAR_FUTURE en vez de null para distinguir
+    // "pausado indefinidamente" (CB tripped) de "dato ausente". Los flags
+    // ddCircuitBreakerTripped y bootInvariantViolated dan visibilidad
+    // explícita del motivo de la pausa indefinida.
+    capitalSyncPausedUntil: _capSync,
+    ddCircuitBreakerTripped: sb._ddCircuitBreakerTripped === true,
+    bootInvariantViolated:   sb._bootInvariantViolated === true,
     capitalSync: {
       lastTs:      sb._lastCapitalSyncTs || 0,
       ok:          sb._lastCapitalSyncOk !== false,
       failCount:   sb._capitalSyncFailCount || 0,
-      pausedUntil: Number.isFinite(sb._capitalSyncPausedUntil) ? (sb._capitalSyncPausedUntil || 0) : null,
+      pausedUntil: _capSync,
       pausedNow:   Date.now() < (sb._capitalSyncPausedUntil || 0),
     },
     // ── T0-FEE: fee mode + BNB balance ────────────────────────────────

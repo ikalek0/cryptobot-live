@@ -51,10 +51,19 @@ describe("A10 — /api/simpleBot/state source guard", () => {
 // Si la lógica del handler real diverge de esta réplica, el test no
 // protege nada. Cualquier cambio al handler real debe reflejarse aquí.
 
+// BUG-4: sentinel numérico FAR_FUTURE en vez de null, para que un watchdog
+// externo pueda distinguir "pausa indefinida por CB A5 / boot invariant"
+// de "dato ausente / no pausado". Flags ddCircuitBreakerTripped y
+// bootInvariantViolated dan visibilidad explícita del motivo.
+const FAR_FUTURE = 9999999999999;
+
 function makeHandler(S, LIVE_MODE) {
   return (req, res) => {
     const sb = S.simpleBot;
     if (!sb) return res.status(503).json({ loading: true, instance: LIVE_MODE?"LIVE":"PAPER-LIVE" });
+    const _capSync = Number.isFinite(sb._capitalSyncPausedUntil)
+      ? (sb._capitalSyncPausedUntil || 0)
+      : FAR_FUTURE;
     const s          = sb.getState();
     const committed  = Object.values(sb.portfolio||{}).reduce((a,p)=>a+(p.invest||0), 0);
     const capa1Cash  = sb.capa1Cash || 0;
@@ -74,7 +83,12 @@ function makeHandler(S, LIVE_MODE) {
       totalLedger:  +totalLedger.toFixed(4),
       paused,
       tgControlsPaused,
-      capitalSyncPausedUntil: Number.isFinite(sb._capitalSyncPausedUntil) ? (sb._capitalSyncPausedUntil || 0) : null,
+      capitalSyncPausedUntil: _capSync,
+      ddCircuitBreakerTripped: sb._ddCircuitBreakerTripped === true,
+      bootInvariantViolated:   sb._bootInvariantViolated === true,
+      capitalSync: {
+        pausedUntil: _capSync,
+      },
     });
   };
 }
@@ -92,10 +106,17 @@ function getJson(port, path) {
   });
 }
 
-function fakeSimpleBot({ paused = false, capitalSyncPausedUntil = 0 } = {}) {
+function fakeSimpleBot({
+  paused = false,
+  capitalSyncPausedUntil = 0,
+  ddCircuitBreakerTripped = false,
+  bootInvariantViolated = false,
+} = {}) {
   return {
     paused,
     _capitalSyncPausedUntil: capitalSyncPausedUntil,
+    _ddCircuitBreakerTripped: ddCircuitBreakerTripped,
+    _bootInvariantViolated: bootInvariantViolated,
     capa1Cash: 60, capa2Cash: 40, portfolio: {},
     getState: () => ({ totalValue: 100, drawdownPct: 0, peakTv: 100, baseline: 100, trades: 0, winRate: 0, returnPct: 0 }),
   };
@@ -144,11 +165,59 @@ describe("A10 — /api/simpleBot/state runtime", () => {
     assert.equal(r.body.tgControlsPaused, false);
   });
 
-  it("capitalSyncPausedUntil=Infinity (A5 CB) → null en JSON", async () => {
+  // ── BUG-4 tests ──────────────────────────────────────────────────────
+  // Sentinel FAR_FUTURE en vez de null + flags explícitos para watchdog.
+
+  it("BUG-4: capitalSyncPausedUntil=Infinity → FAR_FUTURE (no null)", async () => {
+    S.simpleBot = fakeSimpleBot({
+      capitalSyncPausedUntil: Infinity,
+      ddCircuitBreakerTripped: true,
+    });
+    const r = await getJson(port, "/api/simpleBot/state");
+    assert.equal(r.body.capitalSyncPausedUntil, FAR_FUTURE,
+      "Infinity debe serializarse como FAR_FUTURE sentinel, no null");
+    assert.notEqual(r.body.capitalSyncPausedUntil, null,
+      "null sería ambiguo: watchdog no distingue 'sin dato' de 'pausa infinita'");
+  });
+
+  it("BUG-4: CB tripped → ddCircuitBreakerTripped=true en endpoint", async () => {
+    S.simpleBot = fakeSimpleBot({
+      capitalSyncPausedUntil: Infinity,
+      ddCircuitBreakerTripped: true,
+    });
+    const r = await getJson(port, "/api/simpleBot/state");
+    assert.equal(r.body.ddCircuitBreakerTripped, true,
+      "watchdog debe detectar CB trip explícitamente");
+    assert.equal(r.body.bootInvariantViolated, false);
+  });
+
+  it("BUG-4: boot invariant violated → bootInvariantViolated=true en endpoint", async () => {
+    S.simpleBot = fakeSimpleBot({
+      capitalSyncPausedUntil: Infinity,
+      bootInvariantViolated: true,
+    });
+    const r = await getJson(port, "/api/simpleBot/state");
+    assert.equal(r.body.bootInvariantViolated, true,
+      "watchdog debe detectar boot invariant violation explícitamente");
+    assert.equal(r.body.ddCircuitBreakerTripped, false);
+  });
+
+  it("BUG-4: sin flags → ambos false, pausedUntil finito o 0", async () => {
+    const future = Date.now() + 300000;
+    S.simpleBot = fakeSimpleBot({ capitalSyncPausedUntil: future });
+    const r = await getJson(port, "/api/simpleBot/state");
+    assert.equal(r.body.capitalSyncPausedUntil, future);
+    assert.equal(r.body.ddCircuitBreakerTripped, false);
+    assert.equal(r.body.bootInvariantViolated, false);
+    assert.ok(Number.isFinite(r.body.capitalSyncPausedUntil) && r.body.capitalSyncPausedUntil < FAR_FUTURE,
+      "timeout normal debe ser valor finito < FAR_FUTURE");
+  });
+
+  it("BUG-4: capitalSync.pausedUntil sub-objeto también usa FAR_FUTURE", async () => {
     S.simpleBot = fakeSimpleBot({ capitalSyncPausedUntil: Infinity });
     const r = await getJson(port, "/api/simpleBot/state");
-    assert.equal(r.body.capitalSyncPausedUntil, null,
-      "Infinity debe serializarse como null (watchdog detecta CB trip con === null)");
+    assert.equal(r.body.capitalSync.pausedUntil, FAR_FUTURE,
+      "sub-objeto capitalSync.pausedUntil también debe usar sentinel");
   });
 
   it("capitalSyncPausedUntil finito → valor numérico en JSON", async () => {
