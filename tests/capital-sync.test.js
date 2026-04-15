@@ -972,3 +972,183 @@ describe("BUG-1.5 — sync ERROR respeta CB + boot invariant", () => {
       "pausedUntil debe ser finito sin flags");
   });
 });
+
+// ── H10: USDC/USDT depeg guard ──────────────────────────────────────────
+// Detecta desestabilización del peg USDC en desastres de mercado.
+// - drift ≤1% → proceder (comportamiento normal)
+// - drift 1-5% → warn + continuar
+// - drift >5% → pausa 1h, NO tocar ledger, alertar Telegram
+// - depeg severo + CB tripped → preservar Infinity
+
+// Helper: fake que devuelve USDCUSDT ticker con precio configurable
+// además del balance de account. Incluye BNB=0.05 por encima del umbral
+// low-alert (0.005) para que esos tests no reciban Telegram extra del
+// watchdog BNB.
+function makeFakeBinanceWithTicker(usdcFree, usdcUsdtPrice) {
+  return async (method, path, params) => {
+    if (method !== "GET") throw new Error("read-only");
+    if (path === "ticker/price" && params?.symbol === "USDCUSDT") {
+      return { symbol: "USDCUSDT", price: String(usdcUsdtPrice) };
+    }
+    if (path === "account") {
+      return {
+        balances: [
+          { asset: "USDC", free: String(usdcFree), locked: "0" },
+          { asset: "BNB",  free: "0.05",  locked: "0" },
+          { asset: "SOL",  free: "0.594", locked: "0" },
+          { asset: "XRP",  free: "36",    locked: "0" },
+        ],
+      };
+    }
+    if (path === "myTrades") {
+      return []; // detector de fee mode: empty trade history → null, no cambio
+    }
+    throw new Error(`unexpected path: ${path}`);
+  };
+}
+
+describe("H10 — USDC/USDT depeg guard", () => {
+  it("stable peg (price=1.0): sync procede normal, _lastUsdcUsdt=1", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0; // reset H7 default
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.0),
+    });
+    assert.equal(r.ok, true, "sync debe completar con peg estable");
+    assert.equal(eng._lastUsdcUsdt, 1, "lastUsdcUsdt capturado");
+    assert.equal(eng._usdcDepegAlertSent, false, "no alert con peg estable");
+    assert.equal(eng._capitalSyncPausedUntil, 0, "no pausa con peg estable");
+    assert.equal(eng._capitalReal, 100);
+  });
+
+  it("peg casi estable (price=1.005, drift=0.5%): sync normal, no warn", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.005),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(eng._lastUsdcUsdt, 1.005);
+    assert.equal(eng._usdcDepegAlertSent, false,
+      "drift 0.5% <1% no debe disparar alert latch");
+  });
+
+  it("drift moderado (price=0.98, drift=2%): sync continúa, warn + latch", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    let tgSent = 0;
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.98),
+      telegramSend: (_msg) => { tgSent++; },
+    });
+    assert.equal(r.ok, true, "drift moderado: sync completa normal");
+    assert.equal(eng._lastUsdcUsdt, 0.98);
+    assert.equal(eng._usdcDepegAlertSent, true, "latch activo tras warn");
+    assert.equal(tgSent, 1, "Telegram enviado una vez");
+    assert.equal(eng._capitalReal, 100, "capital actualizado normalmente");
+    assert.equal(eng._capitalSyncPausedUntil, 0, "no pausa en drift moderado");
+  });
+
+  it("drift moderado repetido: latch no re-envía Telegram (anti-spam)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    let tgSent = 0;
+    const deps = {
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.97),
+      telegramSend: (_msg) => { tgSent++; },
+    };
+    await eng.syncCapitalFromBinance(deps);
+    await eng.syncCapitalFromBinance(deps);
+    await eng.syncCapitalFromBinance(deps);
+    assert.equal(tgSent, 1, "3 syncs consecutivos con drift moderado = 1 solo telegram");
+    assert.equal(eng._usdcDepegAlertSent, true);
+  });
+
+  it("depeg severo (price=0.90, drift=10%): pausa 1h, ledger intacto, telegram", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalReal = 100; // ledger pre-depeg
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 60;
+    eng.capa2Cash = 40;
+    let tgSent = 0;
+    let tgMsg = "";
+    const before = Date.now();
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(50, 0.90),
+      telegramSend: (msg) => { tgSent++; tgMsg = msg; },
+    });
+    assert.equal(r.ok, false, "sync reporta ok=false por depeg severo");
+    assert.ok(r.error.includes("depeg"), "error message indica depeg");
+    assert.equal(eng._lastUsdcUsdt, 0.9);
+    // LEDGER INTACTO: capitalReal/efectivo NO debe haberse recalculado a $50
+    assert.equal(eng._capitalReal, 100, "capitalReal NO debe modificarse en depeg severo");
+    assert.equal(eng._capitalEfectivo, 100, "capitalEfectivo NO debe modificarse");
+    assert.equal(eng.capa1Cash, 60, "capa1Cash intacto");
+    assert.equal(eng.capa2Cash, 40, "capa2Cash intacto");
+    // Pausa 1h
+    const delta = eng._capitalSyncPausedUntil - before;
+    assert.ok(delta >= 59*60*1000 && delta <= 61*60*1000,
+      `pausa debe ser ~1h, delta=${delta}ms`);
+    assert.equal(tgSent, 1, "Telegram alerta enviada");
+    assert.ok(tgMsg.includes("DEPEG"), "mensaje telegram contiene DEPEG");
+    assert.equal(eng._lastCapitalSyncOk, false, "sync marcado como failed");
+    assert.ok(eng._lastCapitalSyncTs > 0, "timestamp actualizado para watchdog");
+  });
+
+  it("depeg severo + CB tripped: Infinity preservado (NO se sobrescribe con 1h)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._ddCircuitBreakerTripped = true;
+    eng._capitalSyncPausedUntil = Infinity;
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.80),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "CB tripped: Infinity debe preservarse, NO sobrescribirse con now+1h");
+    assert.equal(eng._ddCircuitBreakerTripped, true, "flag CB sigue true");
+  });
+
+  it("depeg severo + boot invariant violated: Infinity preservado", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._bootInvariantViolated = true;
+    eng._capitalSyncPausedUntil = Infinity;
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.20),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "boot invariant: Infinity debe preservarse contra pausa 1h");
+    assert.equal(eng._bootInvariantViolated, true);
+  });
+
+  it("ticker call falla: sync continúa normalmente (best-effort)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const fake = async (method, path, params) => {
+      if (path === "ticker/price") throw new Error("ticker down");
+      if (path === "account") {
+        return { balances: [{ asset: "USDC", free: "100", locked: "0" }] };
+      }
+      throw new Error("unexpected");
+    };
+    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r.ok, true, "ticker fail no debe bloquear sync OK");
+    assert.equal(eng._capitalReal, 100);
+  });
+
+  it("H10 state persiste via saveState: lastUsdcUsdt + usdcDepegAlertSent", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.97),
+    });
+    const saved = eng.saveState();
+    assert.equal(saved.lastUsdcUsdt, 0.97, "lastUsdcUsdt persistido");
+    assert.equal(saved.usdcDepegAlertSent, true, "latch persistido");
+    // Restart simulado
+    const eng2 = new SimpleBotEngine(saved);
+    assert.equal(eng2._lastUsdcUsdt, 0.97, "lastUsdcUsdt restaurado");
+    assert.equal(eng2._usdcDepegAlertSent, true, "latch restaurado");
+  });
+});

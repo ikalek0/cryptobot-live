@@ -277,6 +277,15 @@ class SimpleBotEngine {
     this._bnbBalance       = saved.bnbBalance       ?? 0;
     this._bnbLowAlertSent  = saved.bnbLowAlertSent  === true;
     this._lastFeeMode      = saved.lastFeeMode      ?? null; // "BNB" | "USDC"
+    // ── H10: USDC/USDT depeg tracking ─────────────────────────────────────
+    // _lastUsdcUsdt: último ticker leído de Binance (symbol=USDCUSDT).
+    // _usdcDepegAlertSent: latch anti-spam para Telegram (reset si drift
+    // vuelve a <=1%). La pausa severa (>5% drift) se refleja en
+    // _capitalSyncPausedUntil como una pausa de 1h, respetando Infinity
+    // preexistente del CB (A5) o boot invariant (A7) con la misma guarda
+    // que BUG-1/1.5.
+    this._lastUsdcUsdt         = saved.lastUsdcUsdt ?? 1;
+    this._usdcDepegAlertSent   = saved.usdcDepegAlertSent === true;
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -777,6 +786,85 @@ class SimpleBotEngine {
     try {
       if (typeof deps?.binanceReadOnlyRequest !== "function")
         throw new Error("binanceReadOnlyRequest not provided");
+
+      // ── H10: USDC/USDT depeg guard ─────────────────────────────────────
+      // En desastres de mercado (TerraUSD mayo 2022, USDC marzo 2023), la
+      // paridad USDC≈USDT≈1 puede romperse. Si eso ocurre, el valor MTM
+      // de posiciones USDC vs capital declarado deja de ser 1:1 y el sync
+      // puede corromper el ledger (ej. capitalReal aparenta haber caído
+      // 10% cuando en realidad es el peg el que se ha movido).
+      //
+      // Estrategia fail-safe:
+      //   - drift ≤1%: proceder normalmente, guardar lectura.
+      //   - drift 1-5%: WARN en log + Telegram (una vez por ciclo, con
+      //     latch anti-spam), proceder con sync.
+      //   - drift >5%: PAUSE capital-sync 1h, NO tocar ledger, alertar
+      //     Telegram. Respeta _capitalSyncPausedUntil=Infinity preexistente
+      //     del CB (A5) o boot invariant (A7) con la misma guarda que
+      //     BUG-1/1.5 (no debilitar pausa indefinida).
+      //
+      // Importante: la lectura del ticker es best-effort. Si falla, se
+      // loguea pero NO bloquea el sync — una API flaky no debe convertir
+      // un sync OK en uno KO. Ese error se absorbe en el try interno.
+      try {
+        const ticker = await deps.binanceReadOnlyRequest("GET", "ticker/price", { symbol: "USDCUSDT" });
+        const usdcUsdt = parseFloat(ticker?.price || "0");
+        if (usdcUsdt > 0) {
+          this._lastUsdcUsdt = +usdcUsdt.toFixed(6);
+          const driftPct = Math.abs(usdcUsdt - 1) * 100;
+          if (driftPct > 5) {
+            // ── Severe depeg: pausa 1h, abortar sync ──────────────────
+            // Respetar Infinity preexistente con la misma guarda flag-based
+            // que BUG-1 (success path) y BUG-1.5 (error path). Nunca
+            // debilitar una pausa indefinida con un timestamp finito.
+            if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated) {
+              const oneHour = Date.now() + 60 * 60 * 1000;
+              this._capitalSyncPausedUntil = Math.max(
+                this._capitalSyncPausedUntil || 0,
+                oneHour
+              );
+            } else {
+              const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
+              console.warn(`[SIMPLE][DEPEG] severe depeg (${driftPct.toFixed(2)}%) pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity`);
+            }
+            this._lastCapitalSyncTs = Date.now();
+            this._lastCapitalSyncOk = false;
+            console.error(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} drift=${driftPct.toFixed(2)}% >5% → pause capital-sync 1h, ledger intacto`);
+            if (typeof deps?.telegramSend === "function") {
+              try {
+                deps.telegramSend(`🚨 <b>USDC DEPEG DETECTED</b>\nUSDC/USDT = ${usdcUsdt.toFixed(4)}\nDrift = ${driftPct.toFixed(2)}%\nCapital-sync pausado 1h. Ledger NO actualizado.\nVerifica el peg manualmente antes de reanudar.`);
+              } catch {}
+            }
+            this._usdcDepegAlertSent = true;
+            return { ok: false, error: `USDC depeg ${driftPct.toFixed(2)}%`, usdcUsdt };
+          }
+          if (driftPct > 1) {
+            // ── Moderate drift: warn + continue ──────────────────────
+            console.warn(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} drift=${driftPct.toFixed(2)}% >1% — sync continúa, monitoreo activo`);
+            if (!this._usdcDepegAlertSent) {
+              // Latch set unconditionally: refleja "hemos alertado en
+              // este ciclo de drift", incluso si no hay telegramSend.
+              // Así /api/state y saveState pueden verlo.
+              if (typeof deps?.telegramSend === "function") {
+                try {
+                  deps.telegramSend(`⚠️ <b>USDC drift moderado</b>\nUSDC/USDT = ${usdcUsdt.toFixed(4)}\nDrift = ${driftPct.toFixed(2)}% (umbral warn=1%, pause=5%)\nSync continúa normalmente.`);
+                } catch {}
+              }
+              this._usdcDepegAlertSent = true;
+            }
+          } else {
+            // Stable peg: reset latch si estaba activo
+            if (this._usdcDepegAlertSent) {
+              this._usdcDepegAlertSent = false;
+              console.log(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} estable (<1% drift) — latch de alerta reseteado`);
+            }
+          }
+        }
+      } catch (e) {
+        // Best-effort: ticker call falló. NO abortar el sync por eso.
+        console.warn(`[SIMPLE][DEPEG] ticker USDCUSDT fetch failed (no crítico): ${e.message}`);
+      }
+
       const account = await deps.binanceReadOnlyRequest("GET", "account", {});
       if (!account || !Array.isArray(account.balances))
         throw new Error("invalid account payload");
@@ -1429,6 +1517,9 @@ class SimpleBotEngine {
       bnbBalance:      this._bnbBalance,
       bnbLowAlertSent: this._bnbLowAlertSent,
       lastFeeMode:     this._lastFeeMode,
+      // ── H10: USDC/USDT depeg tracking ─────────────────────────────────
+      lastUsdcUsdt:        this._lastUsdcUsdt,
+      usdcDepegAlertSent:  this._usdcDepegAlertSent === true,
       // ── H6: persistir estado de capital sync entre restarts ──────────
       // Un PM2 restart durante una pausa por fallo de sync debe reanudar
       // pausado, no como si todo estuviera bien. El constructor aplica
