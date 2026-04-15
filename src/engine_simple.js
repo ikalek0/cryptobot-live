@@ -1016,6 +1016,20 @@ class SimpleBotEngine {
 
   async evaluate(){
     await this._cleanupStalePending(); // FIX-M9 + C4: rollback/reconcile pending stuck
+    // BUG-2: garantizar que _checkDrawdownAlerts se evalúa cada tick, no solo
+    // cuando alguien consulta getState(). Antes: getState sólo se invocaba
+    // desde endpoints HTTP y tg.checkAlerts (cada 10min), así que en un flash
+    // crash el CB tenía latencia de 0-10min para activarse. Combinado con
+    // BUG-1, la ventana de BUYs no autorizados era peligrosa.
+    //
+    // Usa el peakTv ya tracked en getState() — NO actualiza el peak aquí,
+    // solo evalúa el DD actual contra el peak ya conocido. La actualización
+    // del peak sigue ocurriendo en getState() para preservar la semántica M14.
+    if (this._peakTv !== null && this._peakTv > 0) {
+      const tv = this.totalValue();
+      const drawdownPct = +((this._peakTv - tv) / this._peakTv * 100).toFixed(3);
+      this._checkDrawdownAlerts(drawdownPct);
+    }
     this.tick++;
     if(this.tick%30===0) this.equity.push({v:this.totalValue(),t:Date.now()});
     // Diagnostic: cada 60 ticks (~10min) mostrar estado de velas

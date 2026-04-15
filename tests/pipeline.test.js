@@ -227,3 +227,112 @@ describe("Full pipeline: candle close triggers evaluation", () => {
       "Should block 3rd position in MAJOR_ALT group");
   });
 });
+
+// ── BUG-2: _checkDrawdownAlerts debe invocarse desde evaluate(), no sólo getState ─
+// Regression guard: auditoría adversarial detectó que getState() es el
+// único path que llama _checkDrawdownAlerts, y sólo se invoca desde
+// endpoints HTTP o tg.checkAlerts (cada 10min). En un flash crash con
+// DD del 20%, el CB tenía latencia de 0-10min para activarse. Combinado
+// con BUG-1, la ventana de BUYs no autorizados era crítica.
+
+// Helper: setea un DD artificial sobre el peak sin pasar por trades.
+// Mismo patrón que setDrawdown en capital-sync.test.js.
+function setDrawdownPipeline(eng, drawdownPct) {
+  const peak = 100;
+  const tv = peak * (1 - drawdownPct / 100);
+  eng.capa1Cash = tv;
+  eng.capa2Cash = 0;
+  eng.portfolio = {};
+  eng._peakTv = peak;
+  eng._capitalEfectivo = 100;
+}
+
+describe("BUG-2 — _checkDrawdownAlerts también invocado desde evaluate()", () => {
+  it("DD 16% sin llamar getState → evaluate() dispara CB", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    setDrawdownPipeline(eng, 16);
+    // NUNCA llamamos getState aquí — sólo evaluate
+    assert.equal(eng._ddCircuitBreakerTripped, false, "pre: CB no tripped");
+    await eng.evaluate();
+    assert.equal(eng._ddCircuitBreakerTripped, true,
+      "evaluate() debe disparar el CB con DD 16%");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "evaluate() debe setear pausedUntil=Infinity tras disparar CB");
+    assert.ok(sent.some(m => /CIRCUIT BREAKER/i.test(m)),
+      "telegramSend debe recibir alerta de CB");
+  });
+
+  it("DD 6% sin llamar getState → evaluate() dispara alerta 5% (y 3%)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    setDrawdownPipeline(eng, 6);
+    assert.equal(eng._ddAlert5, false, "pre: alerta 5% no disparada");
+    assert.equal(eng._ddAlert3, false, "pre: alerta 3% no disparada");
+    await eng.evaluate();
+    assert.equal(eng._ddAlert5, true, "evaluate() debe disparar alerta 5%");
+    assert.equal(eng._ddAlert3, true, "evaluate() debe disparar alerta 3%");
+    assert.equal(eng._ddAlert10, false, "6% no debe disparar alerta 10%");
+    assert.equal(eng._ddCircuitBreakerTripped, false, "6% no debe disparar CB");
+    assert.equal(sent.length, 2, "se envían 2 alertas (5% + 3%)");
+  });
+
+  it("evaluate() no dispara alertas si _peakTv es null (sin datos aún)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    // No setear _peakTv — es null por defecto
+    assert.equal(eng._peakTv, null);
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    await eng.evaluate();
+    assert.equal(eng._ddCircuitBreakerTripped, false);
+    assert.equal(sent.length, 0, "sin peak no debe evaluar DD");
+  });
+
+  it("evaluate() no actualiza _peakTv — sigue siendo responsabilidad de getState", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng.capa1Cash = 60;
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    eng._peakTv = 80; // peak artificialmente bajo vs tv=100
+    await eng.evaluate();
+    // evaluate NO debe haber actualizado el peak al tv=100
+    assert.equal(eng._peakTv, 80,
+      "evaluate() no debe modificar _peakTv — es responsabilidad de getState (M14)");
+  });
+
+  it("sanity: getState sigue llamando _checkDrawdownAlerts también", () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    setDrawdownPipeline(eng, 16);
+    eng.getState();
+    assert.equal(eng._ddCircuitBreakerTripped, true,
+      "getState() sigue siendo path válido para disparar CB");
+  });
+
+  it("BUG-1 + BUG-2 combinados: DD 16% en evaluate() → sync no borra pausa", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    const sent = [];
+    eng.setTelegramSend((m) => sent.push(m));
+    setDrawdownPipeline(eng, 16);
+    await eng.evaluate();
+    assert.equal(eng._ddCircuitBreakerTripped, true);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity);
+    // Ahora un sync exitoso — no debe borrar Infinity (BUG-1 guard)
+    const fakeBinance = async () => ({
+      balances: [{ asset: "USDC", free: "100", locked: "0" }, { asset: "BNB", free: "1", locked: "0" }],
+    });
+    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeBinance });
+    assert.equal(r.ok, true);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "BUG-1 + BUG-2: sync post-CB no debe borrar Infinity");
+  });
+});
