@@ -1,4 +1,52 @@
 // ── Trade Logger — PostgreSQL structured log ──────────────────────────────
+//
+// A6 — Schema audit (Opus Group-A): la tabla `trade_log` existe ya con 20
+// columnas de datos (más id PRIMARY KEY y created_at timestamp, = 22 en
+// total). El schema cubre la mayoría de dimensiones que el journal quiere
+// analizar post-trade, pero hay gap semántico con respecto a la lista
+// exacta del Group-A spec:
+//
+//   Spec A6 (20 campos):   strategy, regime, ADX, RSI, F&G, UTC hour,
+//                          Kelly, MAE, MFE, entryPrice, exitPrice, qty,
+//                          capa, duration, fee, feeMode, pnlPct, pnlUsd,
+//                          reason, timestamp
+//   Actual (20 campos):    bot, symbol, strategy, direction, open_ts,
+//                          close_ts, duration_min, entry_price, exit_price,
+//                          pnl_pct, invest_usdc, reason, regime, adx,
+//                          rsi_at_entry, fear_greed, hour_utc, kelly_rolling,
+//                          mae_real, mfe_real
+//
+//   Overlap (15):  strategy, regime, adx, rsi_at_entry, fear_greed,
+//                  hour_utc, kelly_rolling, mae_real, mfe_real,
+//                  entry_price, exit_price, duration_min, pnl_pct,
+//                  reason, open_ts/close_ts (timestamp equivalente)
+//   Extras actuales (no en spec): bot, symbol, direction, invest_usdc
+//   Faltan del spec (5):
+//     - qty        (cantidad del asset — derivable de invest_usdc/entry_price
+//                   pero no explícito)
+//     - capa       (1 o 2 — crítico para analytics por capa, actualmente se
+//                   pierde tras close)
+//     - fee        (USDC pagado de fee — bruto)
+//     - fee_mode   ("BNB" vs "USDC" — necesario para reconciliar modo)
+//     - pnl_usd    (USDC absoluto — derivable de pnl_pct*invest_usdc pero
+//                   muy útil tenerlo pre-calculado para reports)
+//
+// DECISIÓN A6 (Group-A): NO-OP. Las 5 columnas adicionales son útiles pero
+// no críticas pre-LIVE. Añadirlas ahora implica:
+//   1) ALTER TABLE trade_log ADD COLUMN qty NUMERIC, capa INTEGER, fee
+//      NUMERIC, fee_mode TEXT, pnl_usd NUMERIC
+//   2) Ampliar signature de logTrade() para recibir los 5 campos
+//   3) Plumbing desde engine_simple.js:_evaluate — capa se pierde tras
+//      delete this.portfolio[id], hay que capturarlo antes del logTrade;
+//      fee y feeMode vienen del _feePredicted y pueden ser stale si el
+//      fill tuvo discrepancia
+//   4) Backfill opcional: NULL para trades históricos
+//
+// RECOMENDACIÓN: aplicar esta migración DESPUÉS de la primera semana
+// operando en LIVE_MODE=true con datos reales. Así sabemos qué análisis
+// emerge de la primera batch de trades antes de comprometer el schema.
+// Un ALTER TABLE ADD COLUMN IF NOT EXISTS es cheap, lo difícil es
+// decidir qué se quiere analizar. El gap no bloquea el deploy.
 "use strict";
 
 async function ensureTradeLogTable(db) {
