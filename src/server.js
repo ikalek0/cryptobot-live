@@ -25,6 +25,7 @@ const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 const S = require("./trading/state");
 const wsAuth     = require("./ws_auth");
+const { SlidingWindowLimiter, extractIp } = require("./rate_limit");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
@@ -453,6 +454,42 @@ app.get("/index.html", serveIndex);
 app.use(express.static(path.join(__dirname,"../public")));
 app.use(express.json());
 
+// ── BATCH-1 FIX #7 (HIGH-4): rate limiting ────────────────────────────
+// Dos limiters separados:
+//   - mutationLimiter: 10 requests / 60s por IP en endpoints mutantes.
+//     Evita floods y brute-force de bajo ritmo que atraviesen el auth
+//     check en una sola ráfaga.
+//   - authLimiter:     5 auth failures / 15min por IP. Cuando una
+//     request mutante falla el check de BOT_SECRET, la route llama
+//     onAuthFailure(req,res) que registra el fallo Y devuelve 429 si
+//     la IP ya está bloqueada. De este modo el 429 tiene prioridad
+//     sobre el 401, enseñando al atacante menos info sobre el estado
+//     del secret.
+const rateLimiter     = new SlidingWindowLimiter();
+const mutationLimiter = rateLimiter.middleware({
+  max: 10,
+  windowMs: 60_000,
+  bucket: "mut",
+  onBlock: (key) => console.warn(`[RATE-LIMIT] 429 ${key}`),
+});
+// Helper llamado dentro de las routes tras detectar BOT_SECRET inválido.
+// Devuelve true si la route DEBE retornar tras esta llamada (porque ya
+// respondió con 429 o 401); false sólo si el caller aún tiene que
+// responder (no ocurre actualmente — siempre retornamos desde aquí).
+function onAuthFailure(req, res) {
+  const key = `auth:${extractIp(req)}`;
+  const r = rateLimiter.checkAndHit(key, 5, 15 * 60 * 1000);
+  if (!r.ok) {
+    const retryAfterSec = Math.max(1, Math.ceil(r.retryAfterMs / 1000));
+    res.setHeader("Retry-After", String(retryAfterSec));
+    res.status(429).json({ error: "Too many auth failures", retryAfterSec });
+    console.warn(`[RATE-LIMIT] 429 ${key} (auth block)`);
+    return true;
+  }
+  res.status(401).json({ error: "No autorizado" });
+  return true;
+}
+
 function broadcast(msg) {
   const d=JSON.stringify(msg);
   wss.clients.forEach(c=>{if(c.readyState===WebSocket.OPEN)c.send(d);});
@@ -594,10 +631,10 @@ app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAP
 // puede borrar state.json + simpleState vía POST vacío → seed Kelly gates
 // positivos, olvidar posiciones reales abiertas. Usa el mismo patrón que
 // /api/set-capital (BOT_SECRET).
-app.post("/api/reset-state", async (req, res) => {
+app.post("/api/reset-state", mutationLimiter, async (req, res) => {
   const { secret } = req.body || {};
   if (secret !== (process.env.BOT_SECRET || "bafir_bot_secret"))
-    return res.status(401).json({ error: "No autorizado" });
+    return onAuthFailure(req, res);
   try {
     await deleteState();
     await saveSimpleState({});
@@ -659,18 +696,18 @@ app.get("/api/confidence", (_,res) => {
 // Reset endpoint eliminado por seguridad — no exponer esta funcionalidad
 
 // ── ENDPOINT: recibir parámetros del PAPER ────────────────────────────────────
-app.post("/api/sync/params", (req,res) => {
+app.post("/api/sync/params", mutationLimiter, (req,res) => {
   // Verificar firma HMAC
   const sig  = req.headers["x-signature"];
   const body = JSON.stringify(req.body);
-  if (!sig) return res.status(401).json({ error:"Firma requerida" });
+  if (!sig) { onAuthFailure(req, res); return; }
   const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
   try {
     if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex"))) {
       console.warn("[SYNC] Firma inválida — posible ataque");
-      return res.status(401).json({ error:"Firma inválida" });
+      onAuthFailure(req, res); return;
     }
-  } catch(e) { return res.status(401).json({ error:"Firma inválida" }); }
+  } catch(e) { onAuthFailure(req, res); return; }
 
   const { params, paperStats } = req.body;
   if (!params || !paperStats) return res.status(400).json({ error:"Datos incompletos" });
@@ -695,15 +732,16 @@ app.post("/api/sync/params", (req,res) => {
 });
 
 // ── Sync diario: recibe aprendizaje del paper ─────────────────────────────────
-app.post("/api/sync/daily", (req,res) => {
+app.post("/api/sync/daily", mutationLimiter, (req,res) => {
   const sig  = req.headers["x-signature"];
   const body = JSON.stringify(req.body);
-  if (!sig) return res.status(401).json({ error:"Firma requerida" });
+  if (!sig) { onAuthFailure(req, res); return; }
   const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
   try {
-    if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex")))
-      return res.status(401).json({ error:"Firma inválida" });
-  } catch(e) { return res.status(401).json({ error:"Firma inválida" }); }
+    if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex"))) {
+      onAuthFailure(req, res); return;
+    }
+  } catch(e) { onAuthFailure(req, res); return; }
 
   const { dailyLearning, positive } = req.body;
   if (!dailyLearning) return res.status(400).json({ error:"Datos incompletos" });
@@ -751,16 +789,16 @@ app.post("/api/sync/daily", (req,res) => {
 // Bafir envía el capital que el gestor ha declarado → live opera SOLO con eso
 // ── Paper Shadow sync ──────────────────────────────────────────────────────────
 // Paper notifica a live cuando abre/cierra una posición
-app.post("/api/shadow/entry", (req,res) => {
+app.post("/api/shadow/entry", mutationLimiter, (req,res) => {
   const {secret, symbol, entryPrice, strategy, regime, stateKey} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"Unauthorized"});
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
   shadow.shadowEntry(symbol, entryPrice, strategy, regime, stateKey);
   res.json({ok:true, adopted: shadow.shouldExecute(strategy, regime), confidence: shadow.getConfidence(strategy, regime)});
 });
 
-app.post("/api/shadow/exit", (req,res) => {
+app.post("/api/shadow/exit", mutationLimiter, (req,res) => {
   const {secret, symbol, exitPrice, pnl} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"Unauthorized"});
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
   shadow.shadowExit(symbol, exitPrice, pnl);
   res.json({ok:true, stats: shadow.getStats()});
 });
@@ -770,9 +808,9 @@ app.get("/api/shadow/status", (req,res) => {
 });
 
 // ── Alert config from Bafir ────────────────────────────────────────────────────
-app.post("/api/set-alert-config", (req,res) => {
+app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
   const {secret, alertConfig} = req.body;
-  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return res.status(401).json({error:"No autorizado"});
+  if(secret !== (process.env.BOT_SECRET||"bafir_bot_secret")) return onAuthFailure(req, res);
   if(alertConfig) {
     global._alertConfig = alertConfig;
     console.log(`[ALERT-CFG] Win: ${alertConfig.winPct}% Loss: ${alertConfig.lossPct}%`);
@@ -780,10 +818,10 @@ app.post("/api/set-alert-config", (req,res) => {
   res.json({ok:true});
 });
 
-app.post("/api/set-capital", (req,res) => {
+app.post("/api/set-capital", mutationLimiter, (req,res) => {
   const { secret, capitalUSD } = req.body;
   if (secret !== (process.env.BOT_SECRET||"bafir_bot_secret"))
-    return res.status(401).json({error:"No autorizado"});
+    return onAuthFailure(req, res);
   if (!capitalUSD || capitalUSD <= 0)
     return res.status(400).json({error:"Capital inválido"});
 

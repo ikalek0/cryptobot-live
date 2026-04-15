@@ -128,12 +128,14 @@ describe("C3: /api/reset-state handler in server.js source (regression guard)", 
     // Regex: buscamos el handler reset-state y confirmamos que tiene secret check cercano
     const idx = src.indexOf('app.post("/api/reset-state"');
     assert.ok(idx >= 0, "handler de /api/reset-state debe existir");
-    // Los siguientes 400 chars deben contener el patrón de auth
+    // Los siguientes 600 chars deben contener el patrón de auth
     const window = src.slice(idx, idx + 600);
     assert.ok(window.includes("secret") && window.includes("BOT_SECRET"),
       "/api/reset-state debe tener secret check (BOT_SECRET) en el handler");
-    assert.ok(window.includes("401"),
-      "/api/reset-state debe devolver 401 sin auth");
+    // BATCH-1 FIX #7: el 401 ahora se emite dentro de onAuthFailure(req,res).
+    // El handler debe delegar a ese helper en vez de inline res.status(401).
+    assert.ok(window.includes("onAuthFailure") || window.includes("401"),
+      "/api/reset-state debe rechazar auth inválida (vía onAuthFailure o 401 inline)");
   });
 
   it("warnPredictableSecrets aborta boot en LIVE_MODE con secrets default", () => {
