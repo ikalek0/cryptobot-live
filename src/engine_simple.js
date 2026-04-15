@@ -286,6 +286,16 @@ class SimpleBotEngine {
     // que BUG-1/1.5.
     this._lastUsdcUsdt         = saved.lastUsdcUsdt ?? 1;
     this._usdcDepegAlertSent   = saved.usdcDepegAlertSent === true;
+    // ── H10-CRITICAL: latch que protege la pausa de 1h del depeg severo ──
+    // Análogo a _ddCircuitBreakerTripped y _bootInvariantViolated: mientras
+    // esté true, el success path y el error path de syncCapitalFromBinance
+    // NO debilitan _capitalSyncPausedUntil con un timestamp más corto.
+    // Antes (BUG encontrado por Opus parte 2): si el ticker USDCUSDT fallaba
+    // en el siguiente sync post-depeg (best-effort catch lo absorbía), el
+    // success path borraba la pausa a 0 y habilitaba BUYs sobre un peg roto.
+    // Se resetea automáticamente cuando el peg vuelve a estable (<1% drift)
+    // en la rama else del ticker check, o manualmente editando state.json.
+    this._depegPauseActive     = saved.depegPauseActive === true;
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -827,6 +837,13 @@ class SimpleBotEngine {
               const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
               console.warn(`[SIMPLE][DEPEG] severe depeg (${driftPct.toFixed(2)}%) pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity`);
             }
+            // H10-CRITICAL: latch de protección del pause contra el
+            // success/error path del siguiente sync. Se setea SIEMPRE que
+            // se detecta severe depeg, independientemente de CB/boot_inv,
+            // para que si esos flags se limpian manualmente mientras el
+            // peg sigue roto, el pause no se pierda. Se resetea sólo
+            // cuando el ticker devuelve drift<1% (rama stable más abajo).
+            this._depegPauseActive = true;
             this._lastCapitalSyncTs = Date.now();
             this._lastCapitalSyncOk = false;
             console.error(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} drift=${driftPct.toFixed(2)}% >5% → pause capital-sync 1h, ledger intacto`);
@@ -853,10 +870,15 @@ class SimpleBotEngine {
               this._usdcDepegAlertSent = true;
             }
           } else {
-            // Stable peg: reset latch si estaba activo
-            if (this._usdcDepegAlertSent) {
+            // Stable peg: reset latches si estaban activos.
+            // H10-CRITICAL: también se resetea _depegPauseActive para que
+            // el próximo success path SÍ borre _capitalSyncPausedUntil=0
+            // y los BUYs vuelvan a habilitarse. Sin esto, el bot quedaría
+            // pausado indefinidamente incluso con peg recuperado.
+            if (this._usdcDepegAlertSent || this._depegPauseActive) {
               this._usdcDepegAlertSent = false;
-              console.log(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} estable (<1% drift) — latch de alerta reseteado`);
+              this._depegPauseActive = false;
+              console.log(`[SIMPLE][DEPEG] USDC/USDT=${usdcUsdt.toFixed(4)} estable (<1% drift) — latches de alerta y pausa reseteados`);
             }
           }
         }
@@ -966,11 +988,20 @@ class SimpleBotEngine {
       // ~5min y el primer éxito post-trip reseteaba _capitalSyncPausedUntil a 0,
       // permitiendo BUYs durante el flash crash o con ledger corrupto. Ambos
       // flags requieren recovery manual (editar data/state.json o state DB).
-      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated) {
+      //
+      // H10-CRITICAL: extensión del mismo patrón al depeg pause. Si el ticker
+      // USDCUSDT falla en el siguiente sync (best-effort catch lo absorbe) el
+      // success path podía borrar la pausa de 1h del depeg severo sin haber
+      // verificado que el peg se recuperó. Ahora _depegPauseActive gatea el
+      // clearing igual que CB y boot invariant. Se limpia auto en la rama
+      // stable del ticker check (drift<1%).
+      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated && !this._depegPauseActive) {
         this._capitalSyncPausedUntil = 0;
       } else {
-        const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
-        console.warn(`[SIMPLE][CAPITAL-SYNC] sync OK pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity hasta recovery manual`);
+        const reason = this._ddCircuitBreakerTripped
+          ? "CB tripped"
+          : (this._bootInvariantViolated ? "boot invariant violated" : "depeg pause active");
+        console.warn(`[SIMPLE][CAPITAL-SYNC] sync OK pero ${reason} — _capitalSyncPausedUntil se mantiene hasta recovery`);
       }
 
       console.log(`[SIMPLE][CAPITAL-SYNC] declarado=$${declarado.toFixed(2)} real=$${real.toFixed(2)} efectivo=$${efectivo.toFixed(2)} usdcLibre=$${usdcLibre.toFixed(2)} valorPos=$${valorPosiciones.toFixed(2)} capa1=$${this.capa1Cash.toFixed(2)} capa2=$${this.capa2Cash.toFixed(2)}${changed?" (ajustado)":""}`);
@@ -990,11 +1021,18 @@ class SimpleBotEngine {
       // Infinity con un timestamp finito. La pausa indefinida es la fuente de
       // verdad — el sync error no debe debilitarla. El sync seguirá reintentando
       // en su schedule, pero la pausa indefinida se mantiene hasta recovery manual.
-      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated) {
+      //
+      // H10-CRITICAL: misma extensión que el success path. Si el depeg pause
+      // está activo, el error path tampoco debe acortar la pausa a now+5min
+      // porque haría que el bot reanudara BUYs antes de la ventana de 1h
+      // del depeg con un peg potencialmente aún roto.
+      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated && !this._depegPauseActive) {
         this._capitalSyncPausedUntil = Date.now() + 5*60*1000;
       } else {
-        const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
-        console.warn(`[SIMPLE][CAPITAL-SYNC] sync ERROR pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity hasta recovery manual`);
+        const reason = this._ddCircuitBreakerTripped
+          ? "CB tripped"
+          : (this._bootInvariantViolated ? "boot invariant violated" : "depeg pause active");
+        console.warn(`[SIMPLE][CAPITAL-SYNC] sync ERROR pero ${reason} — _capitalSyncPausedUntil se mantiene hasta recovery`);
       }
       console.error(`[SIMPLE][CAPITAL-SYNC] ERROR (${this._capitalSyncFailCount}/3) — pausing trades 5min: ${err.message}`);
       if (this._capitalSyncFailCount >= 3 && typeof deps?.telegramSend === "function") {
@@ -1520,6 +1558,12 @@ class SimpleBotEngine {
       // ── H10: USDC/USDT depeg tracking ─────────────────────────────────
       lastUsdcUsdt:        this._lastUsdcUsdt,
       usdcDepegAlertSent:  this._usdcDepegAlertSent === true,
+      // ── H10-CRITICAL: latch de pausa por depeg severo ─────────────────
+      // Análogo a ddCircuitBreakerTripped y bootInvariantViolated. Mientras
+      // true, el sync success/error path no debilita _capitalSyncPausedUntil.
+      // Sobrevive restart para que un bot reiniciado durante una ventana de
+      // depeg no reanude BUYs accidentalmente antes de verificar el peg.
+      depegPauseActive:    this._depegPauseActive === true,
       // ── H6: persistir estado de capital sync entre restarts ──────────
       // Un PM2 restart durante una pausa por fallo de sync debe reanudar
       // pausado, no como si todo estuviera bien. El constructor aplica

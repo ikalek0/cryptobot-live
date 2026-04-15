@@ -1152,3 +1152,181 @@ describe("H10 — USDC/USDT depeg guard", () => {
     assert.equal(eng2._usdcDepegAlertSent, true, "latch restaurado");
   });
 });
+
+// ── H10-CRITICAL: depeg pause latch ─────────────────────────────────────
+// Regression guard del hallazgo adversarial (Opus parte 2): el success
+// path de syncCapitalFromBinance borraba la pausa de 1h del depeg severo
+// en el siguiente sync si el ticker USDCUSDT fallaba (best-effort catch
+// absorbía el error) y el account fetch tenía éxito. El patrón es
+// idéntico a BUG-1/1.5 pero con una fuente de pausa nueva (depeg) que no
+// estaba en el guard. Fix: _depegPauseActive como tercera condición del
+// guard en success/error paths, resetearlo automáticamente cuando el peg
+// vuelve a estable (<1% drift).
+//
+// Helper: fake binance con comportamiento programable por "sync call".
+// Cada paso del programa define { ticker, account?, usdcFree? } para un
+// sync. El step se avanza con el ticker call (primer call de cada sync),
+// para que la rama de severe depeg (que hace early return sin llamar a
+// account) aún avance al siguiente step en el próximo sync.
+function makeProgrammableBinance(programSteps) {
+  let tickerCalls = 0;
+  return async (method, path, params) => {
+    if (path === "ticker/price" && params?.symbol === "USDCUSDT") {
+      const step = programSteps[Math.min(tickerCalls, programSteps.length - 1)];
+      tickerCalls++;
+      if (step.ticker instanceof Error) throw step.ticker;
+      return { symbol: "USDCUSDT", price: String(step.ticker) };
+    }
+    // account/myTrades usan el step del ticker MÁS RECIENTE
+    const stepIdx = Math.max(0, tickerCalls - 1);
+    const step = programSteps[Math.min(stepIdx, programSteps.length - 1)];
+    if (path === "account") {
+      if (step.account instanceof Error) throw step.account;
+      return {
+        balances: [
+          { asset: "USDC", free: String(step.usdcFree ?? 100), locked: "0" },
+          { asset: "BNB",  free: "0.05",  locked: "0" },
+        ],
+      };
+    }
+    if (path === "myTrades") return [];
+    throw new Error(`unexpected path: ${path}`);
+  };
+}
+
+describe("H10-CRITICAL — depeg pause latch respetado en success/error path", () => {
+  it("BUG: depeg severo + ticker fail en sync siguiente → pausa preservada", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalReal = 100; eng._capitalEfectivo = 100;
+    eng.capa1Cash = 60; eng.capa2Cash = 40;
+
+    const program = [
+      { ticker: 0.85,                      usdcFree: 100 }, // severe depeg
+      { ticker: new Error("ticker down"),  usdcFree: 100 }, // transient fail
+    ];
+    const fake = makeProgrammableBinance(program);
+
+    // Sync 1: severe depeg → pausa 1h + flag=true
+    const tBefore = Date.now();
+    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r1.ok, false, "sync 1: severe depeg → ok=false");
+    assert.equal(eng._depegPauseActive, true, "flag _depegPauseActive seteado");
+    const pause1 = eng._capitalSyncPausedUntil;
+    const delta1 = pause1 - tBefore;
+    assert.ok(delta1 >= 59*60*1000 && delta1 <= 61*60*1000,
+      `sync 1: pausa debe ser ~1h, delta=${delta1}ms`);
+
+    // Sync 2: ticker falla (transient) pero account OK → success path
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r2.ok, true, "sync 2: account OK → ok=true");
+    // Crítico: la pausa NO debe haberse borrado a 0
+    assert.notEqual(eng._capitalSyncPausedUntil, 0,
+      "BUG preservation: pausa NO debe haberse borrado a 0");
+    assert.equal(eng._capitalSyncPausedUntil, pause1,
+      "pausa sigue siendo el timestamp del depeg original (~T+1h)");
+    assert.equal(eng._depegPauseActive, true, "flag sigue true tras sync 2");
+    // CB y boot invariant siguen false (el fix no los activó por error)
+    assert.equal(eng._ddCircuitBreakerTripped, false);
+    assert.equal(eng._bootInvariantViolated, false);
+  });
+
+  it("BUG: depeg severo + sync error en sync siguiente → pausa preservada", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalReal = 100; eng._capitalEfectivo = 100;
+
+    const program = [
+      { ticker: 0.85,                          usdcFree: 100 }, // severe depeg
+      { ticker: new Error("ticker down"),      account: new Error("ETIMEDOUT") }, // full error
+    ];
+    const fake = makeProgrammableBinance(program);
+
+    // Sync 1: severe depeg
+    const tBefore = Date.now();
+    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r1.ok, false);
+    assert.equal(eng._depegPauseActive, true);
+    const pause1 = eng._capitalSyncPausedUntil;
+    assert.ok(pause1 - tBefore >= 59*60*1000, "pausa ~1h tras depeg");
+
+    // Sync 2: error path (account falla). Sin el fix, este path
+    // sobrescribiría pausedUntil a now+5min, reduciendo los ~55min
+    // restantes del depeg.
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r2.ok, false, "sync 2: account falla → ok=false");
+    assert.equal(eng._capitalSyncPausedUntil, pause1,
+      "BUG preservation: error path NO debe haber acortado la pausa a now+5min");
+    assert.equal(eng._depegPauseActive, true, "flag sigue true");
+  });
+
+  it("recovery: peg vuelve a estable → flag se limpia y siguiente sync resetea pausa", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalReal = 100; eng._capitalEfectivo = 100;
+
+    const program = [
+      { ticker: 0.85,  usdcFree: 100 }, // severe depeg
+      { ticker: 1.000, usdcFree: 100 }, // peg recovered, drift 0%
+    ];
+    const fake = makeProgrammableBinance(program);
+
+    // Sync 1: severe depeg → flag + pausa
+    await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(eng._depegPauseActive, true, "pre-recovery: flag true");
+    assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre-recovery: paused");
+
+    // Sync 2: peg recuperado → stable branch limpia flags
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    assert.equal(r2.ok, true, "sync 2 OK con peg estable");
+    assert.equal(eng._depegPauseActive, false,
+      "recovery: flag _depegPauseActive reseteado automáticamente");
+    assert.equal(eng._usdcDepegAlertSent, false,
+      "recovery: latch de alerta también reseteado");
+    assert.equal(eng._capitalSyncPausedUntil, 0,
+      "recovery: pausa ahora SÍ se resetea a 0 (BUYs habilitados)");
+  });
+
+  it("round-trip persistencia: saveState/load preserva _depegPauseActive", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    // Trigger severe depeg → activa flag
+    await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.85),
+    });
+    assert.equal(eng._depegPauseActive, true, "flag activo tras depeg severo");
+
+    // saveState debe incluir el flag
+    const saved = eng.saveState();
+    assert.equal(saved.depegPauseActive, true,
+      "saveState debe persistir depegPauseActive=true");
+
+    // Nueva instancia restaura el flag
+    const eng2 = new SimpleBotEngine(saved);
+    assert.equal(eng2._depegPauseActive, true,
+      "constructor debe restaurar depegPauseActive desde saved");
+
+    // Y el guard del success path sigue respetando el flag post-restart:
+    // un sync exitoso con ticker transient fail NO debe borrar la pausa.
+    const pausePre = eng2._capitalSyncPausedUntil;
+    const fakeTransient = async (method, path, params) => {
+      if (path === "ticker/price") throw new Error("ticker flaky");
+      if (path === "account") {
+        return {
+          balances: [
+            { asset: "USDC", free: "100", locked: "0" },
+            { asset: "BNB",  free: "0.05", locked: "0" },
+          ],
+        };
+      }
+      if (path === "myTrades") return [];
+      throw new Error("unexpected");
+    };
+    const r = await eng2.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeTransient });
+    assert.equal(r.ok, true, "sync 2 post-restart: account OK → ok=true");
+    assert.equal(eng2._capitalSyncPausedUntil, pausePre,
+      "pausa persistida NO debe borrarse por el success path post-restart");
+    assert.equal(eng2._depegPauseActive, true,
+      "flag sigue true post-restart tras sync con ticker fail");
+  });
+});
