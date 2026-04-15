@@ -1007,9 +1007,20 @@ class SimpleBotEngine {
       }
 
       // Rollback seguro: sin Binance (no podemos verificar) o Binance confirmó sin fills
-      console.warn(`[SIMPLE][CLEANUP] ${id} pending > 5min (stuck) — rollback reservation $${(pos.invest||0).toFixed(2)} → capa${pos.capa}`);
-      if(pos.capa === 1) this.capa1Cash += (pos.invest || 0);
-      else               this.capa2Cash += (pos.invest || 0);
+      // BUG-3: devolver _investWithFee (lo realmente debitado en A4), no .invest
+      // nominal. El debit al crear la posición fue `invest * (1 + FEE_efectivo)`,
+      // así que devolver sólo `invest` deja un leak de `invest * FEE_efectivo`
+      // por evento (≈$0.01-0.03 por rollback en modo USDC, acumulable). En modo
+      // BNB el fee_efectivo es 0 y cashDebit === invest → _investWithFee === invest,
+      // el fix es no-op en ese mode. Para posiciones legacy sin _investWithFee
+      // (pre-A4), fallback conservador invest * (1 + FEE_RATE_USDC) — upper
+      // bound que nunca infla de menos el cash devuelto.
+      const refund = (typeof pos._investWithFee === "number")
+        ? pos._investWithFee
+        : (pos.invest || 0) * (1 + FEE_RATE_USDC);
+      console.warn(`[SIMPLE][CLEANUP] ${id} pending > 5min (stuck) — rollback reservation $${refund.toFixed(4)} (nominal=$${(pos.invest||0).toFixed(2)}) → capa${pos.capa}`);
+      if(pos.capa === 1) this.capa1Cash += refund;
+      else               this.capa2Cash += refund;
       delete this.portfolio[id];
     }
   }

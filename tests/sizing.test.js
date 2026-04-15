@@ -783,7 +783,8 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     bot.portfolio["STALE"] = {
       pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
       entryPrice: 100, stop: 98, target: 103,
-      openTs: oldTs, status: "pending"
+      openTs: oldTs, status: "pending",
+      _investWithFee: 20*K, // BUG-3: BNB mode → cashDebit === invest
     };
     bot.capa1Cash -= 20*K; // post-reserve (FIX-A contract)
 
@@ -801,7 +802,8 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     bot.portfolio["STALE2"] = {
       pair: "XRPUSDC", capa: 2, invest: 18*K, qty: 30,
       entryPrice: 0.6, stop: 0.58, target: 0.64,
-      openTs: oldTs, status: "pending"
+      openTs: oldTs, status: "pending",
+      _investWithFee: 18*K, // BUG-3: BNB mode → cashDebit === invest
     };
     bot.capa2Cash -= 18*K;
 
@@ -850,7 +852,8 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     bot.portfolio["STALE"] = {
       pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
       entryPrice: 100, stop: 98, target: 103,
-      openTs: oldTs, status: "pending"
+      openTs: oldTs, status: "pending",
+      _investWithFee: 20*K, // BUG-3: BNB mode → cashDebit === invest
     };
     const capa1AfterReserve = bot.capa1Cash - 20*K;
     bot.capa1Cash = capa1AfterReserve;
@@ -867,9 +870,10 @@ describe("M9: _cleanupStalePending rolls back pending positions after 5min", () 
     const capa1Before = bot.capa1Cash;
     const capa2Before = bot.capa2Cash;
     const oldTs = Date.now() - 6 * 60 * 1000;
-    bot.portfolio["STALE_A"] = { pair: "BNBUSDC", capa: 1, invest: 12*K, qty: 0.12, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending" };
-    bot.portfolio["STALE_B"] = { pair: "SOLUSDC", capa: 1, invest: 10*K, qty: 0.10, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending" };
-    bot.portfolio["STALE_C"] = { pair: "XRPUSDC", capa: 2, invest: 15*K, qty: 15,   entryPrice: 1,   stop: 0.99, target: 1.01, openTs: oldTs, status: "pending" };
+    // BUG-3: BNB mode → _investWithFee === invest (fee pagada en BNB, no USDC)
+    bot.portfolio["STALE_A"] = { pair: "BNBUSDC", capa: 1, invest: 12*K, qty: 0.12, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending", _investWithFee: 12*K };
+    bot.portfolio["STALE_B"] = { pair: "SOLUSDC", capa: 1, invest: 10*K, qty: 0.10, entryPrice: 100, stop: 99, target: 101, openTs: oldTs, status: "pending", _investWithFee: 10*K };
+    bot.portfolio["STALE_C"] = { pair: "XRPUSDC", capa: 2, invest: 15*K, qty: 15,   entryPrice: 1,   stop: 0.99, target: 1.01, openTs: oldTs, status: "pending", _investWithFee: 15*K };
     bot.capa1Cash -= 22*K;
     bot.capa2Cash -= 15*K;
 
@@ -929,6 +933,7 @@ describe("C4: _cleanupStalePending pre-verification con Binance", () => {
       pair: "SOLUSDC", capa: 1, invest: 15*K, qty: 0.08,
       entryPrice: 180, stop: 178.5, target: 183,
       openTs: oldTs, status: "pending",
+      _investWithFee: 15*K, // BUG-3: BNB mode → cashDebit === invest
     };
     bot.capa1Cash -= 15*K;
 
@@ -975,6 +980,7 @@ describe("C4: _cleanupStalePending pre-verification con Binance", () => {
       pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 0.2,
       entryPrice: 100, stop: 99, target: 101,
       openTs: oldTs, status: "pending",
+      _investWithFee: 20*K, // BUG-3: BNB mode → cashDebit === invest
     };
     bot.capa1Cash -= 20*K;
 
@@ -984,6 +990,145 @@ describe("C4: _cleanupStalePending pre-verification con Binance", () => {
 
     assert.ok(!bot.portfolio["LEGACY_STALE"], "fallback: rollback inmediato");
     assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9, "capa1 restaurada");
+  });
+});
+
+// ── BUG-3: rollback de stale pending devuelve _investWithFee (no leak) ───
+// Regression guard: pre-A4 el rollback devolvía `pos.invest` nominal,
+// pero el debit al crear la posición fue `invest * (1 + FEE_efectivo)`.
+// En USDC mode (FEE=0.001), cada rollback leakeaba `invest * 0.001`
+// (≈$0.01-0.03 para invest $10-30, acumulable). El fix devuelve
+// _investWithFee (lo realmente debitado) con fallback conservador
+// `invest * (1 + FEE_RATE_USDC)` para posiciones legacy pre-A4.
+describe("BUG-3 — rollback stale pending devuelve _investWithFee", () => {
+  it("USDC mode con _investWithFee → rollback devuelve cantidad exacta (no leak)", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    const invest = 20*K;
+    const investWithFee = invest * 1.001; // USDC mode: cashDebit = invest * (1+0.001)
+    bot.portfolio["USDC_STALE"] = {
+      pair: "SOLUSDC", capa: 1, invest, qty: 0.2,
+      entryPrice: 100, stop: 99, target: 101,
+      openTs: oldTs, status: "pending",
+      _investWithFee: investWithFee, // USDC mode explícito
+    };
+    // Simular debit real post-A4: capa1 debitada con investWithFee
+    bot.capa1Cash -= investWithFee;
+
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["USDC_STALE"]);
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `rollback USDC debe devolver exactamente investWithFee, expected ${capa1Before}, got ${bot.capa1Cash} (leak=${capa1Before - bot.capa1Cash})`);
+  });
+
+  it("USDC mode sin _investWithFee (legacy) → fallback conservador invest*(1+FEE_RATE_USDC)", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    const invest = 20*K;
+    // Legacy: la posición fue creada pre-A4 y no tiene _investWithFee.
+    // Asumimos que el debit real fue con fee USDC (worst case conservador).
+    const legacyDebit = invest * 1.001;
+    bot.portfolio["LEGACY_NOFIELD"] = {
+      pair: "SOLUSDC", capa: 1, invest, qty: 0.2,
+      entryPrice: 100, stop: 99, target: 101,
+      openTs: oldTs, status: "pending",
+      // _investWithFee intencionalmente ausente
+    };
+    bot.capa1Cash -= legacyDebit;
+
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["LEGACY_NOFIELD"]);
+    // Fallback devuelve invest * 1.001 → capa1 exactamente restaurada
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `fallback conservador debe devolver invest*(1+FEE_RATE_USDC), expected ${capa1Before}, got ${bot.capa1Cash}`);
+  });
+
+  it("BNB mode (feeMult=1) → _investWithFee === invest, comportamiento idéntico al pre-fix", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    const invest = 20*K;
+    bot.portfolio["BNB_STALE"] = {
+      pair: "BNBUSDC", capa: 1, invest, qty: 0.2,
+      entryPrice: 100, stop: 99, target: 101,
+      openTs: oldTs, status: "pending",
+      _investWithFee: invest, // BNB mode: cashDebit === invest (fee_efectivo=0)
+    };
+    bot.capa1Cash -= invest;
+
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["BNB_STALE"]);
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      "BNB mode: rollback debe devolver exactamente invest (sin over-refund)");
+  });
+
+  it("regression pre-fix: sin BUG-3 fix el USDC leak habría sido invest*0.001 por evento", async () => {
+    // Este test documenta el bug original verificando que, si devolviéramos
+    // sólo `pos.invest` (comportamiento pre-fix), habría un leak visible.
+    // No ejecuta el bug — sólo demuestra matemáticamente que la diferencia
+    // entre devolver invest vs investWithFee es exactamente el fee leakeado.
+    const invest = 20*K;
+    const feeUsdc = 0.001;
+    const investWithFee = invest * (1 + feeUsdc);
+    const leakIfPreFix = investWithFee - invest;
+    assert.ok(Math.abs(leakIfPreFix - invest * feeUsdc) < 1e-9,
+      `leak pre-fix = invest * FEE_RATE_USDC = ${invest * feeUsdc}`);
+  });
+
+  it("multiple stale USDC → no acumulación de leak tras N rollbacks", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const capa2Before = bot.capa2Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    const mkPos = (pair, capa, inv) => ({
+      pair, capa, invest: inv, qty: 1,
+      entryPrice: 100, stop: 99, target: 101,
+      openTs: oldTs, status: "pending",
+      _investWithFee: inv * 1.001, // USDC mode
+    });
+    bot.portfolio["A"] = mkPos("SOLUSDC", 1, 10*K);
+    bot.portfolio["B"] = mkPos("XRPUSDC", 2, 12*K);
+    bot.portfolio["C"] = mkPos("BTCUSDC", 1, 8*K);
+    // Debitar como lo haría el path real
+    bot.capa1Cash -= (10*K*1.001 + 8*K*1.001);
+    bot.capa2Cash -= 12*K*1.001;
+
+    await bot._cleanupStalePending();
+
+    assert.equal(Object.keys(bot.portfolio).length, 0);
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `capa1 leak=${capa1Before - bot.capa1Cash}`);
+    assert.ok(Math.abs(bot.capa2Cash - capa2Before) < 1e-9,
+      `capa2 leak=${capa2Before - bot.capa2Cash}`);
+  });
+
+  it("fallback conservador: sin _investWithFee + Binance confirma no-fill → refund usa FEE_RATE_USDC", async () => {
+    const bot = new SimpleBotEngine({});
+    const capa1Before = bot.capa1Cash;
+    const oldTs = Date.now() - 6 * 60 * 1000;
+    const invest = 15*K;
+    bot.portfolio["LEGACY_BINANCE"] = {
+      pair: "SOLUSDC", capa: 1, invest, qty: 0.08,
+      entryPrice: 180, stop: 178.5, target: 183,
+      openTs: oldTs, status: "pending",
+      // legacy: sin _investWithFee
+    };
+    // Debit que refleja lo que el A4 post-fix habría hecho en USDC
+    bot.capa1Cash -= invest * 1.001;
+
+    bot._binanceReadOnlyRequest = async () => []; // no fills → rollback
+
+    await bot._cleanupStalePending();
+
+    assert.ok(!bot.portfolio["LEGACY_BINANCE"]);
+    // Fallback refund = invest * (1 + FEE_RATE_USDC) = invest * 1.001
+    assert.ok(Math.abs(bot.capa1Cash - capa1Before) < 1e-9,
+      `fallback post-Binance path debe devolver invest*1.001, leak=${capa1Before - bot.capa1Cash}`);
   });
 });
 
