@@ -1106,12 +1106,26 @@ async function placeLiveSell(symbol, quantity, ctx) {
         if(orphanCost > 0) {
           // [DISABLED 2026-04-12] orphan cash inflation: mismo defecto que L607 — escribe a S.bot zombie. Solo el delete del portfolio es seguro.
           // Eliminar también el log entry de esta posición huérfana
-          S.bot.log = (S.bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" && 
+          S.bot.log = (S.bot.log||[]).filter(l=>!(l.symbol===symbol && l.type==="BUY" &&
             Math.abs(l.price-(orphanPos.entryPrice||0))<0.01));
           console.log(`[LIVE] Posición huérfana ${symbol} eliminada — cash restaurado +$${orphanCost.toFixed(2)}`);
         }
         delete S.bot.portfolio[symbol];
       }
+      // ── BATCH-1 FIX #5 (H1) ────────────────────────────────────────────
+      // simpleBot.evaluate() ya acreditó expectedNet a capa1Cash/capa2Cash
+      // ANTES de llamar _onSell → placeLiveSell. Si aquí devolvemos null
+      // sin rollback, el cash queda fantasma: capa1Cash contiene el crédito
+      // de una venta que nunca ocurrió (no había balance en Binance).
+      // Efecto: el bot autoriza BUYs basándose en cash inflado hasta el
+      // próximo sync periódico (5min), potencialmente operando con
+      // capital que no existe.
+      //
+      // El path de error más abajo (orderId null + catch(e)) ya tiene este
+      // rollback — pero el short-circuit de sellQty<=0 saltaba por encima
+      // del llamado. Ahora lo añadimos explícitamente.
+      _rollbackVirtualSellCredit(symbol, ctx,
+        `sellQty<=0 — sin balance real en Binance (quantity=${quantity}, realQty=${realQty})`);
       return null;
     }
     const prec = QTY_PRECISION[symbol] || 4;
