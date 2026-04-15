@@ -901,3 +901,74 @@ describe("BUG-1 — sync success respeta CB + boot invariant", () => {
       "sin flag: pausedUntil finito (H7 default)");
   });
 });
+
+// ── BUG-1.5: error path de syncCapitalFromBinance también respeta CB ─────
+// BUG-1 cubrió el success path. El catch path (línea 844) tenía el mismo
+// bug: seteaba _capitalSyncPausedUntil = now + 5min incondicionalmente,
+// sobrescribiendo Infinity si CB o boot invariant estaban activos.
+// Efecto: tras el flash crash (CB tripped), un error de red en el próximo
+// sync bajaba la pausa de Infinity a 5min → BUYs vuelven a permitirse tras
+// esa ventana.
+
+describe("BUG-1.5 — sync ERROR respeta CB + boot invariant", () => {
+  it("CB tripped + sync error → pausedUntil sigue Infinity (NO reescrito a now+5min)", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    setDrawdown(eng, 16);
+    eng.getState(); // dispara CB
+    assert.equal(eng._ddCircuitBreakerTripped, true, "pre: CB tripped");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity, "pre: pausedUntil=Infinity");
+    // Ahora un sync fallido
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFailingBinance("network down"),
+    });
+    assert.equal(r.ok, false, "sync fallido");
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "POST-error: pausedUntil DEBE seguir en Infinity (CB tripped)");
+    assert.equal(eng._ddCircuitBreakerTripped, true, "CB sigue tripped");
+    // Sanity: failCount sí se incrementa (el error se sigue registrando)
+    assert.equal(eng._capitalSyncFailCount, 1, "failCount debe incrementarse");
+    assert.equal(eng._lastCapitalSyncOk, false, "lastOk debe ser false");
+  });
+
+  it("bootInvariant violated + sync error → pausedUntil sigue Infinity", async () => {
+    const eng = new SimpleBotEngine({});
+    eng._capitalSyncPausedUntil = 0;
+    eng._capitalEfectivo = 100;
+    eng.capa1Cash = 200; // ledger corrupto
+    eng.capa2Cash = 40;
+    eng.portfolio = {};
+    const r1 = eng.validateBootInvariant();
+    assert.equal(r1.ok, false, "pre: invariante violado");
+    assert.equal(eng._bootInvariantViolated, true);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity);
+    // Sync fallido — no debe borrar Infinity
+    const r2 = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFailingBinance("timeout"),
+    });
+    assert.equal(r2.ok, false);
+    assert.equal(eng._capitalSyncPausedUntil, Infinity,
+      "POST-error: pausedUntil DEBE seguir en Infinity (boot invariant)");
+    assert.equal(eng._bootInvariantViolated, true, "flag sigue true");
+    assert.equal(eng._capitalSyncFailCount, 1);
+  });
+
+  it("sin flags + sync error → comportamiento normal (pausedUntil = now + 5min)", async () => {
+    const eng = new SimpleBotEngine({});
+    // Limpiar el H7 fail-closed para que el error path pueda escribir claro
+    eng._capitalSyncPausedUntil = 0;
+    assert.equal(eng._ddCircuitBreakerTripped, false);
+    assert.equal(eng._bootInvariantViolated, false);
+    const before = Date.now();
+    const r = await eng.syncCapitalFromBinance({
+      binanceReadOnlyRequest: makeFailingBinance("connect ETIMEDOUT"),
+    });
+    assert.equal(r.ok, false);
+    // Sin flags, el error path escribe now + 5min
+    const delta = eng._capitalSyncPausedUntil - before;
+    assert.ok(delta >= 4*60*1000 && delta <= 6*60*1000,
+      `pausedUntil debe estar en ventana now+5min (±1min), delta=${delta}ms`);
+    assert.ok(Number.isFinite(eng._capitalSyncPausedUntil),
+      "pausedUntil debe ser finito sin flags");
+  });
+});

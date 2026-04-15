@@ -841,7 +841,16 @@ class SimpleBotEngine {
     } catch (err) {
       this._capitalSyncFailCount++;
       this._lastCapitalSyncOk = false;
-      this._capitalSyncPausedUntil = Date.now() + 5*60*1000;
+      // BUG-1.5: si CB (A5) o boot invariant (A7) están tripped, NO sobrescribir
+      // Infinity con un timestamp finito. La pausa indefinida es la fuente de
+      // verdad — el sync error no debe debilitarla. El sync seguirá reintentando
+      // en su schedule, pero la pausa indefinida se mantiene hasta recovery manual.
+      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated) {
+        this._capitalSyncPausedUntil = Date.now() + 5*60*1000;
+      } else {
+        const reason = this._ddCircuitBreakerTripped ? "CB tripped" : "boot invariant violated";
+        console.warn(`[SIMPLE][CAPITAL-SYNC] sync ERROR pero ${reason} — _capitalSyncPausedUntil se mantiene en Infinity hasta recovery manual`);
+      }
       console.error(`[SIMPLE][CAPITAL-SYNC] ERROR (${this._capitalSyncFailCount}/3) — pausing trades 5min: ${err.message}`);
       if (this._capitalSyncFailCount >= 3 && typeof deps?.telegramSend === "function") {
         try {
