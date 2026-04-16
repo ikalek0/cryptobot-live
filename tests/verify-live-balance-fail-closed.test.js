@@ -113,6 +113,7 @@ describe("BATCH-3 FIX #2 — boot smoke: LIVE_MODE=true sin API keys → exit(1)
         BOT_SECRET: "very-long-strong-secret-xyz-01",
         SYNC_SECRET: "very-long-strong-secret-xyz-02",
         BAFIR_SECRET: "very-long-strong-secret-xyz-03",
+        WS_SECRET: "very-long-strong-secret-xyz-04",
         BINANCE_API_KEY: "",
         BINANCE_API_SECRET: "",
         TELEGRAM_TOKEN: "",

@@ -18,13 +18,9 @@ describe("BATCH-3 FIX #10 — BAFIR_SECRET dead code", () => {
     assert.ok(/BATCH-3 FIX #10/.test(src));
   });
 
-  it("sendEquityToBafir is a no-op", () => {
-    const fnIdx = src.indexOf("function sendEquityToBafir(");
-    assert.ok(fnIdx >= 0, "sendEquityToBafir must exist");
-    const fnBody = src.slice(fnIdx, fnIdx + 200);
-    // Function body should be essentially empty
-    assert.ok(/\{\s*\/\/.*\s*\}/.test(fnBody),
-      "sendEquityToBafir should be a no-op (comment-only body)");
+  it("sendEquityToBafir fully removed (BATCH-5 FIX #6)", () => {
+    assert.ok(!src.includes("function sendEquityToBafir"),
+      "sendEquityToBafir must be fully removed, not just no-op");
   });
 
   it("BAFIR_SECRET const still declared (not removed)", () => {

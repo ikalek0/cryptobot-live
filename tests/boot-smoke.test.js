@@ -190,6 +190,7 @@ describe("BATCH-1 boot smoke — (d) LIVE_MODE=true con secrets válidos → OK"
       BOT_SECRET:   STRONG_SECRET_1,
       SYNC_SECRET:  STRONG_SECRET_2,
       BAFIR_SECRET: STRONG_SECRET_3,
+      WS_SECRET:    STRONG_SECRET_1, // BATCH-5 FIX #3: now validated at boot
       // BATCH-3 FIX #2: verifyLiveBalance now exits(1) if API keys empty.
       // Use dummy keys to pass the non-empty check. The actual balance
       // fetch fails gracefully (catch → pause 10min, no abort).
