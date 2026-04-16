@@ -16,8 +16,10 @@ const BOOTSTRAP_DAYS = 14; // días sin restricción de N días consecutivos
 function exportParams(params, paperStats, liveUrl, secret) {
   if (!liveUrl) { console.log("[SYNC] LIVE_BOT_URL no configurada"); return; }
 
+  // BATCH-5 FIX #10: secret ya NO va en el body — solo como HMAC key.
+  // Antes se incluía como campo JSON, exponiéndolo en logs y en tránsito.
   const payload    = { params, paperStats, exportedAt: new Date().toISOString() };
-  const bodyStr    = JSON.stringify({ secret, ...payload });
+  const bodyStr    = JSON.stringify(payload);
   const signature  = crypto.createHmac("sha256", secret).update(bodyStr).digest("hex");
 
   try {
@@ -67,8 +69,9 @@ function evaluateIncomingParams(incoming, currentParams, currentLiveStats, syncH
   const MIN_TRADES    = 5;
   const STRICT_DAYS   = 7;
 
-  // Registrar
-  syncHistory.push({ ts:exportedAt||new Date().toISOString(), paperStats, liveStats:currentLiveStats, params });
+  // BATCH-5 FIX #1: entry base con adopted — se muta al final antes de return
+  const histEntry = { ts:exportedAt||new Date().toISOString(), paperStats, liveStats:currentLiveStats, params, adopted:false };
+  syncHistory.push(histEntry);
   while (syncHistory.length > 120) syncHistory.shift();
 
   // ── BATCH-4 FIX #7: validación de rangos seguros antes de adoptar
@@ -102,7 +105,7 @@ function evaluateIncomingParams(incoming, currentParams, currentLiveStats, syncH
   const isBootstrap = syncHistory.length <= BOOTSTRAP_DAYS;
 
   if (isBootstrap) {
-    // En bootstrapping: adoptar directamente si paper > live (ya comprobado arriba)
+    histEntry.adopted = true;
     return {
       adopted:    true,
       newParams:  params,
@@ -134,6 +137,7 @@ function evaluateIncomingParams(incoming, currentParams, currentLiveStats, syncH
   const avgWR  = recentDays.reduce((s,d)=>s+(d.paperStats?.winRate||0),0)/recentDays.length;
   const avgPnl = recentDays.reduce((s,d)=>s+(d.paperStats?.avgPnl||0),0)/recentDays.length;
 
+  histEntry.adopted = true;
   return {
     adopted:    true,
     newParams:  params,
