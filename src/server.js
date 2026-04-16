@@ -405,13 +405,32 @@ for(const sp of simplePairs){
     telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
   });
 
-  // ── T0: safety-check periódico de capital cada 5min ─────────────────────
-  // Fire-and-forget, no bloquea el tick loop. Si Binance falla, el gate en
-  // _onCandleClose se encarga de pausar BUYs durante 5min.
+  // ── BATCH-3 FIX #3 (#4): sync interval con error tracking ────────────
+  // Antes: .catch(()=>{}) silenciaba TODO error del sync periódico. Si
+  // Binance API fallaba permanentemente, sync fallaba cada 5min sin que
+  // nadie se enterase. Ahora: contador de fallos consecutivos + log +
+  // alerta telegram al 5º fallo consecutivo (sin spam posterior).
   if (BINANCE_API_KEY && BINANCE_API_SECRET) {
-    setInterval(() => {
-      if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
-        S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()).catch(()=>{});
+    let _syncIntervalFailCount = 0;
+    setInterval(async () => {
+      if (!S.simpleBot || typeof S.simpleBot.syncCapitalFromBinance !== "function") return;
+      try {
+        const result = await S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps());
+        if (result?.ok === false) {
+          _syncIntervalFailCount++;
+          console.warn(`[SYNC-INTERVAL] not ok (count=${_syncIntervalFailCount}): ${result?.reason || "unknown"}`);
+        } else {
+          if (_syncIntervalFailCount > 0) {
+            console.log(`[SYNC-INTERVAL] recovered after ${_syncIntervalFailCount} failures`);
+          }
+          _syncIntervalFailCount = 0;
+        }
+      } catch (e) {
+        _syncIntervalFailCount++;
+        console.error(`[SYNC-INTERVAL] error (count=${_syncIntervalFailCount}): ${e.message}`);
+        if (_syncIntervalFailCount === 5) {
+          try { tg.send && tg.send(`⚠️ <b>[SYNC]</b> 5 fallos consecutivos\n${e.message}\nSync broken — inspeccionar.`); } catch {}
+        }
       }
     }, 5 * 60 * 1000);
   }
