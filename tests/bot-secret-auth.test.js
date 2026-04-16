@@ -222,7 +222,8 @@ describe("BATCH-1 FIX #8 — server.js integra secrets module", () => {
 
   it("warnPredictableSecrets sigue con el abort en LIVE_MODE", () => {
     const idx = src.indexOf("warnPredictableSecrets");
-    const win = src.slice(idx, idx + 2500);
+    // BATCH-4 FIX #4 added Telegram code before exit, expanding the function
+    const win = src.slice(idx, idx + 4000);
     assert.ok(/if \(LIVE_MODE\)/.test(win));
     assert.ok(/process\.exit\(1\)/.test(win));
   });

@@ -153,7 +153,8 @@ describe("C3: /api/reset-state handler in server.js source (regression guard)", 
     // Debe haber process.exit(1) guardado por LIVE_MODE dentro de warnPredictableSecrets
     const idx = src.indexOf("warnPredictableSecrets");
     assert.ok(idx >= 0);
-    const window = src.slice(idx, idx + 3000);
+    // BATCH-4 FIX #4 expanded function with Telegram code before exit
+    const window = src.slice(idx, idx + 4500);
     assert.ok(window.includes("if (LIVE_MODE)"),
       "warnPredictableSecrets debe checkear LIVE_MODE");
     assert.ok(window.includes("process.exit(1)"),

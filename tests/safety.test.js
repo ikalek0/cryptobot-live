@@ -199,13 +199,17 @@ describe("A9 — unhandledRejection handler", () => {
     );
   });
 
-  it("handler NO llama process.exit (decisión PM2)", () => {
+  // BATCH-4 FIX #2: handler AHORA llama process.exit si >20 rejections en 60s
+  it("handler llama process.exit solo en threshold (>20/60s)", () => {
     const idx = serverContent.indexOf('process.on("unhandledRejection"');
-    const body = serverContent.slice(idx, idx + 1800);
-    // Debe NO contener process.exit dentro del handler
+    const body = serverContent.slice(idx, idx + 2000);
     assert.ok(
-      !/process\.exit/.test(body),
-      "handler NO debe llamar process.exit — PM2 decide si reiniciar"
+      /process\.exit\(1\)/.test(body),
+      "handler debe llamar process.exit(1) cuando supera threshold"
+    );
+    assert.ok(
+      /_rejectionWindow\.length\s*>\s*20/.test(body),
+      "exit solo si >20 rejections en ventana"
     );
   });
 });

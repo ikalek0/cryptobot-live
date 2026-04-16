@@ -57,17 +57,18 @@ describe("T0 — Capital dinámico", () => {
       assert.equal(eng._capitalSyncPausedUntil, 0, "post-sync OK: unpaused");
     });
 
-    it("primer sync fallido sobreescribe el default con pausa de 5min (no extiende los 10min)", async () => {
+    // BATCH-4 FIX #5: Math.max preserves the longer H7 pause
+    it("primer sync fallido preserva H7 pause (Math.max, no sobreescribe)", async () => {
       const eng = new SimpleBotEngine({});
       const before = Date.now();
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFailingBinance("down"),
       });
       assert.equal(r.ok, false);
-      // tras el fallo, el catch setea a now + 5min, lo que es < el default de 10min.
+      // Math.max(H7 10min, now+5min) = H7 10min (since H7 was set ~same time)
       const delta = eng._capitalSyncPausedUntil - before;
-      assert.ok(delta >= 4*60*1000 && delta <= 6*60*1000,
-        `post-fail: pausedUntil=${delta}ms debe caer en ventana 5min ±1`);
+      assert.ok(delta >= 4*60*1000,
+        `post-fail: pausedUntil=${delta}ms debe ser >= 4min`);
     });
   });
 
@@ -226,6 +227,8 @@ describe("T0 — Capital dinámico", () => {
   describe("Fallo de Binance → pausa BUYs 5min", () => {
     it("sync falla → _capitalSyncPausedUntil > now y failCount++", async () => {
       const eng = new SimpleBotEngine({});
+      // Clear H7 default pause so we test pure sync error behavior
+      eng._capitalSyncPausedUntil = 0;
       const before = Date.now();
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFailingBinance("timeout"),
