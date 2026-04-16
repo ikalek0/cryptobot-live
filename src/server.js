@@ -1088,8 +1088,16 @@ const BINANCE_SUBACCOUNT = process.env.BINANCE_SUBACCOUNT || "";
 // config actual del proceso (LIVE_MODE, API keys).
 const binanceClient = require("./binance_client");
 
+// BATCH-4 FIX #8: log una vez cuando LIVE_MODE=false retorna null
+let _binanceNullWarned = false;
 function binanceRequest(method, path, params = {}) {
-  if (!LIVE_MODE) return Promise.resolve(null);
+  if (!LIVE_MODE) {
+    if (!_binanceNullWarned) {
+      console.log("[BINANCE] LIVE_MODE=false — binanceRequest retorna null (paper-live mode)");
+      _binanceNullWarned = true;
+    }
+    return Promise.resolve(null);
+  }
   return binanceClient.signedRequest({
     method, path, params,
     apiKey: BINANCE_API_KEY,
