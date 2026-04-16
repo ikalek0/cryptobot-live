@@ -384,12 +384,14 @@ setInterval(async()=>{
         const openPositions = Object.keys(S.bot.portfolio||{}).length;
 
         if(virtualFree > S.CAPITAL_USDT * 2) {
-          // cash virtual corrupto → corregir
-          console.warn(`[RECONCILE] cash virtual $${virtualFree.toFixed(2)} >> capital $${S.CAPITAL_USDT} → corrigiendo`);
-          S.bot.cash = S.CAPITAL_USDT;
-          S.bot.portfolio = {};
-          S.bot.maxEquity = S.CAPITAL_USDT;
-          S.bot.breaker?.reset && S.bot.breaker.reset(S.CAPITAL_USDT);
+          // BATCH-3 FIX #1 (#11): ANTES este bloque borraba portfolio y
+          // reseteaba cash del engine zombie. Borrar portfolio sin verificar
+          // Binance es peligroso — si alguna vez el zombie engine se
+          // reactivara, perdería estado. Ahora solo alerta.
+          console.warn(`[RECONCILE] cash virtual $${virtualFree.toFixed(2)} >> capital $${S.CAPITAL_USDT} — inspección manual`);
+          try {
+            tg.send && tg.send(`⚠️ <b>[RECONCILE]</b> drift\ncash virtual $${virtualFree.toFixed(2)} >> capital $${S.CAPITAL_USDT}\nInspeccionar (zombie engine).`);
+          } catch {}
         } else if(realUSDC < 1 && openPositions === 0 && virtualFree > 10) {
           // Puede ser problema de IP (API key restringida) o falta de fondos
           // Solo avisar, no pausar automáticamente (la IP puede causar $0 falso)
