@@ -1063,28 +1063,48 @@ const streamUrl = `wss://stream.binance.com:9443/stream?streams=${symbols.map(s=
 let lastPriceTs=Date.now();
 
 // BATCH-3 FIX #9: exponential backoff + jitter en reconexión WS.
-// Antes: fixed 5s. Ahora: 2s → 4s → 8s → … cap 60s, con ±25% jitter.
 let _wsReconnectDelay = 0;
 const _WS_BASE_DELAY  = 2000;
 const _WS_MAX_DELAY   = 60000;
+// BATCH-4 FIX #12: track last WS message for silent stream detection
+let _lastWsMessageAt = Date.now();
+let _currentWs = null;
 
 function connectBinance() {
   const ws=new WebSocket(streamUrl);
+  _currentWs = ws;
   ws.on("open", ()=>{
     S.binanceLive=true;
-    _wsReconnectDelay=0; // reset on success
+    _wsReconnectDelay=0;
+    _lastWsMessageAt = Date.now(); // BATCH-4 FIX #12: reset on connect
     console.log("[BINANCE] ✓ Stream en vivo");
   });
-  ws.on("message", raw=>{try{const{data}=JSON.parse(raw);if(data?.s&&data?.c&&S.bot){S.bot.updatePrice(data.s,parseFloat(data.c));lastPriceTs=Date.now();}}catch(e){}});
+  ws.on("message", raw=>{
+    _lastWsMessageAt = Date.now(); // BATCH-4 FIX #12
+    try{const{data}=JSON.parse(raw);if(data?.s&&data?.c&&S.bot){S.bot.updatePrice(data.s,parseFloat(data.c));lastPriceTs=Date.now();}}catch(e){}
+  });
   ws.on("close", ()=>{
     S.binanceLive=false;
+    _currentWs = null;
     _wsReconnectDelay = _wsReconnectDelay === 0 ? _WS_BASE_DELAY : Math.min(_wsReconnectDelay * 2, _WS_MAX_DELAY);
-    const jitter = _wsReconnectDelay * (0.75 + Math.random() * 0.5); // ±25%
+    const jitter = _wsReconnectDelay * (0.75 + Math.random() * 0.5);
     console.warn(`[BINANCE] WS cerrado, reconectando en ${Math.round(jitter/1000)}s`);
     setTimeout(connectBinance, jitter);
   });
   ws.on("error", e=>console.error("[BINANCE]",e.message));
 }
+
+// BATCH-4 FIX #12: detect silent WS (connected but no messages) and force reconnect
+const _wsSilentCheckInterval = setInterval(() => {
+  if (S.binanceLive && _currentWs && Date.now() - _lastWsMessageAt > 60 * 1000) {
+    console.warn("[BINANCE] WS silente >60s — forzando reconnect");
+    try {
+      tg.send && tg.send("[BINANCE] WS silente >60s — reconnect forzado");
+    } catch {}
+    try { _currentWs.terminate(); } catch {}
+  }
+}, 30 * 1000);
+_wsSilentCheckInterval.unref();
 
 const SEEDS={BTCUSDC:67000,ETHUSDC:3500,SOLUSDC:180,BNBUSDC:580,AVAXUSDC:38,ADAUSDC:0.45,DOTUSDC:8.5,LINKUSDC:18,UNIUSDC:10,AAVEUSDC:95,XRPUSDC:0.52,LTCUSDC:82};
 // BATCH-4 FIX #9: en LIVE_MODE, nunca generar precios fake
