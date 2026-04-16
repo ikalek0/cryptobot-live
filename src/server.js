@@ -516,7 +516,14 @@ function serveIndex(req, res) {
 app.get("/", serveIndex);
 app.get("/index.html", serveIndex);
 app.use(express.static(path.join(__dirname,"../public")));
-app.use(express.json());
+// BATCH-4 FIX #6: capture raw body for HMAC verification on /api/sync/*
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    if (req.url && req.url.startsWith("/api/sync")) {
+      req.rawBody = buf;
+    }
+  },
+}));
 
 // ── BATCH-1 FIX #7 (HIGH-4): rate limiting ────────────────────────────
 // Dos limiters separados:
@@ -765,11 +772,11 @@ app.get("/api/confidence", (_,res) => {
 
 // ── ENDPOINT: recibir parámetros del PAPER ────────────────────────────────────
 app.post("/api/sync/params", mutationLimiter, (req,res) => {
-  // Verificar firma HMAC
+  // BATCH-4 FIX #6: HMAC sobre raw body (no re-stringificación frágil)
   const sig  = req.headers["x-signature"];
-  const body = JSON.stringify(req.body);
   if (!sig) { onAuthFailure(req, res); return; }
-  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
+  if (!req.rawBody) return res.status(400).json({error:"Missing body"});
+  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(req.rawBody).digest("hex");
   try {
     if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex"))) {
       console.warn("[SYNC] Firma inválida — posible ataque");
@@ -801,10 +808,11 @@ app.post("/api/sync/params", mutationLimiter, (req,res) => {
 
 // ── Sync diario: recibe aprendizaje del paper ─────────────────────────────────
 app.post("/api/sync/daily", mutationLimiter, (req,res) => {
+  // BATCH-4 FIX #6: HMAC sobre raw body (no re-stringificación)
   const sig  = req.headers["x-signature"];
-  const body = JSON.stringify(req.body);
   if (!sig) { onAuthFailure(req, res); return; }
-  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(body).digest("hex");
+  if (!req.rawBody) return res.status(400).json({error:"Missing body"});
+  const expected = require("crypto").createHmac("sha256", SYNC_SECRET).update(req.rawBody).digest("hex");
   try {
     if (!require("crypto").timingSafeEqual(Buffer.from(sig,"hex"), Buffer.from(expected,"hex"))) {
       onAuthFailure(req, res); return;
