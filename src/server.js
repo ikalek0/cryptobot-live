@@ -30,6 +30,8 @@ const secrets    = require("./secrets");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
+// BATCH-5 FIX #4: alerta dev si TICK_MS agresivo (<5s)
+if (TICK_MS < 5000) console.warn(`[BOOT] ⚠️  TICK_MS=${TICK_MS}ms (<5000) — frecuencia alta, verificar que es intencional`);
 
 // En LIVE_MODE, el capital real se obtiene de Binance al arrancar
 // CAPITAL_USDT es el fallback para modo PAPER-LIVE
@@ -59,7 +61,7 @@ if (typeof _lm === "undefined" && process.env.NODE_ENV !== "test") {
 const LIVE_MODE = _lm === "true";
 console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
 const SYNC_SECRET        = process.env.SYNC_SECRET || "";
-const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
+// BATCH-5 FIX #6: BAFIR_URL eliminado — sendEquityToBafir no-op removido
 // BATCH-3 FIX #8: flag de readiness — false hasta que initBot() termine
 let _botReady = false;
 // BATCH-1 FIX #8 (#5): eliminado literal "bafir_bot_secret" — BAFIR_SECRET
@@ -77,9 +79,11 @@ const BAFIR_SECRET       = process.env.BAFIR_SECRET || "";
   // BATCH-3 FIX #10: BAFIR_SECRET eliminado de validación boot.
   // sendEquityToBafir() es no-op → BAFIR_SECRET es dead code que bloqueaba
   // LIVE boot sin motivo. Solo validamos secrets que protegen endpoints activos.
+  // BATCH-5 FIX #3: añadido WS_SECRET — protege el WebSocket de datos live
   const checks = [
     { name: "SYNC_SECRET",  value: process.env.SYNC_SECRET  },
     { name: "BOT_SECRET",   value: process.env.BOT_SECRET   },
+    { name: "WS_SECRET",    value: process.env.WS_SECRET    },
   ];
   const bad = [];
   for (const c of checks) {
@@ -439,7 +443,7 @@ for(const sp of simplePairs){
   }
   startLoop({
     connectBinance, simulatePrices, broadcast, save,
-    placeLiveBuy, placeLiveSell, getAccountBalance, sendEquityToBafir,
+    placeLiveBuy, placeLiveSell, getAccountBalance,
     marketGuard, blacklist, cryptoPanic, clientManager,
     LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
     getLiveStartTime: () => liveStartTime,
@@ -485,9 +489,7 @@ for(const sp of simplePairs){
 
 // Historial de sincronizaciones recibidas del PAPER
 
-function sendEquityToBafir(value) {
-  // BAFIR endpoint no longer exists — silenced
-}
+// BATCH-5 FIX #6: sendEquityToBafir eliminado — BAFIR endpoint no existe
 
 const blacklist   = new Blacklist(4, 4); // Live: 4 pérdidas → 4h ban (no perder oportunidades)
 const marketGuard = new MarketGuard();
