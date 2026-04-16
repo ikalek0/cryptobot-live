@@ -1102,37 +1102,61 @@ const TWAP_DELAY_MS  = 30000; // 30s entre partes
 
 async function sleep_ms(ms) { return new Promise(r=>setTimeout(r,ms)); }
 
-async function placeTWAPBuy(symbol, usdtAmount) {
+// ── BATCH-3 FIX #5 (#17): TWAP partial failure handling ───────────────
+// Antes: si una parte intermedia fallaba, el loop seguía intentando las
+// demás sin alertar. Si 1 de 3 falló, el operador no se enteraba; el
+// sizing efectivo era 66% del esperado sin tracking.
+// Ahora: se acumulan failures[], se loguea cada error, y si hay fill
+// parcial (>0 OK, >0 fail) se envía telegram con desglose.
+async function placeTWAPBuy(symbol, usdtAmount, { strategyId } = {}) {
   // SAFETY: verificar que Binance tiene suficiente USDC antes de ordenar
-  // Protege contra usar dinero de otras operaciones del usuario
   try {
     const balances = await getAccountBalance();
-    const usdcBal = balances ? parseFloat((balances.find(b=>b.asset==="USDC")||{}).free||0) : 0;
-    if(usdcBal < usdtAmount * 0.95) {
-      console.error(`[TWAP] ❌ SAFETY: Binance tiene $${usdcBal.toFixed(2)} USDC libre pero necesitamos $${usdtAmount.toFixed(2)} — orden cancelada`);
-      tg.send && tg.send(`🎯 ⚠️ <b>[LIVE] ORDEN CANCELADA</b>\nBalance USDC insuficiente: $${usdcBal.toFixed(2)} libre\nNecesario: $${usdtAmount.toFixed(2)}`);
+    const usdcBal = balances ? parseFloat((balances.find(b => b.asset === "USDC") || {}).free || 0) : 0;
+    if (usdcBal < usdtAmount * 0.95) {
+      console.error(`[TWAP] SAFETY: Binance $${usdcBal.toFixed(2)} USDC < necesario $${usdtAmount.toFixed(2)} — cancelada`);
+      try { tg.send && tg.send(`⚠️ <b>[LIVE] ORDEN CANCELADA</b>\nBalance USDC insuficiente: $${usdcBal.toFixed(2)}\nNecesario: $${usdtAmount.toFixed(2)}`); } catch {}
       return [];
     }
-  } catch(e) { console.warn("[TWAP] No se pudo verificar balance:", e.message); }
+  } catch (e) { console.warn("[TWAP] No se pudo verificar balance:", e.message); }
 
   const isIlliquid = ILLIQUID_PAIRS.includes(symbol);
   const parts = isIlliquid ? TWAP_PARTS.illiquid : TWAP_PARTS.liquid;
   const partSize = +(usdtAmount / parts).toFixed(2);
   const orders = [];
+  const failures = [];
 
-  for(let i=0; i<parts; i++) {
+  for (let i = 0; i < parts; i++) {
     try {
       const order = await binanceRequest("POST", "order", {
-        symbol, side:"BUY", type:"MARKET", quoteOrderQty: partSize.toFixed(2)
+        symbol, side: "BUY", type: "MARKET", quoteOrderQty: partSize.toFixed(2),
       });
-      if(order?.orderId) {
+      if (order?.orderId) {
         orders.push(order);
-        const avgPrice = order.fills?.reduce((s,f)=>s+parseFloat(f.price)*parseFloat(f.qty),0) /
-                         order.fills?.reduce((s,f)=>s+parseFloat(f.qty),0) || 0;
-        console.log(`[TWAP][BUY] ${i+1}/${parts} ${symbol} $${partSize} @ ~$${avgPrice.toFixed(2)} → ${order.orderId}`);
+        const avgPrice = order.fills?.reduce((s, f) => s + parseFloat(f.price) * parseFloat(f.qty), 0) /
+                         (order.fills?.reduce((s, f) => s + parseFloat(f.qty), 0) || 1);
+        console.log(`[TWAP][BUY] ${i + 1}/${parts} ${symbol} $${partSize} @ ~$${avgPrice.toFixed(2)} → ${order.orderId}`);
+      } else {
+        failures.push({ part: i + 1, reason: `no orderId (code=${order?.code})` });
+        console.error(`[TWAP][BUY] ${i + 1}/${parts} ${symbol} no orderId: ${JSON.stringify(order).slice(0, 200)}`);
       }
-      if(i < parts-1) await sleep_ms(TWAP_DELAY_MS);
-    } catch(e) { console.error(`[TWAP][BUY] Part ${i+1} error:`, e.message); }
+      if (i < parts - 1 && order?.orderId) await sleep_ms(TWAP_DELAY_MS);
+    } catch (e) {
+      failures.push({ part: i + 1, reason: e.message });
+      console.error(`[TWAP][BUY] ${i + 1}/${parts} ${symbol} error: ${e.message}`);
+    }
+  }
+  // Alert on partial fill (some OK, some failed)
+  if (failures.length > 0 && orders.length > 0) {
+    const msg = [
+      `⚠️ <b>[TWAP] Fill parcial</b> ${symbol}`,
+      strategyId ? `Estrategia: ${strategyId}` : "",
+      `OK: ${orders.length}/${parts}`,
+      `Errores: ${failures.map(f => `parte ${f.part}: ${f.reason}`).join(" | ")}`,
+      `Sizing efectivo: ${((orders.length / parts) * 100).toFixed(0)}%`,
+    ].filter(Boolean).join("\n");
+    console.warn(msg);
+    try { tg.send && tg.send(msg); } catch {}
   }
   return orders;
 }
@@ -1198,7 +1222,7 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
       return null;
     }
 
-    const orders = await placeTWAPBuy(symbol, safe);
+    const orders = await placeTWAPBuy(symbol, safe, { strategyId: ctx?.strategyId });
     if(orders?.length) {
       // Capturar fills reales para reconciliación slippage (FIX-A closing loop)
       const fills = orders.flatMap(o=>o.fills||[]);
