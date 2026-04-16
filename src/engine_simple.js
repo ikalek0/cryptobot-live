@@ -1065,7 +1065,11 @@ class SimpleBotEngine {
       // porque haría que el bot reanudara BUYs antes de la ventana de 1h
       // del depeg con un peg potencialmente aún roto.
       if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated && !this._depegPauseActive) {
-        this._capitalSyncPausedUntil = Date.now() + 5*60*1000;
+        // BATCH-4 FIX #5: Math.max para no acortar pausa H7 fail-closed
+        this._capitalSyncPausedUntil = Math.max(
+          this._capitalSyncPausedUntil || 0,
+          Date.now() + 5*60*1000
+        );
       } else {
         const reason = this._ddCircuitBreakerTripped
           ? "CB tripped"
