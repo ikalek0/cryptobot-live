@@ -194,18 +194,14 @@ if (S.simpleBot && typeof S.simpleBot.setTelegramSend === "function") {
   });
 }
 
+// BATCH-4 FIX #10: wrap _onBuy in try/catch with rollback defense-in-depth
 S.simpleBot._onBuy = (pair, invest, ctx) => {
+  try {
   // ── C1 defense in depth: rollback si pausa detectada aquí ──────────────
-  // _onCandleClose ya aplica el pause gate antes de mutar portfolio (primera
-  // guard). Este segundo check cubre la ventana teórica entre la mutación
-  // sync del portfolio y el disparo del callback, o el caso en que setPaused
-  // se ejecute concurrentemente. Si estamos pausados, rollback de la reserva
-  // optimista y NO llamar placeLiveBuy.
   const paused = (S.simpleBot?.paused === true) || !!(S.tgControls && S.tgControls.isPaused && S.tgControls.isPaused());
   if (paused) {
     const pos = S.simpleBot?.portfolio?.[ctx?.strategyId];
     if (pos && pos.status === "pending") {
-      // BATCH-4 FIX #1: rollback devuelve _investWithFee (no invest nominal)
       const refund = (typeof pos._investWithFee === "number")
         ? pos._investWithFee
         : (pos.invest || 0) * (1 + 0.001);
@@ -224,7 +220,32 @@ S.simpleBot._onBuy = (pair, invest, ctx) => {
     return;
   }
   placeLiveBuy(pair, invest, ctx)
-    .catch(e => console.error(`[LIVE][onBuy] ${ctx?.strategyId} error:`, e.message));
+    .catch(e => {
+      console.error(`[LIVE][onBuy] ${ctx?.strategyId} error:`, e.message);
+      const pos = S.simpleBot?.portfolio?.[ctx?.strategyId];
+      if (pos && pos.status === "pending") {
+        const refund = (typeof pos._investWithFee === "number")
+          ? pos._investWithFee
+          : (pos.invest || 0) * (1 + 0.001);
+        if (pos.capa === 1) S.simpleBot.capa1Cash += refund;
+        else                S.simpleBot.capa2Cash += refund;
+        delete S.simpleBot.portfolio[ctx.strategyId];
+        console.error(`[onBuy] rollback defense-in-depth: ${ctx.strategyId} refund=$${refund.toFixed(2)}`);
+      }
+    });
+  } catch(e) {
+    console.error("[onBuy] sync error:", e.message);
+    const pos = S.simpleBot?.portfolio?.[ctx?.strategyId];
+    if (pos && pos.status === "pending") {
+      const refund = (typeof pos._investWithFee === "number")
+        ? pos._investWithFee
+        : (pos.invest || 0) * (1 + 0.001);
+      if (pos.capa === 1) S.simpleBot.capa1Cash += refund;
+      else                S.simpleBot.capa2Cash += refund;
+      delete S.simpleBot.portfolio[ctx.strategyId];
+      console.error(`[onBuy] rollback sync: ${ctx.strategyId} refund=$${refund.toFixed(2)}`);
+    }
+  }
 };
 S.simpleBot._onSell = (pair, qty, ctx) => {
   // En paper-live la reconciliación ya la hizo evaluate() (expectedNet acreditado);
