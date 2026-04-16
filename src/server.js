@@ -976,20 +976,28 @@ process.on("uncaughtException", async (err) => {
 // (400ms entre mensajes) absorbe el burst sin tirar el handler.
 let _lastRejectionSave = 0;
 const REJECTION_SAVE_THROTTLE_MS = 30 * 1000;
+// BATCH-4 FIX #2: exit threshold — >20 rejections en 60s = estado degradado persistente
+let _rejectionWindow = [];
 process.on("unhandledRejection", async (reason) => {
   const msg = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
   console.error("[CRASH] unhandledRejection:", reason?.message||reason);
-  // A9: aviso Telegram con contexto truncado a 500 chars para no exceder
-  // el límite de 4096 de la API. try/catch interno por si tg no está listo
-  // (handler registra antes que initBot termine).
   try {
     if (typeof tg !== "undefined" && tg && typeof tg.send === "function") {
       tg.send(`🚨 <b>[LIVE] UNHANDLED REJECTION</b>\n<code>${msg.slice(0, 500)}</code>\n\nProceso continúa. Revisar logs PM2.`);
     }
   } catch {}
-  // Menos agresivo que uncaughtException: muchas unhandled rejections vienen de
-  // fetches opcionales (F&G, news, etc). Solo persistimos por seguridad, sin exit.
+  // BATCH-4 FIX #2: conteo en ventana de 60s
   const now = Date.now();
+  _rejectionWindow.push(now);
+  _rejectionWindow = _rejectionWindow.filter(t => now - t < 60000);
+  if (_rejectionWindow.length > 20) {
+    console.error(`[CRASH] >20 rejections en 60s — estado degradado persistente, exit`);
+    try { await save(); } catch(e) {}
+    try {
+      if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
+    } catch(e) {}
+    process.exit(1);
+  }
   if (now - _lastRejectionSave < REJECTION_SAVE_THROTTLE_MS) return;
   _lastRejectionSave = now;
   try { await save(); } catch(e) {}
