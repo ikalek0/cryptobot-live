@@ -29,6 +29,7 @@ function startLoop(deps) {
 
   connectBinance();
   let _tickRunning = false;
+  let _lastTickCompletedAt = Date.now(); // BATCH-4 FIX #11: watchdog tracking
   const _sessionStartTs = Date.now(); // track session start for P&L
   // ── C2: tracking del estado de stream-dead para el gate de >30s ────────
   // _streamDeadSince se setea la primera vez que detectamos stream muerta
@@ -438,8 +439,22 @@ setInterval(async()=>{
       console.error("[LIVE] Loop error:", loopErr.message);
     } finally {
       _tickRunning = false;
+      _lastTickCompletedAt = Date.now(); // BATCH-4 FIX #11
     }
   },TICK_MS);
+
+  // BATCH-4 FIX #11: watchdog — si el tick loop se queda bloqueado >5min, exit
+  const _watchdogInterval = setInterval(() => {
+    const elapsed = Date.now() - _lastTickCompletedAt;
+    if (elapsed > 5 * 60 * 1000) {
+      console.error(`[WATCHDOG] Tick loop stuck — ${Math.round(elapsed/1000)}s sin completar. Exit.`);
+      try {
+        telegramSend && telegramSend(`🚨 <b>[WATCHDOG]</b> Tick stuck ${Math.round(elapsed/1000)}s\nProceso terminando para restart PM2.`);
+      } catch {}
+      setTimeout(() => process.exit(1), 2000);
+    }
+  }, 60 * 1000);
+  _watchdogInterval.unref();
 
 }
 
