@@ -60,6 +60,8 @@ const LIVE_MODE = _lm === "true";
 console.log(`[BOOT] LIVE_MODE=${LIVE_MODE} (env=${_lm}) API_KEY=${BINANCE_API_KEY?"SET":"EMPTY"} API_SECRET=${BINANCE_API_SECRET?"SET":"EMPTY"}`);
 const SYNC_SECRET        = process.env.SYNC_SECRET || "";
 const BAFIR_URL          = process.env.BAFIR_URL   || "http://localhost:3000";
+// BATCH-3 FIX #8: flag de readiness — false hasta que initBot() termine
+let _botReady = false;
 // BATCH-1 FIX #8 (#5): eliminado literal "bafir_bot_secret" — BAFIR_SECRET
 // y SYNC_SECRET ya no tienen default hardcoded. warnPredictableSecrets los
 // valida vía secrets.validateBootSecret() y aborta boot en LIVE_MODE si
@@ -72,10 +74,12 @@ const BAFIR_SECRET       = process.env.BAFIR_SECRET || "";
 //   2) aborta boot en LIVE_MODE con cualquiera de esos motivos;
 //   3) en paper-live sigue logueando warning pero no aborta.
 (function warnPredictableSecrets(){
+  // BATCH-3 FIX #10: BAFIR_SECRET eliminado de validación boot.
+  // sendEquityToBafir() es no-op → BAFIR_SECRET es dead code que bloqueaba
+  // LIVE boot sin motivo. Solo validamos secrets que protegen endpoints activos.
   const checks = [
     { name: "SYNC_SECRET",  value: process.env.SYNC_SECRET  },
     { name: "BOT_SECRET",   value: process.env.BOT_SECRET   },
-    { name: "BAFIR_SECRET", value: process.env.BAFIR_SECRET },
   ];
   const bad = [];
   for (const c of checks) {
@@ -664,7 +668,11 @@ app.get("/api/simpleBot/state", (_,res) => {
   });
 });
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
-app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
+// BATCH-3 FIX #8: /api/health devuelve 503 hasta que initBot complete
+app.get("/api/health", (_,res)=>{
+  if (!_botReady) return res.status(503).json({ok:false,ready:false,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",uptime:process.uptime()});
+  res.json({ok:true,ready:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()});
+});
 
 // Reset state — borrar estado guardado para empezar limpio
 // C3: auth obligatoria. Sin esto, cualquiera que alcance el puerto 3001
@@ -894,7 +902,22 @@ app.get("/api/sync/history", (_,res) => res.json({
   currentParams: S.bot?.optimizer?.getParams(),
 }));
 
-(async () => { await initBot(); })();
+// BATCH-3 FIX #8: server.listen bloqueado hasta que initBot() termine.
+// Antes: initBot() en IIFE fire-and-forget, listen al nivel de módulo.
+// Ahora: listen DENTRO del IIFE, tras await initBot(). Si initBot falla → exit(1).
+(async () => {
+  try {
+    await initBot();
+    _botReady = true;
+    // BATCH-3 FIX #8: solo arranca servidor DESPUÉS de initBot exitoso
+    scheduleWeeklyReport(tg, null, "live", null);
+    scheduleTradeAnalysisReminder(tg, null, "live");
+    server.listen(PORT, () => console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🎯 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
+  } catch (e) {
+    console.error("[BOOT] initBot falló, abortando:", e?.message || e);
+    process.exit(1);
+  }
+})();
 
 // ── Guardar ───────────────────────────────────────────────────────────────────
 async function save() {
@@ -976,12 +999,28 @@ const symbols   = PAIRS.map(p=>p.symbol.toLowerCase());
 const streamUrl = `wss://stream.binance.com:9443/stream?streams=${symbols.map(s=>`${s}@miniTicker`).join("/")}`;
 let lastPriceTs=Date.now();
 
+// BATCH-3 FIX #9: exponential backoff + jitter en reconexión WS.
+// Antes: fixed 5s. Ahora: 2s → 4s → 8s → … cap 60s, con ±25% jitter.
+let _wsReconnectDelay = 0;
+const _WS_BASE_DELAY  = 2000;
+const _WS_MAX_DELAY   = 60000;
+
 function connectBinance() {
   const ws=new WebSocket(streamUrl);
-  ws.on("open",    ()=>{S.binanceLive=true;console.log("[BINANCE] ✓ Stream en vivo");});
+  ws.on("open", ()=>{
+    S.binanceLive=true;
+    _wsReconnectDelay=0; // reset on success
+    console.log("[BINANCE] ✓ Stream en vivo");
+  });
   ws.on("message", raw=>{try{const{data}=JSON.parse(raw);if(data?.s&&data?.c&&S.bot){S.bot.updatePrice(data.s,parseFloat(data.c));lastPriceTs=Date.now();}}catch(e){}});
-  ws.on("close",   ()=>{S.binanceLive=false;setTimeout(connectBinance,5000);});
-  ws.on("error",   e=>console.error("[BINANCE]",e.message));
+  ws.on("close", ()=>{
+    S.binanceLive=false;
+    _wsReconnectDelay = _wsReconnectDelay === 0 ? _WS_BASE_DELAY : Math.min(_wsReconnectDelay * 2, _WS_MAX_DELAY);
+    const jitter = _wsReconnectDelay * (0.75 + Math.random() * 0.5); // ±25%
+    console.warn(`[BINANCE] WS cerrado, reconectando en ${Math.round(jitter/1000)}s`);
+    setTimeout(connectBinance, jitter);
+  });
+  ws.on("error", e=>console.error("[BINANCE]",e.message));
 }
 
 const SEEDS={BTCUSDC:67000,ETHUSDC:3500,SOLUSDC:180,BNBUSDC:580,AVAXUSDC:38,ADAUSDC:0.45,DOTUSDC:8.5,LINKUSDC:18,UNIUSDC:10,AAVEUSDC:95,XRPUSDC:0.52,LTCUSDC:82};
@@ -1617,11 +1656,8 @@ async function verifyLiveBalance() {
 // ── Trading Loop (extraído a trading/loop.js) ────────────────────────────────
 const { startLoop } = require("./trading/loop");
 
-// Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
-scheduleWeeklyReport(tg, null, "live", null);
-scheduleTradeAnalysisReminder(tg, null, "live");
-
-server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🎯 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
+// BATCH-3 FIX #8: server.listen movido al IIFE (ver línea ~903).
+// scheduleWeeklyReport y scheduleTradeAnalysisReminder también se mueven allí.
 
 wss.on("connection", ws=>{
   // Enviar estado inicial
