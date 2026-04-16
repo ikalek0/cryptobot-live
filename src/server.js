@@ -189,10 +189,14 @@ S.simpleBot._onBuy = (pair, invest, ctx) => {
   if (paused) {
     const pos = S.simpleBot?.portfolio?.[ctx?.strategyId];
     if (pos && pos.status === "pending") {
-      if (pos.capa === 1) S.simpleBot.capa1Cash += pos.invest || 0;
-      else                S.simpleBot.capa2Cash += pos.invest || 0;
+      // BATCH-4 FIX #1: rollback devuelve _investWithFee (no invest nominal)
+      const refund = (typeof pos._investWithFee === "number")
+        ? pos._investWithFee
+        : (pos.invest || 0) * (1 + 0.001);
+      if (pos.capa === 1) S.simpleBot.capa1Cash += refund;
+      else                S.simpleBot.capa2Cash += refund;
       delete S.simpleBot.portfolio[ctx.strategyId];
-      console.log(`[LIVE][onBuy][PAUSE-ROLLBACK] ${ctx?.strategyId} reserva devuelta ($${(pos.invest||0).toFixed(2)} → capa${pos.capa})`);
+      console.log(`[LIVE][onBuy][PAUSE-ROLLBACK] ${ctx?.strategyId} reserva devuelta ($${refund.toFixed(2)} → capa${pos.capa})`);
     } else {
       console.log(`[LIVE][onBuy][PAUSE] ${ctx?.strategyId} bloqueado — bot pausado (sin reserva que rollback)`);
     }
@@ -1207,14 +1211,18 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
   //   1. Validar cap global (FIX-C) — si rechaza, rollback de la reserva en simpleBot.
   //   2. Ejecutar TWAP y capturar fills reales.
   //   3. Reconciliar drift vs expected via simpleBot.applyRealBuyFill.
+  // BATCH-4 FIX #1: rollback devuelve _investWithFee (no invest nominal)
   const rollbackReservation = () => {
     if (S.simpleBot && ctx?.strategyId && S.simpleBot.portfolio[ctx.strategyId]) {
       const pos = S.simpleBot.portfolio[ctx.strategyId];
       if (pos.status === "pending") {
-        if (pos.capa === 1) S.simpleBot.capa1Cash += pos.invest;
-        else                S.simpleBot.capa2Cash += pos.invest;
+        const refund = (typeof pos._investWithFee === "number")
+          ? pos._investWithFee
+          : (pos.invest || 0) * (1 + 0.001);
+        if (pos.capa === 1) S.simpleBot.capa1Cash += refund;
+        else                S.simpleBot.capa2Cash += refund;
         delete S.simpleBot.portfolio[ctx.strategyId];
-        console.log(`[LIVE][ROLLBACK] ${ctx.strategyId} reserva devuelta ($${pos.invest.toFixed(2)} → capa${pos.capa})`);
+        console.log(`[LIVE][ROLLBACK] ${ctx.strategyId} reserva devuelta ($${refund.toFixed(2)} → capa${pos.capa})`);
       }
     }
   };
