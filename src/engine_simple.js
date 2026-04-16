@@ -723,10 +723,10 @@ class SimpleBotEngine {
   validateBootInvariant() {
     const capa1 = this.capa1Cash || 0;
     const capa2 = this.capa2Cash || 0;
-    // A7 usa .invest nominal (no _investWithFee) para ser consistente con
-    // cómo se reconcilia el ledger en syncCapitalFromBinance (committedC1/C2
-    // suman invest plano). Si se usara _investWithFee, el invariante sería
-    // más estricto pero falso-positivo en bots post-restart legacy.
+    // A7 usa .invest nominal (no _investWithFee) intencionalmente.
+    // syncCapitalFromBinance (BATCH-3 FIX #6) ahora usa _investWithFee,
+    // pero este invariante es permisivo a propósito: si usáramos
+    // _investWithFee, posiciones legacy sin el campo darían falso-positivo.
     const committed = Object.values(this.portfolio || {}).reduce((s, p) => s + (p.invest || 0), 0);
     const totalLedger = capa1 + capa2 + committed;
     const capEfectivo = this._capitalEfectivo || 0;
@@ -984,10 +984,25 @@ class SimpleBotEngine {
       //    - el split 60/40 del EFECTIVO
       //    - el committed de cada capa (no tocar posiciones abiertas)
       //    - nunca valores negativos
+      // BATCH-3 FIX #6 (#13): usar _investWithFee (lo realmente debitado
+      // de capa*Cash en A4) en vez de invest nominal. Sin esto, committed
+      // es ~0.1% menor que lo real (drift por fee USDC), acumulable con
+      // cada sync. Para posiciones legacy sin _investWithFee, upper bound
+      // conservador invest * (1+FEE_RATE_USDC).
+      // NOTA: validateBootInvariant (A7, ~line 726) usa .invest nominal
+      // intencionalmente — allí el check es contra el invariante original.
       const committedC1 = Object.values(this.portfolio||{})
-        .filter(p => p.capa===1).reduce((s,p)=>s+(p.invest||0), 0);
+        .filter(p => p.capa===1)
+        .reduce((s,p) => {
+          if (typeof p._investWithFee === "number") return s + p._investWithFee;
+          return s + (p.invest || 0) * (1 + FEE_RATE_USDC);
+        }, 0);
       const committedC2 = Object.values(this.portfolio||{})
-        .filter(p => p.capa===2).reduce((s,p)=>s+(p.invest||0), 0);
+        .filter(p => p.capa===2)
+        .reduce((s,p) => {
+          if (typeof p._investWithFee === "number") return s + p._investWithFee;
+          return s + (p.invest || 0) * (1 + FEE_RATE_USDC);
+        }, 0);
       const newCapa1Cash = Math.max(0, efectivo*CAPA1_PCT - committedC1);
       const newCapa2Cash = Math.max(0, efectivo*CAPA2_PCT - committedC2);
 
