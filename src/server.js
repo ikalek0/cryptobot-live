@@ -1066,8 +1066,17 @@ function connectBinance() {
 }
 
 const SEEDS={BTCUSDC:67000,ETHUSDC:3500,SOLUSDC:180,BNBUSDC:580,AVAXUSDC:38,ADAUSDC:0.45,DOTUSDC:8.5,LINKUSDC:18,UNIUSDC:10,AAVEUSDC:95,XRPUSDC:0.52,LTCUSDC:82};
+// BATCH-4 FIX #9: en LIVE_MODE, nunca generar precios fake
+let _simPriceWarnedLive = false;
 function simulatePrices(){
   if(!S.bot||Date.now()-lastPriceTs<10000) return;
+  if (LIVE_MODE) {
+    if (!_simPriceWarnedLive) {
+      console.warn("[LIVE] simulatePrices skipped — LIVE_MODE no permite precios fake");
+      _simPriceWarnedLive = true;
+    }
+    return;
+  }
   PAIRS.forEach(p=>{const last=S.bot.prices[p.symbol]||SEEDS[p.symbol]||100;S.bot.updatePrice(p.symbol,last*(1+0.007*(Math.random()+Math.random()-1)*1.2+0.00004));});
 }
 
