@@ -1435,13 +1435,19 @@ class SimpleBotEngine {
   // ctx trae capa (capturado antes del delete) + realGross (USDC recibido real).
   // La SELL virtual ya añadió expectedNet a la capa; este método añade el delta.
   applyRealSellFill(strategyId, {realGross, capa, expectedNet, feeEfectivo}){
-    // T0-FEE: si el caller pasa feeEfectivo (derivado de ctx._feePredicted
-    // del sellCtx), usarlo. Si no se pasa (compat/legacy), caer al FEE
-    // estático 0.001. En modo BNB (feeEfectivo=0) realNet = realGross porque
-    // Binance paga la fee en BNB separado y el USDC recibido es íntegro.
+    // BATCH-5 FIX #2: guard undefined expectedNet — sin él, delta se calcula
+    // contra 0 y la capa absorbe el monto completo como ajuste fantasma.
+    if (typeof expectedNet !== "number") {
+      console.warn(`[SIMPLE][RECONCILE-SELL] ${strategyId} expectedNet undefined — skip reconciliation`);
+      return;
+    }
+    // BATCH-5 FIX #9: log feeEfectivo fallback para detectar callers legacy
     const fee = (typeof feeEfectivo === "number") ? feeEfectivo : FEE;
+    if (typeof feeEfectivo !== "number") {
+      console.warn(`[SIMPLE][RECONCILE-SELL] ${strategyId} feeEfectivo not provided — fallback to FEE=${FEE}`);
+    }
     const realNet = (realGross || 0) * (1 - fee);
-    const delta = realNet - (expectedNet || 0);
+    const delta = realNet - expectedNet;
     if(capa===1) this.capa1Cash += delta;
     else         this.capa2Cash += delta;
     console.log(`[SIMPLE][RECONCILE-SELL] ${strategyId} expected=$${(expectedNet||0).toFixed(2)} real=$${realNet.toFixed(2)} delta=${delta>=0?"+":""}${delta.toFixed(4)} capa${capa} fee_efectivo=${fee.toFixed(4)}`);
