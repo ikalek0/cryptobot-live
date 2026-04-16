@@ -302,6 +302,8 @@ async function prefillSimpleBotCandles() {
   console.log(`[SIMPLE-PREFILL] ✅ ${filled}/${seen.size} pares prefilled`);
 }
 await prefillSimpleBotCandles();
+// BATCH-3 FIX #4: cache LOT_SIZE/stepSize from exchangeInfo at boot
+await fetchSymbolPrecisions();
 // ── T0: primer sync de capital contra Binance ────────────────────────────
 // Si no hay API keys, modo legacy (capitalEfectivo = declarado).
 // Si hay keys y el sync falla, el simpleBot quedará pausado 5min (gate en
@@ -1244,12 +1246,62 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
 }
 
 // Precision map for common pairs (Binance LOT_SIZE)
+// BATCH-3 FIX #4 (#16): LOT_SIZE precisions from exchangeInfo ──────────
+// Fallback estático: usado si exchangeInfo no se pudo cachear al boot.
 const QTY_PRECISION = {
   BTCUSDC:5, ETHUSDC:4, BNBUSDC:3, SOLUSDC:2, XRPUSDC:1,
   ADAUSDC:1, DOTUSDC:2, LINKUSDC:2, LTCUSDC:3, AVAXUSDC:2,
   POLUSDC:1, UNIUSDC:2, AAVEUSDC:3, ATOMUSDC:2, NEARUSDC:1,
   ARBUSDC:1, OPUSDC:1, APTUSDC:2,
 };
+
+// Dinámico: cacheado al boot via fetchSymbolPrecisions(). Si Binance
+// cambia stepSize para un par, el bot lo ve sin editar código.
+let _symbolPrecisions = {};
+
+async function fetchSymbolPrecisions() {
+  const https2 = require("https");
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const req = https2.get("https://api.binance.com/api/v3/exchangeInfo", res => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          res.resume();
+          return;
+        }
+        let d = "";
+        res.on("data", c => d += c);
+        res.on("end", () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req.on("error", reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error("Timeout")); });
+    });
+    if (!data?.symbols) throw new Error("invalid exchangeInfo response");
+    for (const s of data.symbols) {
+      const lotFilter = (s.filters || []).find(f => f.filterType === "LOT_SIZE");
+      if (lotFilter) {
+        const step = parseFloat(lotFilter.stepSize);
+        const precision = step > 0 ? Math.max(0, Math.round(-Math.log10(step))) : 0;
+        _symbolPrecisions[s.symbol] = {
+          precision,
+          stepSize: step,
+          minQty: parseFloat(lotFilter.minQty || 0),
+        };
+      }
+    }
+    console.log(`[BOOT] exchangeInfo cached: ${Object.keys(_symbolPrecisions).length} symbols`);
+  } catch (e) {
+    console.warn(`[BOOT] exchangeInfo fail: ${e.message} — using fallback QTY_PRECISION`);
+  }
+}
+
+// Helper: get precision + stepSize + minQty for a symbol
+function getSymbolLotInfo(symbol) {
+  const dyn = _symbolPrecisions[symbol];
+  if (dyn) return dyn;
+  const prec = QTY_PRECISION[symbol] || 4;
+  return { precision: prec, stepSize: Math.pow(10, -prec), minQty: 0 };
+}
 
 async function getActualBinanceQty(symbol) {
   try {
@@ -1302,8 +1354,18 @@ async function placeLiveSell(symbol, quantity, ctx) {
         `sellQty<=0 — sin balance real en Binance (quantity=${quantity}, realQty=${realQty})`);
       return null;
     }
-    const prec = QTY_PRECISION[symbol] || 4;
-    const qtyStr = sellQty.toFixed(prec);
+    // BATCH-3 FIX #4 (#16): LOT_SIZE-aware qty rounding.
+    // Floor to stepSize (never round up → -1013 from Binance).
+    const lotInfo = getSymbolLotInfo(symbol);
+    const qtyRounded = lotInfo.stepSize > 0
+      ? Math.floor(sellQty / lotInfo.stepSize) * lotInfo.stepSize
+      : sellQty;
+    if (lotInfo.minQty > 0 && qtyRounded < lotInfo.minQty) {
+      console.warn(`[LIVE][SELL] ${symbol} qty ${qtyRounded} < minQty ${lotInfo.minQty} — rollback`);
+      _rollbackVirtualSellCredit(symbol, ctx, `qty < LOT_SIZE.minQty (${qtyRounded} < ${lotInfo.minQty})`);
+      return null;
+    }
+    const qtyStr = qtyRounded.toFixed(lotInfo.precision);
     const order = await binanceRequest("POST", "order", {
       symbol, side:"SELL", type:"MARKET", quantity: qtyStr
     });
