@@ -1393,75 +1393,119 @@ async function getAccountBalance() {
 }
 
 // Verificar balance real al arrancar si LIVE_MODE
+// ── BATCH-3 FIX #2 (#3): verifyLiveBalance fail-closed ─────────────────
+// Antes: si Binance no respondía, logueaba warning y seguía; si
+// detectaba "huérfanos", borraba portfolio zombie. Ahora:
+//   A) LIVE_MODE sin API keys → ABORT boot (exit 1)
+//   B) getAccountBalance retorna null → pausa 10min, NO tocar portfolio
+//   C) Reconciliación simpleBot↔Binance: detecta orphans, alerta, pausa
+//      30min. NUNCA borra automáticamente. Operador decide.
+//   D) Zombie engine (S.bot) portfolio: log-only, sin wipe.
 async function verifyLiveBalance() {
   if (!LIVE_MODE) return;
+  // A) fail-closed: LIVE sin API keys es inoperable
+  if (!BINANCE_API_KEY || !BINANCE_API_SECRET) {
+    console.error("[BOOT] ❌ LIVE_MODE=true sin API keys — ABORT");
+    try { tg.send && tg.send("[BOOT] API KEYS MISSING — LIVE_MODE=true sin keys. Abort."); } catch {}
+    process.exit(1);
+  }
   try {
     console.log("[LIVE] API Binance configurada — verificando balance real...");
     const balances = await getAccountBalance();
-    if (!balances) { console.error("[LIVE] No se pudo verificar balance Binance"); return; }
-    const usdt = balances.find(b=>b.asset==="USDC") || balances.find(b=>b.asset==="USDT");
-    const usdtBalance = parseFloat(usdt?.free||0);
-    const stableAsset = balances.find(b=>b.asset==="USDC") ? "USDC" : "USDT";
-    console.log(`[LIVE] ✅ Balance USDC real: $${usdtBalance.toFixed(2)}`);
+    // B) Binance unreachable → pausa, NO tocar nada
+    if (!balances) {
+      console.error("[BOOT] Balance no verificable — NO tocar portfolio, pausar 10min");
+      if (S.simpleBot) S.simpleBot._capitalSyncPausedUntil = Date.now() + 10 * 60 * 1000;
+      try { tg.send && tg.send("[BOOT] Binance unreachable\nBUYs pausados 10min."); } catch {}
+      return;
+    }
+    const usdt = balances.find(b => b.asset === "USDC") || balances.find(b => b.asset === "USDT");
+    const usdtBalance = parseFloat(usdt?.free || 0);
+    console.log(`[LIVE] Balance USDC real: $${usdtBalance.toFixed(2)}`);
 
-    // VIRTUAL CAPITAL LEDGER:
-    // El bot maneja su propia cuenta de $CAPITAL_USDT (100 USD)
-    // NO usa el balance total de Binance (puede tener más dinero de otras ops)
-    // Solo verifica que Binance tiene suficiente para ejecutar cada orden
-    const virtualCapital = S.CAPITAL_USDT; // 100 USD declarados en .env
-    
+    const virtualCapital = S.CAPITAL_USDT;
+
+    // Zombie engine (S.bot) cash adjustment — informational only
     if (S.bot) {
-      // En LIVE real: siempre usar virtualCapital como referencia de cash libre
-      // El cash de la DB puede ser incorrecto si el capital declarado cambió
-      // Solo respetamos el estado guardado si es menor (el bot ha perdido dinero)
       if (S.bot.cash > virtualCapital * 1.05) {
-        // Cash guardado es mayor que el capital declarado → resetear al declarado
-        console.log(`[LIVE] 💼 Cash DB ($${S.bot.cash.toFixed(2)}) > capital declarado ($${virtualCapital.toFixed(2)}) → ajustando`);
+        console.log(`[LIVE] Cash DB ($${S.bot.cash.toFixed(2)}) > capital declarado ($${virtualCapital.toFixed(2)}) — ajustando`);
         S.bot.cash = virtualCapital;
       } else if (S.bot.cash <= 0) {
         S.bot.cash = virtualCapital;
-        console.log(`[LIVE] 💼 Cash cero → asignando capital: $${virtualCapital.toFixed(2)} USDC`);
+        console.log(`[LIVE] Cash cero — asignando capital: $${virtualCapital.toFixed(2)} USDC`);
       } else {
-        console.log(`[LIVE] 💼 Capital restaurado: $${S.bot.cash.toFixed(2)} USDC (declarado: $${virtualCapital.toFixed(2)})`);
+        console.log(`[LIVE] Capital restaurado: $${S.bot.cash.toFixed(2)} USDC (declarado: $${virtualCapital.toFixed(2)})`);
       }
     }
 
-    // Sanity check: Binance debe tener AL MENOS el cash libre del bot
+    // Sanity check: Binance balance vs bot cash
     if (S.bot && usdtBalance < S.bot.cash * 0.90) {
-      console.warn(`[LIVE] ⚠️ Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${S.bot.cash.toFixed(2)}`);
+      console.warn(`[LIVE] Binance tiene $${usdtBalance.toFixed(2)} USDC libre pero bot espera $${S.bot.cash.toFixed(2)}`);
     }
 
-    // Limpiar portfolio huérfano SIEMPRE en modo LIVE al arrancar
-    // Un portfolio huérfano tiene posiciones que no existen en Binance real
+    // D) Zombie engine portfolio: log, NUNCA borrar
     if (S.bot && LIVE_MODE) {
       const tv = S.bot.totalValue();
-      const posCount = Object.keys(S.bot.portfolio||{}).length;
+      const posCount = Object.keys(S.bot.portfolio || {}).length;
       if (tv > virtualCapital * 1.1 && posCount > 0) {
-        console.warn(`[LIVE] ⚠️ Estado huérfano: totalValue $${tv.toFixed(2)} con ${posCount} posiciones >> capital $${virtualCapital.toFixed(2)} → limpiando`);
-        S.bot.portfolio = {};
-        S.bot.cash = virtualCapital;
-        // Resetear equity para evitar drawdown falso
-        S.bot.maxEquity = virtualCapital;
-        S.bot.drawdownAlerted = false;
-        console.log(`[LIVE] ✅ Portfolio limpiado. Cash = $${virtualCapital.toFixed(2)}`);
-        tg.send && tg.send(`🔧 <b>[LIVE]</b> Estado huérfano limpiado al arrancar.\nCapital: <b>$${virtualCapital.toFixed(2)}</b> USDC\nPosiciones anteriores eliminadas (no existían en Binance real)`);
+        console.warn(`[LIVE] Estado huérfano en zombie engine: totalValue $${tv.toFixed(2)} con ${posCount} pos >> capital $${virtualCapital.toFixed(2)} — log-only`);
+        try { tg.send && tg.send(`⚠️ <b>[LIVE]</b> Zombie engine drift\ntotalValue $${tv.toFixed(2)} con ${posCount} posiciones\nCapital declarado $${virtualCapital.toFixed(2)}\nInspeccionar manualmente.`); } catch {}
       }
     }
 
-    // Mostrar balance total de Binance (informativo, no lo usamos para operar)
-    console.log(`[LIVE] ✅ Balance USDC total en Binance: $${usdtBalance.toFixed(2)} (bot opera solo con $${virtualCapital.toFixed(2)})`);
-    const others = balances.filter(b=>b.asset!=="USDC"&&b.asset!=="USDT"&&b.asset!=="BNB"&&parseFloat(b.free)>0.001);
-    if (others.length>0) console.log(`[LIVE] Otros activos en Binance: ${others.map(b=>b.asset+":"+parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados por el bot)`);
-    
-    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${S.bot?.cash?.toFixed(2)||virtualCapital} USDC`);
+    // C) Reconciliación simpleBot ↔ Binance post-restart
+    if (S.simpleBot && balances) {
+      const orphansReales = [];
+      const orphansVirtuales = [];
+      const managedAssets = new Set(
+        Object.values(S.simpleBot.portfolio || {})
+          .map(p => (p.pair || "").replace(/USDC$|USDT$/, ""))
+          .filter(Boolean)
+      );
+      for (const bal of balances) {
+        if (["USDC", "USDT", "BNB"].includes(bal.asset)) continue;
+        const qty = parseFloat(bal.free || 0);
+        if (qty > 0.0001 && !managedAssets.has(bal.asset)) {
+          orphansReales.push({ asset: bal.asset, qty });
+        }
+      }
+      for (const [id, pos] of Object.entries(S.simpleBot.portfolio || {})) {
+        const asset = (pos.pair || "").replace(/USDC$|USDT$/, "");
+        const bal = balances.find(b => b.asset === asset);
+        const realQty = bal ? parseFloat(bal.free || 0) : 0;
+        if (realQty < (pos.qty || 0) * 0.9) {
+          orphansVirtuales.push({ id, pair: pos.pair, expected: pos.qty, real: realQty });
+        }
+      }
+      if (orphansReales.length || orphansVirtuales.length) {
+        const msg = [
+          "[BOOT] Reconciliación simpleBot vs Binance",
+          orphansReales.length
+            ? `Assets reales huérfanos: ${orphansReales.map(o => `${o.qty.toFixed(4)} ${o.asset}`).join(", ")}`
+            : "",
+          orphansVirtuales.length
+            ? `Posiciones virtuales huérfanas: ${orphansVirtuales.map(o => `${o.id} (esp=${o.expected}, real=${o.real})`).join(", ")}`
+            : "",
+          "BUYs pausados 30min. Inspecciona y usa /api/reset-state si procede.",
+        ].filter(Boolean).join("\n");
+        console.warn(msg);
+        try { tg.send && tg.send(msg); } catch {}
+        S.simpleBot._capitalSyncPausedUntil = Date.now() + 30 * 60 * 1000;
+      }
+    }
 
-  } catch(e) {
-    console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);
-    // CRITICAL: no podemos verificar balance real → pausar bot por seguridad
-    // No pausar automáticamente - la IP puede causar falsos negativos
-    // Solo alertar por Telegram
-    tg.send && tg.send("⚠️ <b>[LIVE] Advertencia balance</b>\nNo se pudo verificar balance Binance al arrancar.\nPuede ser IP issue. El bot continúa operando.\nVerifica con /balance");
-    console.warn("[LIVE] Advertencia: balance no verificado al arrancar (posible IP issue).");
+    // Informational
+    console.log(`[LIVE] Balance USDC total en Binance: $${usdtBalance.toFixed(2)} (bot opera solo con $${virtualCapital.toFixed(2)})`);
+    const others = balances.filter(b => b.asset !== "USDC" && b.asset !== "USDT" && b.asset !== "BNB" && parseFloat(b.free) > 0.001);
+    if (others.length > 0) console.log(`[LIVE] Otros activos: ${others.map(b => b.asset + ":" + parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados)`);
+    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${S.bot?.cash?.toFixed(2) || virtualCapital} USDC`);
+
+  } catch (e) {
+    console.error("[LIVE] verifyLiveBalance FAILED:", e.message);
+    // Fail-closed: pausa 10min, NO seguir como si nada
+    if (S.simpleBot) S.simpleBot._capitalSyncPausedUntil = Date.now() + 10 * 60 * 1000;
+    try { tg.send && tg.send(`⚠️ <b>[BOOT] Balance fail</b>\n${e.message}\nBUYs pausados 10min.`); } catch {}
+    console.warn("[LIVE] BUYs pausados 10min por balance no verificable.");
   }
 }
 
