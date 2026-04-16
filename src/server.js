@@ -952,6 +952,12 @@ process.on("SIGINT", async()=>{await save();process.exit(0);});
 process.on("uncaughtException", async (err) => {
   console.error("[CRASH] uncaughtException:", err?.message||err);
   console.error(err?.stack);
+  // BATCH-4 FIX #3: alerta Telegram ANTES de exit
+  try {
+    if (typeof tg !== "undefined" && tg && typeof tg.send === "function") {
+      tg.send(`🚨 <b>[CRASH] uncaughtException</b>\n<code>${String(err?.message || err).slice(0, 300)}</code>\nProceso terminando.`);
+    }
+  } catch {}
   try { await save(); } catch(e) { console.error("[CRASH-SAVE]", e.message); }
   try {
     if(S.simpleBot?.saveState) await saveSimpleState(S.simpleBot.saveState());
