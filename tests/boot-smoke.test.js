@@ -190,12 +190,14 @@ describe("BATCH-1 boot smoke — (d) LIVE_MODE=true con secrets válidos → OK"
       BOT_SECRET:   STRONG_SECRET_1,
       SYNC_SECRET:  STRONG_SECRET_2,
       BAFIR_SECRET: STRONG_SECRET_3,
-      // Sin API keys reales: verifyLiveBalance falla y logea warning
-      // pero NO aborta (catch interno). El smoke verifica que warnings
-      // ≠ abort.
-      BINANCE_API_KEY: "",
-      BINANCE_API_SECRET: "",
-    }, { timeoutMs: 25000 });
+      // BATCH-3 FIX #2: verifyLiveBalance now exits(1) if API keys empty.
+      // Use dummy keys to pass the non-empty check. The actual balance
+      // fetch fails gracefully (catch → pause 10min, no abort).
+      // BATCH-3 FIX #8: server.listen delayed until after initBot,
+      // so prefill retries (~20s) must complete before marker appears.
+      BINANCE_API_KEY: "dummy-api-key-for-boot-test",
+      BINANCE_API_SECRET: "dummy-api-secret-for-boot-test",
+    }, { timeoutMs: 80000 });
     assert.equal(r.bootOK, true,
       `boot debe llegar al marker\nstdout:\n${r.stdout.slice(-500)}\nstderr:\n${r.stderr.slice(-500)}`);
     assert.ok(!/ABORT boot/.test(r.stderr + r.stdout),
