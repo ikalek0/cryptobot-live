@@ -15,7 +15,7 @@ let ticks = 0;
 function startLoop(deps) {
   const {
     connectBinance, simulatePrices, broadcast, save,
-    placeLiveBuy, placeLiveSell, getAccountBalance, sendEquityToBafir,
+    placeLiveBuy, placeLiveSell, getAccountBalance,
     marketGuard, blacklist, cryptoPanic, clientManager,
     LIVE_MODE, TICK_MS, SYNC_THRESHOLD,
     getLiveStartTime,
@@ -30,7 +30,9 @@ function startLoop(deps) {
   connectBinance();
   let _tickRunning = false;
   let _lastTickCompletedAt = Date.now(); // BATCH-4 FIX #11: watchdog tracking
-  const _sessionStartTs = Date.now(); // track session start for P&L
+  // BATCH-5 FIX #5: timestamp del arranque de sesión — usado para calcular
+  // P&L sesión, tiempo en posición y aging de velas desde boot.
+  const _sessionStartTs = Date.now();
   // ── C2: tracking del estado de stream-dead para el gate de >30s ────────
   // _streamDeadSince se setea la primera vez que detectamos stream muerta
   // y se limpia cuando vuelve. Si pasa >30s consecutivos sin ticks, pausamos
@@ -89,6 +91,9 @@ setInterval(async()=>{
     if(_tickRunning){ console.warn("[LIVE] Tick overlap - saltando"); return; }
     _tickRunning = true;
     try {
+    // BATCH-5 FIX #7: simulatePrices() rellena S.bot.prices con random-walk
+    // cuando el WS está muerto — mantiene el zombie engine vivo para health.
+    // En LIVE_MODE devuelve sin efecto (BATCH-4 FIX #9).
     simulatePrices();
 
     // ── C2: Feed current prices to simple engine SOLO si stream real ─────
@@ -360,8 +365,7 @@ setInterval(async()=>{
 
 
 
-    // Enviar equity a BAFIR
-    if(ticks%60===0) sendEquityToBafir(S.bot.totalValue());
+    // BATCH-5 FIX #6: sendEquityToBafir eliminado — BAFIR endpoint no existe
     // WF intradía cada 30min en live (sin API, usa historial en RAM)
     if(ticks%180===0 && ticks>0) {
       try {
