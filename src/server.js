@@ -103,6 +103,22 @@ const BAFIR_SECRET       = process.env.BAFIR_SECRET || "";
       console.error(`[SECURITY] ❌ Corrige: ${bad.join(", ")}`);
       console.error(`[SECURITY] ❌ Verifica también que ufw status muestra puerto 3001 bloqueado antes de activar LIVE_MODE.`);
       console.error(banner);
+      // BATCH-4 FIX #4: intento de alerta Telegram antes de exit.
+      // tg aún no está inicializado en boot temprano — usamos https directo.
+      const _tgToken = process.env.TELEGRAM_TOKEN || "";
+      const _tgChat  = process.env.TELEGRAM_CHAT_ID || "";
+      if (_tgToken && _tgChat) {
+        try {
+          const _body = JSON.stringify({chat_id:_tgChat, text:`[BOOT] ABORT\nSecrets inválidos: ${bad.join(", ")}\nLIVE_MODE=true. Proceso terminando.`, parse_mode:"HTML"});
+          const _https = require("https");
+          const _req = _https.request({hostname:"api.telegram.org",path:`/bot${_tgToken}/sendMessage`,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(_body)},timeout:3000},()=>{});
+          _req.on("error",()=>{});
+          _req.write(_body); _req.end();
+        } catch {}
+        // Esperar 2s para que el mensaje se envíe antes de exit
+        const {execSync} = require("child_process");
+        try { execSync("sleep 2", {stdio:"ignore"}); } catch {}
+      }
       process.exit(1);
     }
   }
