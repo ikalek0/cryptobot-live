@@ -40,6 +40,27 @@ function exportParams(params, paperStats, liveUrl, secret) {
   } catch(e) { console.warn("[SYNC]", e.message); }
 }
 
+// ── BATCH-4 FIX #7: validación de rangos seguros para params del paper ────────
+const PARAM_LIMITS = {
+  kellyFraction:   { min: 0.01, max: 0.5 },
+  positionSizePct: { min: 1,    max: 30 },
+  stopPct:         { min: 0.1,  max: 10 },
+  targetPct:       { min: 0.1,  max: 20 },
+  maxPositions:    { min: 1,    max: 10 },
+};
+
+function validateParamRanges(params) {
+  if (!params || typeof params !== "object") return { ok: true };
+  for (const [key, range] of Object.entries(PARAM_LIMITS)) {
+    if (params[key] !== undefined) {
+      if (typeof params[key] !== "number" || params[key] < range.min || params[key] > range.max) {
+        return { ok: false, reason: `${key}=${params[key]} fuera de rango [${range.min},${range.max}]` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 // ── LIVE → evaluar si adoptar ─────────────────────────────────────────────────
 function evaluateIncomingParams(incoming, currentParams, currentLiveStats, syncHistory) {
   const { params, paperStats, exportedAt } = incoming;
@@ -49,6 +70,12 @@ function evaluateIncomingParams(incoming, currentParams, currentLiveStats, syncH
   // Registrar
   syncHistory.push({ ts:exportedAt||new Date().toISOString(), paperStats, liveStats:currentLiveStats, params });
   while (syncHistory.length > 120) syncHistory.shift();
+
+  // ── BATCH-4 FIX #7: validación de rangos seguros antes de adoptar
+  const rangeCheck = validateParamRanges(params);
+  if (!rangeCheck.ok) {
+    return { adopted:false, reason:`Params fuera de rango: ${rangeCheck.reason}`, syncHistory };
+  }
 
   // ── Check 1: suficientes operaciones
   if ((paperStats.nTrades||0) < MIN_TRADES) {
@@ -123,4 +150,4 @@ function calcSyncStats(log, days=1) {
   return { winRate:recent.length?Math.round(wins/recent.length*100):0, avgPnl:+avgPnl.toFixed(2), nTrades:recent.length, daysTracked:days };
 }
 
-module.exports = { exportParams, evaluateIncomingParams, calcSyncStats };
+module.exports = { exportParams, evaluateIncomingParams, calcSyncStats, validateParamRanges };
