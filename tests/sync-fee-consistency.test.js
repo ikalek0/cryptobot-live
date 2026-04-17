@@ -31,6 +31,7 @@ describe("BATCH-3 FIX #6 — sync uses _investWithFee for committed", () => {
     };
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(70),
+      binancePublicRequest: makeFakeBinance(70),
     });
     assert.equal(r.ok, true);
     // effectivo = min(100, 70 + 0) = 70 (no real qty valuation in mock)
@@ -55,6 +56,7 @@ describe("BATCH-3 FIX #6 — sync uses _investWithFee for committed", () => {
     };
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(70),
+      binancePublicRequest: makeFakeBinance(70),
     });
     assert.equal(r.ok, true);
     // The key verification: capa1Cash should account for fee
@@ -135,7 +137,8 @@ describe("BATCH-3 FIX #6 — functional: _investWithFee affects capa cash", () =
       "BNB_1h_RSI": { capa: 1, invest: 30, pair: "BNBUSDC", qty: 0.1 },
     };
 
-    const deps = { binanceReadOnlyRequest: makeFakeBinance(100) };
+    const deps = { binanceReadOnlyRequest: makeFakeBinance(100) ,
+    binancePublicRequest: makeFakeBinance(100)};
     await engA.syncCapitalFromBinance(deps);
     await engB.syncCapitalFromBinance(deps);
 

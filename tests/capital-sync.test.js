@@ -52,6 +52,7 @@ describe("T0 — Capital dinámico", () => {
       assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre-sync: paused");
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(100),
+        binancePublicRequest: makeFakeBinance(100),
       });
       assert.equal(r.ok, true);
       assert.equal(eng._capitalSyncPausedUntil, 0, "post-sync OK: unpaused");
@@ -63,6 +64,7 @@ describe("T0 — Capital dinámico", () => {
       const before = Date.now();
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFailingBinance("down"),
+        binancePublicRequest: makeFailingBinance("down"),
       });
       assert.equal(r.ok, false);
       // Math.max(H7 10min, now+5min) = H7 10min (since H7 was set ~same time)
@@ -146,6 +148,7 @@ describe("T0 — Capital dinámico", () => {
       // Portfolio vacío, valorPosiciones = 0, usdcLibre = 50 → real = 50
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(50),
+        binancePublicRequest: makeFakeBinance(50),
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalDeclarado, 100);
@@ -163,6 +166,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(100),
+        binancePublicRequest: makeFakeBinance(100),
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 100);
@@ -177,6 +181,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(500),
+        binancePublicRequest: makeFakeBinance(500),
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 500);
@@ -193,6 +198,7 @@ describe("T0 — Capital dinámico", () => {
       // El bot NO los conoce → valorPosiciones=0, real=$4.
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(4),
+        binancePublicRequest: makeFakeBinance(4),
       });
       assert.equal(r.ok, true);
       assert.equal(r.valorPosiciones, 0);
@@ -211,7 +217,8 @@ describe("T0 — Capital dinámico", () => {
       };
       eng.prices["BNBUSDC"] = 700;            // MTM nuevo = 0.05 * 700 = 35
       const r = await eng.syncCapitalFromBinance({
-        binanceReadOnlyRequest: makeFakeBinance(10), // libre=$10
+        binanceReadOnlyRequest: makeFakeBinance(10),
+        binancePublicRequest: makeFakeBinance(10), // libre=$10
       });
       assert.equal(r.ok, true);
       assert.equal(r.valorPosiciones, 35, "MTM debe contar la pos gestionada");
@@ -232,6 +239,7 @@ describe("T0 — Capital dinámico", () => {
       const before = Date.now();
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFailingBinance("timeout"),
+        binancePublicRequest: makeFailingBinance("timeout"),
       });
       assert.equal(r.ok, false);
       assert.equal(eng._capitalSyncFailCount, 1);
@@ -247,6 +255,7 @@ describe("T0 — Capital dinámico", () => {
       let lastMsg = "";
       const deps = {
         binanceReadOnlyRequest: makeFailingBinance("rate limit"),
+        binancePublicRequest: makeFailingBinance("rate limit"),
         telegramSend: (msg) => { telegramCalls++; lastMsg = msg; },
       };
       await eng.syncCapitalFromBinance(deps);
@@ -261,12 +270,14 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFailingBinance(),
+        binancePublicRequest: makeFailingBinance(),
       });
       assert.equal(eng._capitalSyncFailCount, 1);
       assert.ok(eng._capitalSyncPausedUntil > 0);
 
       const ok = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(80),
+        binancePublicRequest: makeFakeBinance(80),
       });
       assert.equal(ok.ok, true);
       assert.equal(eng._capitalSyncFailCount, 0);
@@ -280,6 +291,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(9999),
+        binancePublicRequest: makeFakeBinance(9999),
       });
       assert.equal(r.capitalEfectivo, 100);
       assert.ok(eng.capa1Cash + eng.capa2Cash <= 100.001,
@@ -312,6 +324,7 @@ describe("T0 — Capital dinámico", () => {
       // capa2Cash = max(0, 59*0.40 - 10) = max(0, 13.6) = 13.6
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(40),
+        binancePublicRequest: makeFakeBinance(40),
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 59);
@@ -334,6 +347,7 @@ describe("T0 — Capital dinámico", () => {
       // Sync contra Binance con real=$50 → efectivo=$50 → baseline=$50
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(50),
+        binancePublicRequest: makeFakeBinance(50),
       });
       // capa1=$30 + capa2=$20 = tv $50 = baseline
       assert.ok(Math.abs(eng.totalValue() - 50) < 0.01, `tv=${eng.totalValue()}`);
@@ -347,6 +361,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(50),
+        binancePublicRequest: makeFakeBinance(50),
       });
       // Simular ganancia: subir cash $5 (10%)
       eng.capa1Cash += 5;
@@ -360,6 +375,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(14.16),
+        binancePublicRequest: makeFakeBinance(14.16),
       });
       // baseline=14.16, tv=14.16 → returnPct=0, no -86%
       const st = eng.getState();
@@ -383,6 +399,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(100),
+        binancePublicRequest: makeFakeBinance(100),
       });
       const st1 = eng.getState();
       assert.equal(st1.peakTv, 100);
@@ -402,6 +419,7 @@ describe("T0 — Capital dinámico", () => {
       const eng = new SimpleBotEngine({});
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(100),
+        binancePublicRequest: makeFakeBinance(100),
       });
       // Subir a 120 (peak)
       eng.capa1Cash += 20;
@@ -435,6 +453,7 @@ describe("T0 — Capital dinámico", () => {
       // Sync inicial con $50
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(50),
+        binancePublicRequest: makeFakeBinance(50),
       });
       const st1 = eng.getState();
       assert.equal(st1.baseline, 50);
@@ -442,6 +461,7 @@ describe("T0 — Capital dinámico", () => {
       // Usuario añade $30 a Binance → próximo sync ve $80 → baseline sube
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(80),
+        binancePublicRequest: makeFakeBinance(80),
       });
       const st2 = eng.getState();
       assert.equal(st2.baseline, 80,
@@ -815,6 +835,7 @@ describe("BUG-1 — sync success respeta CB + boot invariant", () => {
     // Ahora un sync exitoso
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(100),
+      binancePublicRequest: makeFakeBinance(100),
     });
     assert.equal(r.ok, true, "sync ok");
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -836,6 +857,7 @@ describe("BUG-1 — sync success respeta CB + boot invariant", () => {
     // Sync exitoso — NO debe borrar la pausa
     const r2 = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(100),
+      binancePublicRequest: makeFakeBinance(100),
     });
     assert.equal(r2.ok, true, "sync ok");
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -850,6 +872,7 @@ describe("BUG-1 — sync success respeta CB + boot invariant", () => {
     assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre: fail-closed default (10min)");
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(100),
+      binancePublicRequest: makeFakeBinance(100),
     });
     assert.equal(r.ok, true);
     assert.equal(eng._capitalSyncPausedUntil, 0,
@@ -924,6 +947,7 @@ describe("BUG-1.5 — sync ERROR respeta CB + boot invariant", () => {
     // Ahora un sync fallido
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFailingBinance("network down"),
+      binancePublicRequest: makeFailingBinance("network down"),
     });
     assert.equal(r.ok, false, "sync fallido");
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -948,6 +972,7 @@ describe("BUG-1.5 — sync ERROR respeta CB + boot invariant", () => {
     // Sync fallido — no debe borrar Infinity
     const r2 = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFailingBinance("timeout"),
+      binancePublicRequest: makeFailingBinance("timeout"),
     });
     assert.equal(r2.ok, false);
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -965,6 +990,7 @@ describe("BUG-1.5 — sync ERROR respeta CB + boot invariant", () => {
     const before = Date.now();
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFailingBinance("connect ETIMEDOUT"),
+      binancePublicRequest: makeFailingBinance("connect ETIMEDOUT"),
     });
     assert.equal(r.ok, false);
     // Sin flags, el error path escribe now + 5min
@@ -1016,6 +1042,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     eng._capitalSyncPausedUntil = 0; // reset H7 default
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.0),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 1.0),
     });
     assert.equal(r.ok, true, "sync debe completar con peg estable");
     assert.equal(eng._lastUsdcUsdt, 1, "lastUsdcUsdt capturado");
@@ -1029,6 +1056,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     eng._capitalSyncPausedUntil = 0;
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.005),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 1.005),
     });
     assert.equal(r.ok, true);
     assert.equal(eng._lastUsdcUsdt, 1.005);
@@ -1042,6 +1070,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     let tgSent = 0;
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.98),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 0.98),
       telegramSend: (_msg) => { tgSent++; },
     });
     assert.equal(r.ok, true, "drift moderado: sync completa normal");
@@ -1058,6 +1087,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     let tgSent = 0;
     const deps = {
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.97),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 0.97),
       telegramSend: (_msg) => { tgSent++; },
     };
     await eng.syncCapitalFromBinance(deps);
@@ -1079,6 +1109,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     const before = Date.now();
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(50, 0.90),
+      binancePublicRequest: makeFakeBinanceWithTicker(50, 0.90),
       telegramSend: (msg) => { tgSent++; tgMsg = msg; },
     });
     assert.equal(r.ok, false, "sync reporta ok=false por depeg severo");
@@ -1105,6 +1136,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     eng._capitalSyncPausedUntil = Infinity;
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.80),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 0.80),
     });
     assert.equal(r.ok, false);
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -1118,6 +1150,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     eng._capitalSyncPausedUntil = Infinity;
     const r = await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 1.20),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 1.20),
     });
     assert.equal(r.ok, false);
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
@@ -1135,7 +1168,8 @@ describe("H10 — USDC/USDT depeg guard", () => {
       }
       throw new Error("unexpected");
     };
-    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r.ok, true, "ticker fail no debe bloquear sync OK");
     assert.equal(eng._capitalReal, 100);
   });
@@ -1145,6 +1179,7 @@ describe("H10 — USDC/USDT depeg guard", () => {
     eng._capitalSyncPausedUntil = 0;
     await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.97),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 0.97),
     });
     const saved = eng.saveState();
     assert.equal(saved.lastUsdcUsdt, 0.97, "lastUsdcUsdt persistido");
@@ -1212,7 +1247,8 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
 
     // Sync 1: severe depeg → pausa 1h + flag=true
     const tBefore = Date.now();
-    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r1.ok, false, "sync 1: severe depeg → ok=false");
     assert.equal(eng._depegPauseActive, true, "flag _depegPauseActive seteado");
     const pause1 = eng._capitalSyncPausedUntil;
@@ -1221,7 +1257,8 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
       `sync 1: pausa debe ser ~1h, delta=${delta1}ms`);
 
     // Sync 2: ticker falla (transient) pero account OK → success path
-    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r2.ok, true, "sync 2: account OK → ok=true");
     // Crítico: la pausa NO debe haberse borrado a 0
     assert.notEqual(eng._capitalSyncPausedUntil, 0,
@@ -1247,7 +1284,8 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
 
     // Sync 1: severe depeg
     const tBefore = Date.now();
-    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r1 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r1.ok, false);
     assert.equal(eng._depegPauseActive, true);
     const pause1 = eng._capitalSyncPausedUntil;
@@ -1256,7 +1294,8 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
     // Sync 2: error path (account falla). Sin el fix, este path
     // sobrescribiría pausedUntil a now+5min, reduciendo los ~55min
     // restantes del depeg.
-    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r2.ok, false, "sync 2: account falla → ok=false");
     assert.equal(eng._capitalSyncPausedUntil, pause1,
       "BUG preservation: error path NO debe haber acortado la pausa a now+5min");
@@ -1275,12 +1314,14 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
     const fake = makeProgrammableBinance(program);
 
     // Sync 1: severe depeg → flag + pausa
-    await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(eng._depegPauseActive, true, "pre-recovery: flag true");
     assert.ok(eng._capitalSyncPausedUntil > Date.now(), "pre-recovery: paused");
 
     // Sync 2: peg recuperado → stable branch limpia flags
-    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake });
+    const r2 = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fake ,
+    binancePublicRequest: fake});
     assert.equal(r2.ok, true, "sync 2 OK con peg estable");
     assert.equal(eng._depegPauseActive, false,
       "recovery: flag _depegPauseActive reseteado automáticamente");
@@ -1296,6 +1337,7 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
     // Trigger severe depeg → activa flag
     await eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinanceWithTicker(100, 0.85),
+      binancePublicRequest: makeFakeBinanceWithTicker(100, 0.85),
     });
     assert.equal(eng._depegPauseActive, true, "flag activo tras depeg severo");
 
@@ -1325,7 +1367,8 @@ describe("H10-CRITICAL — depeg pause latch respetado en success/error path", (
       if (path === "myTrades") return [];
       throw new Error("unexpected");
     };
-    const r = await eng2.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeTransient });
+    const r = await eng2.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeTransient ,
+    binancePublicRequest: fakeTransient});
     assert.equal(r.ok, true, "sync 2 post-restart: account OK → ok=true");
     assert.equal(eng2._capitalSyncPausedUntil, pausePre,
       "pausa persistida NO debe borrarse por el success path post-restart");

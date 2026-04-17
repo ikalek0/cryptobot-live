@@ -840,7 +840,7 @@ class SimpleBotEngine {
       // loguea pero NO bloquea el sync — una API flaky no debe convertir
       // un sync OK en uno KO. Ese error se absorbe en el try interno.
       try {
-        const ticker = await deps.binanceReadOnlyRequest("GET", "ticker/price", { symbol: "USDCUSDT" });
+        const ticker = await deps.binancePublicRequest("GET", "ticker/price", { symbol: "USDCUSDT" });
         const usdcUsdt = parseFloat(ticker?.price || "0");
         if (usdcUsdt > 0) {
           this._lastUsdcUsdt = +usdcUsdt.toFixed(6);

@@ -330,7 +330,8 @@ describe("BUG-2 — _checkDrawdownAlerts también invocado desde evaluate()", ()
     const fakeBinance = async () => ({
       balances: [{ asset: "USDC", free: "100", locked: "0" }, { asset: "BNB", free: "1", locked: "0" }],
     });
-    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeBinance });
+    const r = await eng.syncCapitalFromBinance({ binanceReadOnlyRequest: fakeBinance ,
+    binancePublicRequest: fakeBinance});
     assert.equal(r.ok, true);
     assert.equal(eng._capitalSyncPausedUntil, Infinity,
       "BUG-1 + BUG-2: sync post-CB no debe borrar Infinity");

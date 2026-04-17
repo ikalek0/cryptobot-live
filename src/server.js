@@ -1176,6 +1176,7 @@ function binanceReadOnlyRequest(method, path, params = {}) {
 function _capitalSyncDeps() {
   return {
     binanceReadOnlyRequest,
+    binancePublicRequest: (m, p, q) => require("./binance_client").publicRequest(m, p, q),
     telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
   };
 }

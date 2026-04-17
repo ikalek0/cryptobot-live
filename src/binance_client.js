@@ -84,6 +84,34 @@ function _backoffMs(attempt) {
 //   method, path (sin /api/v3/ prefix), params, apiKey, apiSecret
 //   readOnly (bool, default false) — si true: solo GET, exige keys
 //   maxRetries (default 2 → 3 intentos totales)
+
+async function publicRequest(method, endpoint, params = {}) {
+  const base = (process.env.BINANCE_BASE_URL || 'https://api.binance.com').replace(/\/+$/, '');
+  const qs = new URLSearchParams(params).toString();
+  const url = base + '/api/v3/' + String(endpoint).replace(/^\/+/, '') + (qs ? '?' + qs : '');
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method: (method || 'GET').toUpperCase(), timeout: 10000 }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          if (res.statusCode >= 400) {
+            const e = new Error('Binance public ' + res.statusCode + ': ' + (j.msg || d));
+            e.code = j.code; e.status = res.statusCode;
+            return reject(e);
+          }
+          resolve(j);
+        } catch (e) { reject(new Error('parse: ' + e.message + ' :: ' + d.slice(0,200))); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Binance public timeout')));
+    req.end();
+  });
+}
+
 async function signedRequest({
   method,
   path,
@@ -155,5 +183,4 @@ module.exports = {
   // Exportados para tests
   setHttpOnce,
   resetHttpOnce,
-  _backoffMs,
-};
+  _backoffMs, publicRequest };

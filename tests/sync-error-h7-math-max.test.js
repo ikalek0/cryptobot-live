@@ -61,6 +61,7 @@ describe("BATCH-4 FIX #5 — functional: Math.max preserves longer pause", () =>
     // Sync fails (mock returns error)
     const deps = {
       binanceReadOnlyRequest: async () => { throw new Error("network down"); },
+      binancePublicRequest: async () => { throw new Error("network down"); },
     };
     await eng.syncCapitalFromBinance(deps);
 
@@ -75,6 +76,7 @@ describe("BATCH-4 FIX #5 — functional: Math.max preserves longer pause", () =>
 
     const deps = {
       binanceReadOnlyRequest: async () => { throw new Error("network down"); },
+      binancePublicRequest: async () => { throw new Error("network down"); },
     };
     const before = Date.now();
     await eng.syncCapitalFromBinance(deps);

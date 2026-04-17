@@ -175,6 +175,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.5 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.5 }),
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 50, "capitalReal = USDC libre, NUNCA suma BNB");
@@ -191,6 +192,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 100, bnb: 10 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 100, bnb: 10 }),
       });
       assert.equal(r.capitalReal, 100, "BNB de $6000 NO se suma a capitalReal");
       assert.equal(r.capitalEfectivo, 100);
@@ -204,6 +206,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       let telegramCalls = 0;
       const deps = {
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.001 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.001 }),
         telegramSend: () => telegramCalls++,
       };
 
@@ -219,6 +222,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       // Tercera sync con BNB recuperado → latch resetea
       const deps2 = {
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }),
         telegramSend: () => telegramCalls++,
       };
       await eng.syncCapitalFromBinance(deps2);
@@ -236,6 +240,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       eng._bnbFeeEnabled = false; // forzar estado previo distinto
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05, commissionAssetRecent: "BNB" }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.05, commissionAssetRecent: "BNB" }),
       });
       assert.equal(r.ok, true);
       assert.equal(eng._bnbFeeEnabled, true);
@@ -246,6 +251,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       eng._bnbFeeEnabled = true;
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05, commissionAssetRecent: "BTC" }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.05, commissionAssetRecent: "BTC" }),
       });
       assert.equal(r.ok, true);
       assert.equal(eng._bnbFeeEnabled, false);
@@ -255,7 +261,8 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       const eng = new SimpleBotEngine({});
       eng._bnbFeeEnabled = true; // seed
       const r = await eng.syncCapitalFromBinance({
-        binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }), // sin commissionAssetRecent
+        binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }), // sin commissionAssetRecent
       });
       assert.equal(r.ok, true);
       assert.equal(eng._bnbFeeEnabled, true, "sin datos, mantiene previo true");
@@ -264,6 +271,7 @@ describe("T0-FEE — Manejo de fees con BNB activo", () => {
       eng._bnbFeeEnabled = false;
       await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }),
+        binancePublicRequest: makeFakeBinance({ usdc: 50, bnb: 0.05 }),
       });
       assert.equal(eng._bnbFeeEnabled, false, "sin datos, mantiene previo false");
     });
