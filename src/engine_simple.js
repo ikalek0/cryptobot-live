@@ -840,14 +840,7 @@ class SimpleBotEngine {
       // loguea pero NO bloquea el sync — una API flaky no debe convertir
       // un sync OK en uno KO. Ese error se absorbe en el try interno.
       try {
-        // HOTFIX: ticker/price es endpoint público, no necesita firma (signedRequest añade timestamp+recvWindow+signature que Binance rechaza con -1101)
-        const ticker = await new Promise((resolve, reject) => {
-          const https = require("https");
-          https.get("https://api.binance.com/api/v3/ticker/price?symbol=USDCUSDT", { timeout: 5000 }, res => {
-            let d = ""; res.on("data", c => d += c);
-            res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
-          }).on("error", reject).on("timeout", function() { this.destroy(); reject(new Error("Timeout")); });
-        });
+        const ticker = await deps.binanceReadOnlyRequest("GET", "ticker/price", { symbol: "USDCUSDT" });
         const usdcUsdt = parseFloat(ticker?.price || "0");
         if (usdcUsdt > 0) {
           this._lastUsdcUsdt = +usdcUsdt.toFixed(6);
