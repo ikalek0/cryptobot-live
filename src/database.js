@@ -245,6 +245,12 @@ async function loadSimpleState() {
 
 module.exports = {
   saveState, loadState, deleteState, saveSimpleState, loadSimpleState,
+  // Exportado para trade_logger wiring (P0-conv): server.js hace
+  // await getClient() al boot y, si devuelve un client, invoca
+  // ensureTradeLogTable(client) y lo pasa a simpleBot.setContext + schedulers.
+  // Si getClient() devuelve null (DATABASE_URL no config / disabled),
+  // logTrade/weekly_report degradan silente como antes.
+  getClient,
   // Exportado para tests
   atomicWriteFile, loadWithRecovery,
 };
