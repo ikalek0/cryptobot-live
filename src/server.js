@@ -11,7 +11,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
-const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState } = require("./database");
+const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState, getClient: getDbClient } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -72,6 +72,13 @@ const SYNC_THRESHOLD = {
 const LIVE_START_DELAY_MS = 60 * 60 * 1000;
 let liveStartTime = Date.now(); // para calcular tiempo restante
 
+// Shared PG client (set inside initBot after getDbClient resolves). Los schedulers
+// de abajo lo capturan tarde: scheduleWeekly/Trade corren a module-load con null,
+// pero initBot() actualiza _pgClient ANTES de que los schedulers disparen la
+// primera ejecución (son setTimeout a horas futuras). Para que weekly_report
+// vea el client real, los schedule* se re-registran en initBot() tras el init.
+let _pgClient = null;
+
 async function initBot() {
   const saved = await loadState();
   S.bot = new CryptoBotFinal(saved);
@@ -88,12 +95,35 @@ async function initBot() {
 
   console.log(`\n[LIVE] Modo: ${S.bot.mode} | Capital: $${S.CAPITAL_USDT} | Umbral: ${SYNC_THRESHOLD.minDays} días`);
 
+// ── PG client para trade_log ───────────────────────────────────────────
+// trade_logger.logTrade degrada silente si db=null (no-op). Antes de F-P0:
+// setContext(null,...) y scheduleWeeklyReport(tg,null,...) → trade_log nunca
+// se usaba aunque DATABASE_URL estuviera configurada. Fix: reutilizar el
+// singleton de database.js (ya lazy-connect), asegurar tabla, pasar a consumers.
+try {
+  _pgClient = await getDbClient();
+  if(_pgClient) {
+    await ensureTradeLogTable(_pgClient);
+    console.log("[DB] trade_log table ensured");
+  } else {
+    console.log("[DB] trade_log: sin cliente PG (DATABASE_URL no config / disabled) — logTrade será no-op");
+  }
+} catch(e) {
+  console.warn("[DB] trade_log init falló:", e.message);
+  _pgClient = null;
+}
+// Los schedulers se registran aquí (dentro de initBot) para que capturen
+// _pgClient una vez resuelto el connect. A nivel módulo correrían antes de
+// que el IIFE `(async () => { await initBot(); })()` resuelva, con db=null.
+scheduleWeeklyReport(tg, _pgClient, "live", null);
+scheduleTradeAnalysisReminder(tg, _pgClient, "live");
+
 // ── SimpleBotEngine — 7 estrategias validadas ──────────────────────────
 try {
   const savedSimple = await loadSimpleState().catch(()=>null);
   S.simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
-  S.simpleBot.setContext(null, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
+  S.simpleBot.setContext(_pgClient, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
 } catch(e) {
   console.warn("[SIMPLE] Error init:", e.message);
   S.simpleBot = new SimpleBotEngine({});
@@ -992,8 +1022,8 @@ async function verifyLiveBalance() {
 const { startLoop } = require("./trading/loop");
 
 // Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
-scheduleWeeklyReport(tg, null, "live", null);
-scheduleTradeAnalysisReminder(tg, null, "live");
+// (scheduleWeeklyReport + scheduleTradeAnalysisReminder se invocan DENTRO de
+// initBot() tras init del cliente PG, para que capturen el db real.)
 
 server.listen(PORT,()=>console.log(`\n🎯 CRYPTOBOT LIVE en http://localhost:${PORT} | ${LIVE_MODE?"🎯 LIVE":"📋 PAPER-LIVE"} | Tick: ${TICK_MS}ms\n`));
 

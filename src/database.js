@@ -138,4 +138,4 @@ async function loadSimpleState() {
   } catch(e) { disablePg(`loadSimpleState query falló: ${e.message}`); return null; }
 }
 
-module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState };
+module.exports = { saveState, loadState, deleteState, saveSimpleState, loadSimpleState, getClient };
