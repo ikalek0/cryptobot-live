@@ -377,7 +377,12 @@ app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIV
 app.get("/api/health", (_,res)=>res.json({ok:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",tick:S.bot?.tick,uptime:process.uptime(),tv:S.bot?.totalValue()}));
 
 // Reset state — borrar estado guardado para empezar limpio
+// Guard: solo habilitado en NODE_ENV=development. Sin NODE_ENV seteada → fail-closed (403).
+// Endpoint destructivo (borra estado persistido); no debe estar abierto en producción.
 app.post("/api/reset-state", async (req, res) => {
+  if(process.env.NODE_ENV !== "development") {
+    return res.status(403).json({ error: "Disabled in production. Set NODE_ENV=development to enable." });
+  }
   try {
     await deleteState();
     await saveSimpleState({});
