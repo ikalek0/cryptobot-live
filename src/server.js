@@ -24,6 +24,7 @@ const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 const S = require("./trading/state");
+const { getReportingState } = require("./reporting_state");
 
 const PORT    = process.env.PORT    || 3000;
 const TICK_MS = parseInt(process.env.TICK_MS || "10000"); // Más lento = más conservador
@@ -227,7 +228,18 @@ for(const sp of simplePairs){
   tg.testTelegram && tg.testTelegram();
   // Auto reports disabled — use /situacion on demand
   S.tgControls = tg.startCommandListener(
-  () => ({...S.bot.getState(), instance:S.bot.mode, syncHistory: S.syncHistory, dailyPnlPct:S.bot._dailyPnlPct||0, momentumMult:S.bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
+  () => ({
+    // Zombie-fix: financial fields (totalValue/returnPct/winRate/log/portfolio/
+    // cash/equity/trades) vienen de S.simpleBot, no de S.bot (evaluate() no-op).
+    // Meta/contexto (marketRegime, fearGreed, prices, dailyTrades…) sigue
+    // viniendo de S.bot via getReportingState().
+    ...getReportingState(S),
+    instance: S.bot.mode,
+    syncHistory: S.syncHistory,
+    dailyPnlPct: S.bot._dailyPnlPct||0,
+    momentumMult: S.bot.hourMultiplier||1,
+    cryptoPanic: cryptoPanic.getStatus(),
+  }),
   {
     getBalance:    getAccountBalance,
     // F2: source of truth for paused = simpleBot.paused (persisted on disk).
@@ -971,7 +983,10 @@ async function verifyLiveBalance() {
     const others = balances.filter(b=>b.asset!=="USDC"&&b.asset!=="USDT"&&b.asset!=="BNB"&&parseFloat(b.free)>0.001);
     if (others.length>0) console.log(`[LIVE] Otros activos en Binance: ${others.map(b=>b.asset+":"+parseFloat(b.free).toFixed(4)).join(", ")} (no gestionados por el bot)`);
     
-    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${S.bot?.cash?.toFixed(2)||virtualCapital} USDC`);
+    // Zombie-fix: S.bot.cash es el cash zombie. Preferimos simpleBot.totalValue()
+    // si está inicializado (lo está — initBot crea simpleBot antes de verifyLiveBalance).
+    const reportTv = S.simpleBot?.totalValue?.() ?? S.bot?.cash ?? virtualCapital;
+    if (tg?.send) tg.send(`✅ <b>LIVE operativo</b> — Capital: $${Number(reportTv).toFixed(2)} USDC`);
 
   } catch(e) {
     console.error("[LIVE] ❌ verifyLiveBalance FAILED:", e.message);

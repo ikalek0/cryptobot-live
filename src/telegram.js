@@ -97,10 +97,14 @@ function startCommandListener(getState, botControls, initialPaused=false) {
               const s = getState();
 
               if(text==="/estado") {
+                // Zombie-fix: s viene de getReportingState(S) en server.js, así
+                // que totalValue/returnPct/winRate/log/portfolio/trades ya son
+                // los de S.simpleBot. s.trades es el count autoritativo (el log
+                // está truncado a últimos 100 por simpleBot.getState()).
                 const tv = s.totalValue||0;
                 const ret = s.returnPct||0;
                 const wr = s.winRate||0;
-                const trades = (s.log||[]).filter(l=>l.type==="SELL").length;
+                const trades = s.trades ?? (s.log||[]).filter(l=>l.type==="SELL").length;
                 const simple = botControls?.getSimpleState?.();
                 const simpleKellys = simple?.kellyByStrategy||{};
                 const firstKelly = Object.values(simpleKellys)[0]||{};
@@ -114,10 +118,15 @@ function startCommandListener(getState, botControls, initialPaused=false) {
                 );
               }
               else if(text==="/posiciones") {
+                // Zombie-fix: s.portfolio ahora es simpleBot.portfolio cuya key
+                // es strategyId (p.ej. "BNB_1h_RSI") — el símbolo vive en
+                // p.pair ("BNBUSDC"). s.prices sigue siendo el dict compartido
+                // (actualizado por S.bot.updatePrice desde el stream).
                 const pos = Object.entries(s.portfolio||{});
                 if(!pos.length) { send("📭 Sin posiciones abiertas"); }
                 else {
-                  const lines = pos.map(([sym,p])=>{
+                  const lines = pos.map(([key,p])=>{
+                    const sym = p.pair || key;
                     const price = s.prices?.[sym]||p.entryPrice;
                     const pnl = ((price-p.entryPrice)/p.entryPrice*100).toFixed(2);
                     const dur = Math.round((Date.now()-(p.openTs||Date.now()))/3600000);

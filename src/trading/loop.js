@@ -5,6 +5,7 @@
 
 const S = require("./state");
 const tg = require("../telegram");
+const { getReportingState } = require("../reporting_state");
 const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchLiquidations, fetchBTCDominance, fetchCoinbasePremium, fetchExchangeFlow, fetchBinanceReserve, fetchRedditSentiment } = require("../feeds");
 const { getTradingScore } = require("../market");
 const { runIntradayWalkForward } = require("../backtest");
@@ -184,7 +185,9 @@ setInterval(async()=>{
     try {
       ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=S.bot.evaluate());
       // evaluate() es no-op: devuelve signals=[], newTrades=[] pero actualiza régimen y equity
-      if(S.bot.tick%60===0){try{checkCapitalAlert(S.bot.getState());}catch(e){}}
+      // Zombie-fix: checkCapitalAlert necesita totalValue real (simpleBot),
+      // no el totalValue congelado del zombie. getReportingState fusiona.
+      if(S.bot.tick%60===0){try{checkCapitalAlert(getReportingState(S));}catch(e){}}
     } catch(evalErr) {
       console.error("[LIVE] bot.evaluate() error:", evalErr.message);
       console.error(evalErr.stack?.split("\n").slice(0,3).join("\n"));
@@ -298,7 +301,10 @@ setInterval(async()=>{
 
 
     // Enviar equity a BAFIR
-    if(ticks%60===0) sendEquityToBafir(S.bot.totalValue());
+    // Zombie-fix: si BAFIR revive, debe recibir el equity real (simpleBot),
+    // no el congelado de S.bot. sendEquityToBafir hoy es no-op pero cerramos
+    // el patrón aquí para que no reintroduzca el bug si se reactiva.
+    if(ticks%60===0) sendEquityToBafir(S.simpleBot?.totalValue?.() ?? S.bot.totalValue());
     // WF intradía cada 30min en live (sin API, usa historial en RAM)
     if(ticks%180===0 && ticks>0) {
       try {
