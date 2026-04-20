@@ -308,15 +308,18 @@ describe("BATCH-1 FIX #9 — server.js wiring (static source check)", () => {
       "debe existir sanity cap alrededor de $1M");
   });
 
-  it("setCapitalEverywhere respeta invest comprometido por capa", () => {
+  it("setCapitalEverywhere rechaza si hay posiciones abiertas (Tarea B 20 abr 2026)", () => {
     const idx = src.indexOf("function setCapitalEverywhere");
-    const win = src.slice(idx, idx + 2500);
-    assert.ok(/committedC1/.test(win), "debe calcular committed capa1");
-    assert.ok(/committedC2/.test(win), "debe calcular committed capa2");
-    assert.ok(/capa1Cash\s*=\s*Math\.max\(0/.test(win),
-      "capa1Cash debe clamp a 0");
-    assert.ok(/capa2Cash\s*=\s*Math\.max\(0/.test(win),
-      "capa2Cash debe clamp a 0");
+    const win = src.slice(idx, idx + 3500);
+    // Tarea B: semántica nueva — /capital es "declara baseline, preserva
+    // realizedPnl, redistribuye capas sin positions abiertas". La guarda
+    // explícita reemplaza al cálculo de committed silencioso.
+    assert.ok(/openCount/.test(win) || /open position/.test(win),
+      "debe rechazar con posiciones abiertas");
+    assert.ok(/realizedPnl/.test(win),
+      "debe preservar realizedPnl en la redistribución");
+    assert.ok(/capa1Cash\s*=/.test(win) && /capa2Cash\s*=/.test(win),
+      "debe redistribuir capa1/capa2");
   });
 
   it("setCapitalEverywhere dispara syncCapitalFromBinance", () => {

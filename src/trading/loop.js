@@ -313,10 +313,24 @@ setInterval(async()=>{
       }
     }
 
-    if(circuitBreaker?.triggered&&!S.cbNotified){tg.notifyCircuitBreaker(circuitBreaker.drawdown);S.cbNotified=true;}
-    if(!circuitBreaker?.triggered)S.cbNotified=false;
-    if(drawdownAlert?.triggered)tg.notifyMaxDrawdown(drawdownAlert);
-    // F26: línea duplicada eliminada (`if(!circuitBreaker?.triggered) S.cbNotified=false;`)
+    // ── Cleanup BUG D (20 abr 2026) — CB/drawdown zombie DESHABILITADOS ──
+    // Antes: `circuitBreaker` y `drawdownAlert` venían de S.bot.evaluate()
+    // (engine.js zombie cuyo tv siempre es INITIAL_CAPITAL=100, no refleja
+    // trades reales del simpleBot). Las notificaciones `tg.notifyCircuitBreaker`
+    // y `tg.notifyMaxDrawdown` NUNCA podían disparar con datos verdaderos
+    // — o no disparaban nunca (tv constante ≈ peak), o disparaban con valores
+    // fantasma si algún path zombie mutaba equity.
+    //
+    // El simpleBot ya tiene su propio CB y drawdown alerts (_ddCircuitBreakerTripped,
+    // _ddAlert3/5/10) en engine_simple.js:_checkDrawdownAlerts, alimentados
+    // por peakTv y totalValue() reales. Tras el fix de BUG B, esos SÍ disparan.
+    // Eliminamos aquí el pipe zombie para que no duplique ni mienta.
+    //
+    // circuitBreaker y drawdownAlert siguen siendo variables locales del tick
+    // para no romper el broadcast({...signals, newTrades, circuitBreaker,...})
+    // que el dashboard consume, pero su valor es siempre null. Si se desea
+    // cablear el drawdown real del simpleBot al dashboard, propagar
+    // S.simpleBot.getState().drawdownPct/peakTv en otra ronda.
 
 
     // Real-time F&G — actualizar cada tick

@@ -24,7 +24,18 @@ async function fetchAllKlinesForPeriod(symbol, interval, startTime, endTime) {
 }
 
 async function runBacktest(symbols, startTime, endTime, initialCapital=50000) {
-  const BNB_FEE = 0.00075;
+  // ── Tarea C (20 abr 2026): USE_BNB_DISCOUNT env var ─────────────────────
+  // Antes: BNB_FEE=0.00075 hardcoded — asume que la cuenta del user tiene
+  // BNB y "Use BNB for fees" activo. Si no, la fee real es 0.1% USDC y los
+  // backtests sobreestiman returns por ~0.05%/trade (round-trip 0.1%).
+  //
+  // Ahora: USE_BNB_DISCOUNT=true|false (default false — fallback conservador).
+  // Formula: FEE = USE_BNB_DISCOUNT? 0.00075 : 0.001. Round-trip = 2*FEE.
+  //
+  // El user correrá re-validación de las 8 estrategias en Hetzner tras merge
+  // para detectar si Kelly/PF cambian materialmente con la nueva asunción.
+  const USE_BNB_DISCOUNT = String(process.env.USE_BNB_DISCOUNT || "false").toLowerCase() === "true";
+  const BNB_FEE = USE_BNB_DISCOUNT ? 0.00075 : 0.001;
   const PERIODS_MS = endTime - startTime;
   
   let cash = initialCapital;

@@ -296,6 +296,18 @@ class SimpleBotEngine {
     // Se resetea automáticamente cuando el peg vuelve a estable (<1% drift)
     // en la rama else del ticker check, o manualmente editando state.json.
     this._depegPauseActive     = saved.depegPauseActive === true;
+    // ── BUG B plumbing (20 abr 2026) — contabilidad explícita de PnL realizado ──
+    // Antes: el PnL realizado sólo existía implícitamente como diferencia
+    // `capa1+capa2+pos_value − cap_declarado`. Sin campo explícito, un reset
+    // silencioso de capas (p.ej. syncCapitalFromBinance en PAPER-LIVE) borraba
+    // el PnL sin que nadie se enterase. Ahora:
+    //   - realizedPnl: $ neto acumulado desde arranque. Δ per close = expectedNet − cashDebit.
+    //   - totalFees: $ fee acumulado (USDC equivalente) en los closes. Para modo BNB,
+    //     se contabiliza el valor USDC equivalente aunque la fee se pague en BNB.
+    //   - Se persisten en saveState. Se exponen en getState() y en /api/simpleBot/state.
+    //   - /capital preserva realizedPnl; /reset-contable lo pone a 0 (hard reset).
+    this.realizedPnl = Number.isFinite(saved.realizedPnl) ? saved.realizedPnl : 0;
+    this.totalFees   = Number.isFinite(saved.totalFees)   ? saved.totalFees   : 0;
     // Seed backtested trades per strategy if not enough real data
     this._seedStratTrades();
     // Diagnostic: log loaded state
@@ -584,7 +596,7 @@ class SimpleBotEngine {
     // del fee sólo a través del clamp. Basta con calcular la predicción una
     // vez con el invest pre-clamp — FEE_efectivo sólo varía por el modo
     // (BNB vs USDC), que es independiente del tamaño del trade.
-    const feePredBuy = this._computeFeePrediction(invest);
+    const feePredBuy = this._computeFeePrediction(invest, cfg.pair);
     const feeMult    = 1 + feePredBuy.FEE_efectivo;
     if (invest * feeMult > availCash) invest = availCash / feeMult;
 
@@ -645,7 +657,7 @@ class SimpleBotEngine {
     // T0-FEE: log del fee predicho (mode BNB vs USDC) y recálculo final.
     // Si el clamp de cash recortó `invest`, recalculamos la predicción
     // con el invest definitivo para que bnbAmount esperado sea exacto.
-    const feePred = this._computeFeePrediction(invest);
+    const feePred = this._computeFeePrediction(invest, cfg.pair);
     this._lastFeeMode = feePred.mode;
     console.log(`[SIMPLE][FEE] ${cfg.id} tradeValue=$${invest.toFixed(2)} mode=${feePred.mode} expectedFee=${feePred.feePaidInBnb ? feePred.expectedBnbFee.toFixed(6)+" BNB" : "$"+feePred.feeUsdcEquivalent.toFixed(4)}`);
     // qty = invest/price (pura): en modo BNB la fee se cobra en BNB separate,
@@ -815,7 +827,42 @@ class SimpleBotEngine {
   // bloquea nuevos BUYs. Las SELLs (stops/targets/time-stop) siguen
   // funcionando en evaluate() para no dejar posiciones atrapadas.
   async syncCapitalFromBinance(deps) {
-    // deps = { binanceReadOnlyRequest, telegramSend? }
+    // deps = { binanceReadOnlyRequest, telegramSend?, liveMode? }
+    //
+    // ── BUG B (20 abr 2026) — Guard PAPER-LIVE ───────────────────────────
+    // En PAPER-LIVE (LIVE_MODE=false) los trades son virtuales: placeLiveBuy/Sell
+    // son no-op y Binance no ve ninguna orden. Pero el sync corría igualmente
+    // si había API keys configuradas (para LIVE rápido), y cada tick
+    // recalculaba capa1Cash/capa2Cash como `efectivo*split_pct - committed`
+    // donde `efectivo = min(declarado, usdcLibre_binance)`. Como `usdcLibre_binance`
+    // permanece constante en PAPER (no hay fills reales), `efectivo = declarado`
+    // y las capas quedaban reseteadas a 60/40, BORRANDO el realizedPnl
+    // acumulado de trades virtuales.
+    //
+    // Síntoma observado en prod: 2 SELLs cerrados a -0.83% cada uno, capa1+capa2
+    // deberían sumar ~$99.68, pero cada 5 min el sync las resetea a $100 exactos.
+    //
+    // Fix: en PAPER-LIVE el sync no tiene contraparte real → skip explícito.
+    // Las capas evolucionan puramente desde evaluate()/applyReal*Fill, sin
+    // reconciliación espúrea contra balance Binance inamovible.
+    // Backwards-compat: el default es "correr sync" (liveMode implícito true).
+    // Solo cuando el caller pasa explícitamente `liveMode: false` (paper-live
+    // runtime, ver server.js _capitalSyncDeps que siempre lo setea) entramos
+    // en el short-circuit. Tests legados sin este field preservan su semántica.
+    const liveMode = deps?.liveMode !== false;
+    if (!liveMode) {
+      this._lastCapitalSyncTs = Date.now();
+      this._lastCapitalSyncOk = true;
+      // H7: limpiar pausa fail-closed si estamos en paper-live sin
+      // bloqueos activos (CB, boot-inv, depeg). Sin esto el gate del
+      // _onCandleClose que lee _capitalSyncPausedUntil nunca permitiría
+      // BUYs virtuales en PAPER-LIVE tras el boot.
+      if (!this._ddCircuitBreakerTripped && !this._bootInvariantViolated && !this._depegPauseActive) {
+        this._capitalSyncPausedUntil = 0;
+      }
+      return { ok: true, skipped: true, reason: "PAPER-LIVE" };
+    }
+
     try {
       if (typeof deps?.binanceReadOnlyRequest !== "function")
         throw new Error("binanceReadOnlyRequest not provided");
@@ -978,7 +1025,18 @@ class SimpleBotEngine {
 
       const real       = usdcLibre + valorPosiciones;
       const declarado  = this._capitalDeclarado || INITIAL_CAPITAL;
-      const efectivo   = Math.min(declarado, real);
+      // ── Tarea B (20 abr 2026) — efectivo = real en LIVE_MODE ─────────
+      // Antes: efectivo = Math.min(declarado, real). Esto truncaba ganancias
+      // reales: si el bot ganaba dinero y real > declarado, efectivo quedaba
+      // capado a declarado → capas no reflejaban el beneficio → bot no podía
+      // sizing sobre capital ganado hasta que el usuario subiese /capital
+      // manualmente, y ese /capital reseteaba el histórico, perdiendo el PnL.
+      //
+      // Fix: en LIVE_MODE, Binance es la fuente de verdad. efectivo = real.
+      // Las ganancias se reflejan inmediatamente en las capas y en sizing.
+      // La semántica de /capital ahora preserva realizedPnl (ver
+      // setCapitalEverywhere). Para reset duro, existe /reset-contable.
+      const efectivo   = real;
 
       // 3) Ajustar capa1Cash / capa2Cash respetando:
       //    - el split 60/40 del EFECTIVO
@@ -1099,7 +1157,11 @@ class SimpleBotEngine {
   //
   // Nota: bnbBalancePre se guarda para la verificación post-fill que compara
   // el delta real de BNB contra expectedBnbFee (ver _checkFeeDiscrepancy).
-  _computeFeePrediction(tradeValue) {
+  _computeFeePrediction(tradeValue, pair) {
+    // BUG C (20 abr 2026): pair se almacena para que _checkFeeDiscrepancy
+    // pueda ajustar bnbDelta por el flujo del par (BNB comprado/vendido).
+    // Sin esto, un trade BNB→USDC mueve el balance BNB por la compra/venta
+    // misma y el chequeo "BNB no bajó" daba falsos positivos (ver BUG C).
     const bnbPrice = this.prices["BNBUSDC"] || 0;
     const feeUsdcEquivalent = tradeValue * FEE_RATE_USDC;
 
@@ -1123,6 +1185,7 @@ class SimpleBotEngine {
       feeUsdcEquivalent: +feeUsdcEquivalent.toFixed(6),
       bnbBalancePre:     +(this._bnbBalance || 0).toFixed(8),
       bnbPrice:          +bnbPrice.toFixed(4),
+      pair:              pair || null, // BUG C: necesario para ajuste qty en check
       ts:                Date.now(),
     };
   }
@@ -1320,17 +1383,33 @@ class SimpleBotEngine {
         // T0-FEE: usar FEE_efectivo según el modo actual (BNB=0, USDC=0.001).
         // En modo BNB el bot recibe gross íntegro; la fee BNB se verifica
         // post-fill vía _checkFeeDiscrepancy contra el delta real del balance.
-        const feePredSell = this._computeFeePrediction(gross);
+        const feePredSell = this._computeFeePrediction(gross, pos.pair);
         this._lastFeeMode = feePredSell.mode;
         console.log(`[SIMPLE][FEE] ${id} SELL gross=$${gross.toFixed(2)} mode=${feePredSell.mode} expectedFee=${feePredSell.feePaidInBnb ? feePredSell.expectedBnbFee.toFixed(6)+" BNB" : "$"+feePredSell.feeUsdcEquivalent.toFixed(4)}`);
         const expectedNet = gross*(1-feePredSell.FEE_efectivo);
         if(pos.capa===1) this.capa1Cash+=expectedNet;
         else             this.capa2Cash+=expectedNet;
+        // ── BUG B plumbing: acumular realizedPnl + totalFees (20 abr 2026) ──
+        // cashDebit = lo realmente restado de la capa al abrir (incluye fee BUY).
+        // feeSellUsdc = USDC equivalente del fee del close (0 en modo BNB efectivo,
+        // pero el valor USDC se preserva vía feeUsdcEquivalent para contabilidad).
+        const cashDebit = (typeof pos._investWithFee === "number")
+          ? pos._investWithFee
+          : (pos.invest || 0) * (1 + FEE_RATE_USDC);
+        const feeSellUsdc = Number.isFinite(feePredSell.feeUsdcEquivalent) ? feePredSell.feeUsdcEquivalent : 0;
+        const feeBuyUsdc  = Number.isFinite(pos._feePredicted?.feeUsdcEquivalent) ? pos._feePredicted.feeUsdcEquivalent : 0;
+        this.realizedPnl += (expectedNet - cashDebit);
+        this.totalFees   += (feeBuyUsdc + feeSellUsdc);
         // Record for Kelly
         if(!this._stratTrades[id]) this._stratTrades[id]=[];
         this._stratTrades[id].push({pnl:pnlPct,ts:Date.now()});
         if(this._stratTrades[id].length>100) this._stratTrades[id].shift();
-        this.log.push({type:"SELL",symbol:pos.pair,strategy:id,pnl:pnlPct,reason,ts:Date.now()});
+        this.log.push({
+          type:"SELL",symbol:pos.pair,strategy:id,pnl:pnlPct,reason,ts:Date.now(),
+          // BUG B: fee estimado en $ para que Telegram buildDaily/Weekly pueda
+          // mostrar "Fees $X.XX" acumulado en lugar de $0.00 siempre.
+          fee: +(feeBuyUsdc + feeSellUsdc).toFixed(6),
+        });
         // Track correlation overlaps
         if(!this._corrStats) this._corrStats = {overlaps:0, total:0};
         this._corrStats.total++;
@@ -1469,14 +1548,30 @@ class SimpleBotEngine {
   //   kind:       "BUY" | "SELL"
   //   predicted:  objeto _feePredicted original con bnbBalancePre + expectedBnbFee + mode
   //   telegramSend: función opcional para enviar alerta si hay mismatch
-  _checkFeeDiscrepancy(strategyId, kind, predicted, telegramSend) {
+  _checkFeeDiscrepancy(strategyId, kind, predicted, telegramSend, opts = {}) {
     if (!predicted || typeof predicted !== "object") {
       console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} sin predicción — skip verificación`);
       return { ok: true, skipped: true };
     }
+    // ── BUG C (20 abr 2026) — ajuste por flujo del par ────────────────────
+    // Antes: bnbDelta = bnbBefore − bnbAfter. Para pares BNBUSDC/BNBUSDT, el
+    // balance BNB cambia MÁS por la compra/venta misma que por la fee:
+    //   BUY BNBUSDC $16:  bnbAfter ≈ bnbBefore + 0.02758 (BNB recibido)
+    //     → bnbDelta = −0.02758 (negativo) → check `< 1e-5` → falso positivo
+    //       "BNB no bajó — Binance usó USDC fallback" + alerta Telegram espuria.
+    // Fix: para pares BNB, ajustar bnbDelta por qtyTraded:
+    //   bnbDeltaFill = bnbBefore + qtyBought − qtySold − bnbAfter
+    // que aisla exclusivamente la componente de la fee. Para pares no-BNB, la
+    // fórmula original sigue siendo correcta (qtyTraded=0).
+    const pair = predicted.pair || "";
+    const isBnbPair = pair === "BNBUSDC" || pair === "BNBUSDT";
+    const qtyTraded = Number(opts.qtyTraded || 0);
+    const qtyBought = (isBnbPair && kind === "BUY")  ? qtyTraded : 0;
+    const qtySold   = (isBnbPair && kind === "SELL") ? qtyTraded : 0;
     const bnbBefore = Number(predicted.bnbBalancePre || 0);
     const bnbAfter  = Number(this._bnbBalance || 0);
-    const bnbDelta  = bnbBefore - bnbAfter; // positivo si bajó (se consumió BNB)
+    // bnbDelta ahora representa SOLO el consumo por fee: positivo si bajó por fee.
+    const bnbDelta  = bnbBefore + qtyBought - qtySold - bnbAfter;
 
     if (predicted.mode === "BNB") {
       const expected = Number(predicted.expectedBnbFee || 0);
@@ -1484,25 +1579,25 @@ class SimpleBotEngine {
       const mismatch  = Math.abs(bnbDelta - expected) > tolerance;
 
       if (mismatch) {
-        console.error(`[SIMPLE][FEE-DISCREPANCY] ${strategyId} ${kind} esperado=${expected.toFixed(6)} real=${bnbDelta.toFixed(6)} diff=${(bnbDelta-expected).toFixed(6)}`);
+        console.error(`[SIMPLE][FEE-DISCREPANCY] ${strategyId} ${kind} pair=${pair||"?"} qty=${qtyTraded} esperado=${expected.toFixed(6)} real=${bnbDelta.toFixed(6)} diff=${(bnbDelta-expected).toFixed(6)}`);
         if (typeof telegramSend === "function") {
           try {
-            telegramSend(`⚠️ <b>[FEE] Discrepancia BNB</b>\n${strategyId} (${kind})\nEsperado: ${expected.toFixed(6)} BNB\nReal: ${bnbDelta.toFixed(6)} BNB\nDiferencia: ${(bnbDelta-expected).toFixed(6)} BNB`);
+            telegramSend(`⚠️ <b>[FEE] Discrepancia BNB</b>\n${strategyId} (${kind})\nPar: ${pair||"?"} qty=${qtyTraded}\nEsperado: ${expected.toFixed(6)} BNB\nReal: ${bnbDelta.toFixed(6)} BNB\nDiferencia: ${(bnbDelta-expected).toFixed(6)} BNB`);
           } catch {}
         }
       }
 
       if (bnbDelta < 1e-5) {
-        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho BNB pero BNB no bajó (${bnbDelta.toFixed(8)}) — Binance usó USDC fallback`);
+        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho BNB pero BNB no bajó (bnbDeltaAjustado=${bnbDelta.toFixed(8)}, pair=${pair||"?"}) — Binance usó USDC fallback`);
       }
 
-      return { ok: !mismatch, mode: "BNB", expected, deltaReal: bnbDelta, mismatch };
+      return { ok: !mismatch, mode: "BNB", expected, deltaReal: bnbDelta, mismatch, pair, qtyTraded };
     } else {
-      // Modo USDC predicho — BNB NO debería haber bajado.
+      // Modo USDC predicho — BNB NO debería haber bajado (ajustado por par).
       if (bnbDelta > 1e-5) {
-        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho USDC pero BNB bajó ${bnbDelta.toFixed(6)}`);
+        console.warn(`[SIMPLE][FEE] ${strategyId} ${kind} predicho USDC pero BNB bajó ${bnbDelta.toFixed(6)} (pair=${pair||"?"})`);
       }
-      return { ok: true, mode: "USDC", deltaReal: bnbDelta, mismatch: false };
+      return { ok: true, mode: "USDC", deltaReal: bnbDelta, mismatch: false, pair, qtyTraded };
     }
   }
 
@@ -1577,6 +1672,9 @@ class SimpleBotEngine {
       capitalEfectivo:  this._capitalEfectivo,
       usdcLibre:        this._usdcLibre,
       valorPosiciones:  this._valorPosiciones,
+      // ── BUG B: contabilidad explícita de PnL (20 abr 2026) ─────────────
+      realizedPnl:      +Number(this.realizedPnl || 0).toFixed(6),
+      totalFees:        +Number(this.totalFees || 0).toFixed(6),
       capitalSync: {
         lastTs:      this._lastCapitalSyncTs,
         ok:          this._lastCapitalSyncOk,
@@ -1615,6 +1713,12 @@ class SimpleBotEngine {
       capitalEfectivo: this._capitalEfectivo,
       usdcLibre:       this._usdcLibre,
       valorPosiciones: this._valorPosiciones,
+      // ── BUG B: contabilidad explícita de PnL persistida (20 abr 2026) ──
+      // Sin esto, un restart perdía todo histórico de PnL acumulado. Al estar
+      // persistidos junto con stratTrades, el bot puede reconstruir su
+      // contabilidad completa tras cualquier pm2 restart.
+      realizedPnl:     Number.isFinite(this.realizedPnl) ? +Number(this.realizedPnl).toFixed(6) : 0,
+      totalFees:       Number.isFinite(this.totalFees)   ? +Number(this.totalFees).toFixed(6)   : 0,
       // ── T0-FEE: fee mode + BNB balance + latch ────────────────────────
       bnbFeeEnabled:   this._bnbFeeEnabled,
       bnbBalance:      this._bnbBalance,

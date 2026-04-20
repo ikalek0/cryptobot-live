@@ -199,28 +199,46 @@ function startCommandListener(getState, botControls, initialPaused=false) {
                 );
               }
               else if(text.startsWith("/capital ")) {
+                // Tarea B (20 abr 2026): /capital V = "el usuario declara que su
+                // capital baseline ahora es V" (deposit/withdraw explícito). La
+                // nueva semántica PRESERVA realizedPnl. Para borrar el histórico
+                // contable usar /reset-contable (ver abajo).
                 const val = parseFloat(text.split(" ")[1]);
-                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10)"); }
-                // F4: hard ceiling $500 (5× INITIAL). Sin techo, un typo
-                // /capital 10000 (en lugar de 100) escala el bot a $10k →
-                // Half-Kelly de $10k = posiciones de ~$1500 → órdenes BUY a
-                // Binance que vacían el balance real al primer trade. Para
-                // cambios mayores, editar .env directamente.
+                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10). Semántica: declara nuevo baseline, preserva PnL acumulado. Para reset duro usar /reset-contable."); }
                 else if(val > 500) { send("❌ Capital máximo $500 (5× INITIAL). Para cambios mayores edita .env directamente."); }
                 else {
-                  // F3: rechazar si hay posiciones abiertas. Recalcular cash
-                  // descontando invested es semánticamente ambiguo (qué pasa
-                  // con stops mid-flight, con capa1 vs capa2, con reservas
-                  // pending). Reject simple es la única vía sin bugs.
                   const simpleSnap = botControls?.getSimpleState?.();
                   const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
                   if(openPos > 0) {
                     send(`❌ No puedo cambiar capital con ${openPos} posición(es) abiertas. Cierra posiciones primero o espera a que cierren solas.`);
                   } else if(botControls?.setCapital) {
-                    botControls.setCapital(val);
-                    send(`✅ Capital actualizado a $${val} USDC`);
+                    try {
+                      botControls.setCapital(val);
+                      const rp = Number(simpleSnap?.realizedPnl || 0);
+                      send(`✅ Capital baseline actualizado a $${val} USDC\nrealizedPnl preservado: ${rp>=0?"+":""}$${rp.toFixed(4)}\nSi querías reset contable duro usa /reset-contable.`);
+                    } catch(e) {
+                      send(`❌ ${e.message || "Error cambiando capital"}`);
+                    }
                   } else { send("❌ Comando no disponible"); }
                 }
+              }
+              else if(text==="/reset-contable") {
+                // Tarea B (20 abr 2026): reset contable duro. Borra realizedPnl,
+                // totalFees, peakTv, ddAlert*, ddCircuitBreakerTripped del
+                // simpleBot vivo. Histórico sigue en stratTrades + trade_log PG.
+                const simpleSnap = botControls?.getSimpleState?.();
+                const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
+                if(openPos > 0) {
+                  send(`❌ No puedo reset contable con ${openPos} posición(es) abiertas. Cierra primero.`);
+                } else if(botControls?.resetAccounting) {
+                  try {
+                    const r = botControls.resetAccounting();
+                    const b = r?.before || {};
+                    send(`♻️ <b>Reset contable aplicado</b>\nrealizedPnl: ${(b.realizedPnl||0).toFixed(4)}→0\ntotalFees: ${(b.totalFees||0).toFixed(4)}→0\npeakTv: ${b.peakTv||"null"}→null\nCB y alertas DD reseteadas.\nBaseline declarado preservado ($${simpleSnap?.capitalDeclarado||"—"}).`);
+                  } catch(e) {
+                    send(`❌ ${e.message || "Error reset contable"}`);
+                  }
+                } else { send("❌ Comando no disponible"); }
               }
               else if(text==="/semana") send(buildWeekly(s));
               else if(text==="/pausa") {
@@ -241,7 +259,8 @@ function startCommandListener(getState, botControls, initialPaused=false) {
                 `/kelly — Kelly gate por estrategia\n` +
                 `/sizing — sizing actual por estrategia\n` +
                 `/health — health check del sistema\n` +
-                `/capital [n] — cambiar capital (ej: /capital 110)\n` +
+                `/capital [n] — declara nuevo baseline, PRESERVA PnL histórico\n` +
+                `/reset-contable — reset duro (realizedPnl, peakTv, CB, alertas)\n` +
                 `/semana — resumen de los últimos 7 días\n` +
                 `/pausa — pausar entradas (stops siguen activos)\n` +
                 `/reanudar — reanudar operaciones\n` +
@@ -263,7 +282,7 @@ function startCommandListener(getState, botControls, initialPaused=false) {
     req.setTimeout(25000,()=>{req.destroy();setTimeout(poll,1000);});
   }
   poll();
-  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /sizing /health /capital /semana /pausa /reanudar /ayuda");
+  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /sizing /health /capital /reset-contable /semana /pausa /reanudar /ayuda");
   return { isPaused: () => paused };
 }
 

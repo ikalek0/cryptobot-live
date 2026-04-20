@@ -77,7 +77,8 @@ describe("BATCH-3 FIX #6 — engine_simple.js source check", () => {
   // Find the actual async syncCapitalFromBinance method definition
   const fnIdx = engineSrc.indexOf("async syncCapitalFromBinance(");
   assert.ok(fnIdx >= 0, "syncCapitalFromBinance method must exist");
-  const fnBody = engineSrc.slice(fnIdx, fnIdx + 12000);
+  // 30000 chars: el guard PAPER-LIVE (20 abr 2026) añadió ~1500 chars al inicio.
+  const fnBody = engineSrc.slice(fnIdx, fnIdx + 30000);
 
   it("committedC1 uses _investWithFee (not invest nominal)", () => {
     // The committed calculation is a multi-line reduce
