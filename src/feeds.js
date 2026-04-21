@@ -154,7 +154,10 @@ function runNightlyReplay(history, optimizerParams, externalKlines={}) {
   ];
 
   const results=[];
-  const FEE = 0.00075 * 2; // BNB fee round-trip
+  // Tarea C (20 abr 2026): parametrizado por USE_BNB_DISCOUNT (default false).
+  // Round-trip = 2 × per-leg. BNB=0.00075, USDC=0.001.
+  const _USE_BNB_DISCOUNT = String(process.env.USE_BNB_DISCOUNT || "false").toLowerCase() === "true";
+  const FEE = (_USE_BNB_DISCOUNT ? 0.00075 : 0.001) * 2; // round-trip
 
   for(const params of variants){
     let wins=0, losses=0, totalPnl=0, pnls=[];

@@ -15,7 +15,9 @@ const engineSrc = fs.readFileSync(
 
 const fnIdx = engineSrc.indexOf("async syncCapitalFromBinance(");
 assert.ok(fnIdx >= 0);
-const fnBody = engineSrc.slice(fnIdx, fnIdx + 15000);
+// 30000 chars to accommodate the guard/comments added by the 20 abr 2026 fix
+// (BUG B PAPER-LIVE guard). Original 15000 slice became insufficient.
+const fnBody = engineSrc.slice(fnIdx, fnIdx + 30000);
 
 describe("BATCH-4 FIX #5 — sync error H7 Math.max", () => {
   it("BATCH-4 FIX #5 comment present", () => {

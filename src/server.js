@@ -24,6 +24,7 @@ const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 const S = require("./trading/state");
+const { getReportingState } = require("./reporting_state");
 const wsAuth     = require("./ws_auth");
 const { SlidingWindowLimiter, extractIp } = require("./rate_limit");
 const secrets    = require("./secrets");
@@ -425,7 +426,21 @@ for(const sp of simplePairs){
   tg.testTelegram && tg.testTelegram();
   // Auto reports disabled — use /situacion on demand
   S.tgControls = tg.startCommandListener(
-  () => ({...S.bot.getState(), instance:S.bot.mode, syncHistory: S.syncHistory, dailyPnlPct:S.bot._dailyPnlPct||0, momentumMult:S.bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
+  // BUG A fix (20 abr 2026, commit 3): callback usa getReportingState(S)
+  // para que totalValue/returnPct/winRate/log/portfolio/cash/trades/
+  // realizedPnl/totalFees vengan de S.simpleBot (fuente real) en vez de
+  // S.bot (zombie no-op). Contexto de mercado (marketRegime, fearGreed,
+  // prices, dailyTrades) sigue viniendo de S.bot via el spread interno
+  // del helper. Consumido por /estado, /posiciones, /semana→buildWeekly,
+  // buildDaily si alguien vuelve a enganchar scheduleReports.
+  () => ({
+    ...getReportingState(S),
+    instance:S.bot.mode,
+    syncHistory: S.syncHistory,
+    dailyPnlPct:S.bot._dailyPnlPct||0,
+    momentumMult:S.bot.hourMultiplier||1,
+    cryptoPanic:cryptoPanic.getStatus(),
+  }),
   {
     getBalance:    getAccountBalance,
     // F2: source of truth for paused = simpleBot.paused (persisted on disk).
@@ -443,12 +458,18 @@ for(const sp of simplePairs){
     setCapital:    (v) => {
       // BATCH-1 FIX #9 (#2): delega en setCapitalEverywhere para propagar
       // a simpleBot._capitalDeclarado y respetar invest comprometido.
+      // Tarea B (20 abr 2026): nueva semántica preserva realizedPnl.
       try {
         setCapitalEverywhere(Number(v));
       } catch (e) {
         console.warn("[TG] setCapital rechazado:", e.message);
         throw e;
       }
+    },
+    // Tarea B (20 abr 2026): nuevo comando /reset-contable — hard reset.
+    resetAccounting: () => {
+      try { return resetAccounting(); }
+      catch (e) { console.warn("[TG] resetAccounting rechazado:", e.message); throw e; }
     },
   },
   // F2: initialPaused — boot con paused restaurado de disco
@@ -717,12 +738,20 @@ app.get("/api/simpleBot/state", (_,res) => {
     // ── A10: pause flags para watchdog externo ────────────────────────
     paused,
     tgControlsPaused,
-    // ── T0: capital dinámico (min(declarado, real)) ───────────────────
+    // ── T0: capital dinámico ──────────────────────────────────────────
+    // Tarea B (20 abr 2026): efectivo=real en LIVE (sin cap min()). Ver
+    // syncCapitalFromBinance. Sigue siendo min(declarado, real) conceptualmente
+    // sólo en display antiguo; el engine calcula con efectivo=real en LIVE.
     capitalDeclarado: sb._capitalDeclarado,
     capitalReal:      sb._capitalReal,
     capitalEfectivo:  sb._capitalEfectivo,
     usdcLibre:        sb._usdcLibre,
     valorPosiciones:  sb._valorPosiciones,
+    // ── BUG B: contabilidad explícita de PnL (20 abr 2026) ─────────────
+    // realizedPnl = $ netos acumulados (SELL.expectedNet − BUY.cashDebit) desde boot
+    // o desde último /reset-contable. totalFees = $ fees USDC equivalentes acumulados.
+    realizedPnl:      +Number(sb.realizedPnl || 0).toFixed(6),
+    totalFees:        +Number(sb.totalFees || 0).toFixed(6),
     // BUG-4: alias en raíz para watchdogs que no quieran navegar capitalSync.
     // Ahora usa sentinel FAR_FUTURE en vez de null para distinguir
     // "pausado indefinidamente" (CB tripped) de "dato ausente". Los flags
@@ -810,13 +839,20 @@ app.get("/api/myip-egress", (req,res)=>{
 // ScoreScore de confianza — consumido por BAFIR dashboard
 app.get("/api/confidence", (_,res) => {
   if(!S.bot) return res.status(503).json({error:"Bot no iniciado"});
+  // ── Cleanup BUG D (20 abr 2026): drawdown leído del simpleBot ─────────
+  // Antes: S.bot.getState().drawdownPct, que se calcula sobre this.maxEquity
+  // del engine zombie cuyo totalValue() está congelado en INITIAL_CAPITAL.
+  // Ahora: del simpleBot (fuente de verdad), con fallback al zombie 0.
+  const simpleDD = (typeof S.simpleBot?.getState === "function")
+    ? Number(S.simpleBot.getState().drawdownPct || 0)
+    : 0;
   res.json({
     score: S.bot.confidence.get(),
     label: S.bot.confidence.getLabel(),
     color: S.bot.confidence.getColor(),
     blacklist: S.bot.autoBlacklist.getStatus(),
     winRate: S.bot.recentWinRate(),
-    drawdown: S.bot.getState().drawdownPct,
+    drawdown: simpleDD,
   });
 });
 // Reset endpoint eliminado por seguridad — no exponer esta funcionalidad
@@ -971,6 +1007,21 @@ app.post("/api/set-capital", mutationLimiter, (req,res) => {
     reserve: +(n * 0.15).toFixed(2),
     maxOperable: +(n * 0.85).toFixed(2),
   });
+});
+
+// ── Tarea B (20 abr 2026): /api/reset-accounting ────────────────────────
+// Reset contable duro. Opuesto semántico de /api/set-capital (que preserva
+// realizedPnl). Ver setResetContable() arriba. Guard: rechaza si hay
+// posiciones abiertas. Requiere BOT_SECRET y pasa por mutationLimiter.
+app.post("/api/reset-accounting", mutationLimiter, (req,res) => {
+  const { secret } = req.body || {};
+  if (!checkBotSecret(secret)) return onAuthFailure(req, res);
+  try {
+    const r = resetAccounting();
+    res.json({ ok: true, reset: r.before });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
 });
 
 // ── Historial de sincronizaciones ─────────────────────────────────────────────
@@ -1208,27 +1259,35 @@ function _capitalSyncDeps() {
     binanceReadOnlyRequest,
     binancePublicRequest: (m, p, q) => require("./binance_client").publicRequest(m, p, q),
     telegramSend: (msg) => { try { tg.send && tg.send(msg); } catch {} },
+    // BUG B fix (20 abr 2026): propagar LIVE_MODE para que syncCapitalFromBinance
+    // haga short-circuit en PAPER-LIVE. Sin esta flag el sync corría igualmente
+    // si había API keys y reseteaba capas cada 5 min, borrando realizedPnl virtual.
+    liveMode: LIVE_MODE,
   };
 }
 
-// ── BATCH-1 FIX #9 (#2): setCapitalEverywhere ────────────────────────────
-// Antes había DOS paths para actualizar capital (TG callback + HTTP
-// /api/set-capital) y cada uno tenía un bug distinto:
-//   - TG callback: sobrescribía capa1Cash/capa2Cash ignorando `invest`
-//     comprometido en posiciones abiertas (dinero fantasma).
-//   - HTTP endpoint: NO tocaba simpleBot en absoluto. El simpleBot seguía
-//     operando con INITIAL_CAPITAL del boot. Cambiar via HTTP era no-op
-//     para el pipeline real de trades.
-// Además, ninguno actualizaba `_capitalDeclarado`, por lo que el próximo
-// tick de syncCapitalFromBinance revertía cualquier cambio a INITIAL_CAPITAL.
+// ── BATCH-1 FIX #9 (#2) + Tarea B (20 abr 2026): setCapitalEverywhere ────
 //
-// Esta helper es la ÚNICA forma legítima de cambiar capital en runtime:
-//   1) Valida el input (>0 y <$1M como sanity check operativo)
-//   2) Actualiza S.CAPITAL_USDT (display/reporte)
-//   3) Actualiza S.bot.cash (zombie engine, no opera pero se muestra)
-//   4) Actualiza S.simpleBot._capitalDeclarado (source of truth del engine)
-//   5) Recalcula capa1Cash/capa2Cash RESPETANDO el invest comprometido
-//   6) Dispara syncCapitalFromBinance inmediatamente (fire-and-forget)
+// SEMÁNTICA DE /capital (20 abr 2026 — redefinida):
+//   "/capital V" = "el usuario ha depositado/retirado dinero hasta dejar
+//   el baseline declarado en V". NO es un reset contable.
+//   - _capitalDeclarado = V (nuevo baseline).
+//   - realizedPnl se PRESERVA (el histórico sigue válido, solo ha cambiado
+//     el baseline contable).
+//   - capa1/capa2 redistribuidas como (V + realizedPnl) * split - committed
+//     para que el PnL acumulado siga reflejado en las capas.
+//   - peakTv NO se toca (sigue siendo el high-water mark histórico).
+//   - ddAlert* y ddCircuitBreakerTripped NO se resetean (el DD relativo al
+//     peak sigue siendo válido).
+//   - Guard: rechaza si hay posiciones abiertas (consistencia con el guard
+//     de tg.js que ya hacía esto desde el Telegram).
+//
+// Para el caso "quiero reset contable desde cero" existe setResetContable()
+// (expuesto como /reset-contable y /api/reset-accounting). Ese sí hace:
+//   realizedPnl=0, peakTv=null, ddAlert*=false, ddCircuitBreakerTripped=false.
+//
+// Las dos semánticas están separadas a propósito para evitar la ambigüedad
+// previa donde /capital hacía reset silencioso del PnL histórico.
 function setCapitalEverywhere(newCap) {
   if (typeof newCap !== "number" || !Number.isFinite(newCap) || newCap <= 0) {
     throw new Error("capital must be a finite number > 0");
@@ -1236,33 +1295,75 @@ function setCapitalEverywhere(newCap) {
   if (newCap > 1e6) {
     throw new Error("capital sanity check failed (>$1M)");
   }
+  // Tarea B: rechazar si hay posiciones abiertas. El guard ya existía en el
+  // comando /capital de Telegram (tg.js:216-223) pero NO en el endpoint HTTP
+  // /api/set-capital — este check centraliza la guarda para ambos paths.
+  if (S.simpleBot && S.simpleBot.portfolio) {
+    const openCount = Object.keys(S.simpleBot.portfolio).length;
+    if (openCount > 0) {
+      throw new Error(`cannot change capital with ${openCount} open position(s) — close them first`);
+    }
+  }
   S.CAPITAL_USDT = newCap;
   if (S.bot) {
-    // Si el bot tenía más cash declarado del que ahora permitimos, bajarlo.
     if (typeof S.bot.cash === "number" && S.bot.cash > newCap) S.bot.cash = newCap;
   }
   if (S.simpleBot) {
     S.simpleBot._capitalDeclarado = newCap;
-    // Respetar `invest` comprometido por capa.
-    const portfolio = S.simpleBot.portfolio || {};
-    const committedC1 = Object.values(portfolio)
-      .filter(p => p && p.capa === 1)
-      .reduce((s, p) => s + (Number(p.invest) || 0), 0);
-    const committedC2 = Object.values(portfolio)
-      .filter(p => p && p.capa === 2)
-      .reduce((s, p) => s + (Number(p.invest) || 0), 0);
-    S.simpleBot.capa1Cash = Math.max(0, newCap * 0.60 - committedC1);
-    S.simpleBot.capa2Cash = Math.max(0, newCap * 0.40 - committedC2);
-    // Sync inmediato con Binance (fire-and-forget). Si falla, el safety-check
-    // periódico lo retoma en 5min; mientras tanto opera con lo que acabamos
-    // de setear.
+    // Tarea B: preservar realizedPnl al redistribuir.
+    // operational = newCap + realizedPnl = lo que el bot tiene disponible.
+    // Redistribución 60/40 del operational. committed=0 porque acabamos
+    // de rechazar open positions arriba.
+    const rp = Number.isFinite(S.simpleBot.realizedPnl) ? S.simpleBot.realizedPnl : 0;
+    const operational = Math.max(0, newCap + rp);
+    S.simpleBot.capa1Cash = operational * 0.60;
+    S.simpleBot.capa2Cash = operational * 0.40;
+    // Sync inmediato en LIVE; en PAPER skip (guard interno devuelve early).
     if (typeof S.simpleBot.syncCapitalFromBinance === "function") {
       Promise.resolve(S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps()))
         .catch(e => console.warn("[SET-CAPITAL] sync failed:", e && e.message));
     }
   }
-  console.log(`[SET-CAPITAL] Capital actualizado a $${newCap.toFixed(2)}`);
-  return { ok: true, capital: newCap };
+  console.log(`[SET-CAPITAL] Capital declarado = $${newCap.toFixed(2)} (realizedPnl preservado)`);
+  return { ok: true, capital: newCap, realizedPnlPreserved: true };
+}
+
+// ── Tarea B (20 abr 2026): reset contable duro ─────────────────────────
+// Opuesto semántico de setCapitalEverywhere. No cambia _capitalDeclarado,
+// solo borra el histórico contable:
+//   - realizedPnl = 0 (cualquier PnL acumulado se archiva mentalmente — sigue
+//     vivo en stratTrades/trade_log/PostgreSQL para forense; lo que cambia es
+//     que NO aparece en el ledger vivo del bot).
+//   - totalFees = 0
+//   - peakTv = null (el próximo getState lo re-inicializa a totalValue actual).
+//   - ddAlert3/5/10 = false, ddCircuitBreakerTripped = false (un reset
+//     contable implica "empezar de cero" así que las alertas/CB del ciclo
+//     anterior ya no aplican).
+// Guard: rechaza si hay posiciones abiertas.
+function resetAccounting() {
+  if (!S.simpleBot) throw new Error("simpleBot not initialized");
+  const openCount = Object.keys(S.simpleBot.portfolio || {}).length;
+  if (openCount > 0) {
+    throw new Error(`cannot reset accounting with ${openCount} open position(s) — close them first`);
+  }
+  const before = {
+    realizedPnl: S.simpleBot.realizedPnl || 0,
+    totalFees:   S.simpleBot.totalFees   || 0,
+    peakTv:      S.simpleBot._peakTv,
+  };
+  S.simpleBot.realizedPnl = 0;
+  S.simpleBot.totalFees   = 0;
+  S.simpleBot._peakTv     = null;
+  S.simpleBot._ddAlert3   = false;
+  S.simpleBot._ddAlert5   = false;
+  S.simpleBot._ddAlert10  = false;
+  S.simpleBot._ddCircuitBreakerTripped = false;
+  // Redistribuir capas sobre el _capitalDeclarado actual sin PnL histórico.
+  const cap = S.simpleBot._capitalDeclarado || 100;
+  S.simpleBot.capa1Cash = cap * 0.60;
+  S.simpleBot.capa2Cash = cap * 0.40;
+  console.log(`[RESET-ACCOUNTING] realizedPnl ${before.realizedPnl.toFixed(4)}→0 · totalFees ${before.totalFees.toFixed(4)}→0 · peakTv ${before.peakTv}→null · CB reset`);
+  return { ok: true, before };
 }
 
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
@@ -1417,6 +1518,10 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
       // adjuntó a la posición en _onCandleClose. Solo log+telegram, no mueve
       // dinero (la única fuente de verdad para BNB es Binance vía el sync).
       if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
+        // BUG C (20 abr 2026): pasar qtyTraded = realQty (BNB comprado si es
+        // par BNB*) al fee check, para que ajuste bnbDelta por el flujo
+        // del par y no dispare falso positivo "BNB no bajó".
+        const _qtyForCheck = realQty;
         S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())
           .then(() => {
             try {
@@ -1425,7 +1530,8 @@ async function placeLiveBuy(symbol, usdtAmount, ctx) {
               if (pred && typeof S.simpleBot._checkFeeDiscrepancy === "function") {
                 S.simpleBot._checkFeeDiscrepancy(
                   ctx.strategyId, "BUY", pred,
-                  (msg) => { try { tg.send && tg.send(msg); } catch {} }
+                  (msg) => { try { tg.send && tg.send(msg); } catch {} },
+                  { qtyTraded: _qtyForCheck }
                 );
               }
             } catch(e) { console.error(`[LIVE][FEE-CHECK-BUY] ${ctx.strategyId}:`, e.message); }
@@ -1588,6 +1694,10 @@ async function placeLiveSell(symbol, quantity, ctx) {
         }
         // ── T0: re-sync capital post-fill, encadenado a T0-FEE check ──────
         if (S.simpleBot && typeof S.simpleBot.syncCapitalFromBinance === "function") {
+          // BUG C (20 abr 2026): pasar qtyTraded = sum fills qty real (BNB
+          // vendido si es par BNB*) al fee check. Para no-BNB pairs el
+          // ajuste es inerte (qty se ignora en check interno).
+          const _realSoldQty = (order.fills || []).reduce((s,f)=>s+parseFloat(f.qty||0),0);
           S.simpleBot.syncCapitalFromBinance(_capitalSyncDeps())
             .then(() => {
               try {
@@ -1595,7 +1705,8 @@ async function placeLiveSell(symbol, quantity, ctx) {
                 if (pred && typeof S.simpleBot._checkFeeDiscrepancy === "function") {
                   S.simpleBot._checkFeeDiscrepancy(
                     ctx.strategyId, "SELL", pred,
-                    (msg) => { try { tg.send && tg.send(msg); } catch {} }
+                    (msg) => { try { tg.send && tg.send(msg); } catch {} },
+                    { qtyTraded: _realSoldQty }
                   );
                 }
               } catch(e) { console.error(`[LIVE][FEE-CHECK-SELL] ${ctx?.strategyId}:`, e.message); }

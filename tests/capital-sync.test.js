@@ -176,8 +176,11 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 
-  describe("Escenario 3: real > declarado → efectivo = declarado (cap)", () => {
-    it("$500 real vs $100 declarado → efectivo=$100 (ignora exceso)", async () => {
+  describe("Escenario 3: real > declarado + rp → efectivo capado por operationalCap", () => {
+    it("$500 real vs declarado=$100 rp=0 → efectivo=$100 (exceso invisible, aislamiento fondos personales)", async () => {
+      // Tarea B corregida (20 abr 2026): operationalCap = max(0, declarado + rp).
+      // El bot nunca reclama fondos por encima del baseline declarado + PnL acumulado,
+      // manteniendo aislados los fondos personales del user en la misma cuenta spot.
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(500),
@@ -185,9 +188,9 @@ describe("T0 — Capital dinámico", () => {
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 500);
-      assert.equal(r.capitalEfectivo, 100, "efectivo debe capearse al declarado");
-      assert.ok(Math.abs(eng.capa1Cash - 60) < 0.01);
-      assert.ok(Math.abs(eng.capa2Cash - 40) < 0.01);
+      assert.equal(r.capitalEfectivo, 100, "efectivo=min(real, declarado+rp)=min(500,100)=100");
+      assert.ok(Math.abs(eng.capa1Cash - 60) < 0.01, `capa1Cash=60`);
+      assert.ok(Math.abs(eng.capa2Cash - 40) < 0.01, `capa2Cash=40`);
     });
   });
 
@@ -286,16 +289,18 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 
-  describe("Invariante del cap: jamás > declarado", () => {
-    it("aunque real=$9999, capitalEfectivo sigue siendo 100", async () => {
+  describe("Tarea B corregida (20 abr 2026): efectivo ≤ operationalCap", () => {
+    it("real=$9999 con declarado=100 rp=0 → capitalEfectivo=100 (exceso invisible)", async () => {
+      // Garantía de aislamiento: fondos personales en la misma cuenta spot
+      // NO son operativos. Sólo trades reales (rp>0) o /capital explícito
+      // pueden elevar el cap operativo.
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(9999),
         binancePublicRequest: makeFakeBinance(9999),
       });
       assert.equal(r.capitalEfectivo, 100);
-      assert.ok(eng.capa1Cash + eng.capa2Cash <= 100.001,
-        `cash total ${eng.capa1Cash + eng.capa2Cash} debe ≤ 100`);
+      assert.ok(Math.abs(eng.capa1Cash + eng.capa2Cash - 100) < 0.01);
     });
   });
 

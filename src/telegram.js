@@ -2,6 +2,7 @@
 "use strict";
 
 const https = require("https");
+const { handleResetContableInput, ARM_TEXT: _RC_ARM, CONFIRM_TEXT: _RC_CONFIRM } = require("./reset_contable_flow");
 const TOKEN   = process.env.TELEGRAM_TOKEN   || "";
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 
@@ -71,6 +72,12 @@ function notifyWeeklySummary(state) { send(buildWeekly(state)); }
 // ── Comandos Telegram ────────────────────────────────────────────────────────
 let lastUpdateId=0;
 let paused = false;
+// /reset-contable two-step confirm state (20 abr 2026). Módulo al nivel de
+// ficheros intencional: el listener vive en un closure por call de
+// startCommandListener, pero solo hay UN listener vivo → singleton de facto.
+// Si en el futuro se quiere soportar múltiples listeners, mover dentro del
+// closure. ResetContableFlow expone la máquina pura y testeable.
+let _resetContableArmedUntil = 0;
 function startCommandListener(getState, botControls, initialPaused=false) {
   // F2: restaurar paused desde disco (simpleBot.paused) en boot.
   // Si el bot fue pausado vía /pausa antes de un restart, debe arrancar pausado
@@ -199,27 +206,78 @@ function startCommandListener(getState, botControls, initialPaused=false) {
                 );
               }
               else if(text.startsWith("/capital ")) {
+                // Tarea B (20 abr 2026): /capital V = "el usuario declara que su
+                // capital baseline ahora es V" (deposit/withdraw explícito). La
+                // nueva semántica PRESERVA realizedPnl. Para borrar el histórico
+                // contable usar /reset-contable (ver abajo).
                 const val = parseFloat(text.split(" ")[1]);
-                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10)"); }
-                // F4: hard ceiling $500 (5× INITIAL). Sin techo, un typo
-                // /capital 10000 (en lugar de 100) escala el bot a $10k →
-                // Half-Kelly de $10k = posiciones de ~$1500 → órdenes BUY a
-                // Binance que vacían el balance real al primer trade. Para
-                // cambios mayores, editar .env directamente.
+                if(isNaN(val)||val<10) { send("❌ Formato: /capital 110 (mínimo $10). Semántica: declara nuevo baseline, preserva PnL acumulado. Para reset duro usar /reset-contable."); }
                 else if(val > 500) { send("❌ Capital máximo $500 (5× INITIAL). Para cambios mayores edita .env directamente."); }
                 else {
-                  // F3: rechazar si hay posiciones abiertas. Recalcular cash
-                  // descontando invested es semánticamente ambiguo (qué pasa
-                  // con stops mid-flight, con capa1 vs capa2, con reservas
-                  // pending). Reject simple es la única vía sin bugs.
                   const simpleSnap = botControls?.getSimpleState?.();
                   const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
                   if(openPos > 0) {
                     send(`❌ No puedo cambiar capital con ${openPos} posición(es) abiertas. Cierra posiciones primero o espera a que cierren solas.`);
                   } else if(botControls?.setCapital) {
-                    botControls.setCapital(val);
-                    send(`✅ Capital actualizado a $${val} USDC`);
+                    try {
+                      botControls.setCapital(val);
+                      const rp = Number(simpleSnap?.realizedPnl || 0);
+                      send(`✅ Capital baseline actualizado a $${val} USDC\nrealizedPnl preservado: ${rp>=0?"+":""}$${rp.toFixed(4)}\nSi querías reset contable duro usa /reset-contable.`);
+                    } catch(e) {
+                      send(`❌ ${e.message || "Error cambiando capital"}`);
+                    }
                   } else { send("❌ Comando no disponible"); }
+                }
+              }
+              else if(text === _RC_ARM || text === _RC_CONFIRM) {
+                // Tarea B corregida (20 abr 2026): flow de confirmación en dos pasos.
+                // - "/reset-contable": muestra valores actuales + arma timer 60s.
+                // - "/reset-contable CONFIRMAR" (case-sensitive) dentro de 60s: ejecuta.
+                // - CONFIRMAR fuera de ventana: pide rearmar.
+                // Guard no-positions se aplica en ambos (ARM preview + EXECUTE real).
+                const simpleSnap = botControls?.getSimpleState?.();
+                const openPos = Object.keys(simpleSnap?.portfolio||{}).length;
+                if(openPos > 0) {
+                  send(`❌ No puedo reset contable con ${openPos} posición(es) abiertas. Cierra primero.`);
+                } else {
+                  const now = Date.now();
+                  const decision = handleResetContableInput({ text, now, armedUntil: _resetContableArmedUntil });
+                  _resetContableArmedUntil = decision.newArmedUntil;
+                  if (decision.action === "ARM") {
+                    const rp = Number(simpleSnap?.realizedPnl || 0);
+                    const tf = Number(simpleSnap?.totalFees || 0);
+                    const pk = simpleSnap?.peakTv;
+                    send(
+                      `⚠️ <b>RESET CONTABLE — Confirmación requerida</b>\n` +
+                      `Valores actuales que se BORRARÁN del ledger vivo:\n` +
+                      `• realizedPnl: ${rp>=0?"+":""}$${rp.toFixed(4)}\n` +
+                      `• totalFees: $${tf.toFixed(4)}\n` +
+                      `• peakTv: ${pk!=null ? "$"+Number(pk).toFixed(4) : "null"}\n` +
+                      `• ddAlerts + CB se reseteanán\n\n` +
+                      `Histórico forense en stratTrades + trade_log PG SE PRESERVA.\n` +
+                      `Baseline declarado preservado ($${simpleSnap?.capitalDeclarado||"—"}).\n\n` +
+                      `Confirma con exactamente: <b>/reset-contable CONFIRMAR</b> (mayúsculas) en los próximos 60s.`
+                    );
+                  } else if (decision.action === "EXECUTE") {
+                    if (botControls?.resetAccounting) {
+                      try {
+                        const r = botControls.resetAccounting();
+                        const b = r?.before || {};
+                        send(
+                          `♻️ <b>Reset contable aplicado</b>\n` +
+                          `realizedPnl: ${(b.realizedPnl||0).toFixed(4)}→0\n` +
+                          `totalFees: ${(b.totalFees||0).toFixed(4)}→0\n` +
+                          `peakTv: ${b.peakTv||"null"}→null\n` +
+                          `CB y alertas DD reseteadas.\n` +
+                          `Baseline declarado preservado ($${simpleSnap?.capitalDeclarado||"—"}).`
+                        );
+                      } catch(e) {
+                        send(`❌ ${e.message || "Error reset contable"}`);
+                      }
+                    } else { send("❌ Comando no disponible"); }
+                  } else if (decision.action === "EXPIRED") {
+                    send(`❌ Ventana de confirmación expirada o no armada. Reinicia el flujo enviando <b>/reset-contable</b> primero.`);
+                  }
                 }
               }
               else if(text==="/semana") send(buildWeekly(s));
@@ -241,7 +299,8 @@ function startCommandListener(getState, botControls, initialPaused=false) {
                 `/kelly — Kelly gate por estrategia\n` +
                 `/sizing — sizing actual por estrategia\n` +
                 `/health — health check del sistema\n` +
-                `/capital [n] — cambiar capital (ej: /capital 110)\n` +
+                `/capital [n] — declara nuevo baseline, PRESERVA PnL histórico\n` +
+                `/reset-contable — ⚠️ HARD RESET: borra histórico contable vivo (realizedPnl, totalFees, peakTv, CB, alertas). Requiere confirmación en dos pasos. El histórico forense en stratTrades y trade_log PG se preserva — solo el ledger vivo del simpleBot se pone a cero.\n` +
                 `/semana — resumen de los últimos 7 días\n` +
                 `/pausa — pausar entradas (stops siguen activos)\n` +
                 `/reanudar — reanudar operaciones\n` +
@@ -263,7 +322,7 @@ function startCommandListener(getState, botControls, initialPaused=false) {
     req.setTimeout(25000,()=>{req.destroy();setTimeout(poll,1000);});
   }
   poll();
-  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /sizing /health /capital /semana /pausa /reanudar /ayuda");
+  console.log("[TG] Comandos: /estado /posiciones /estrategias /kelly /sizing /health /capital /reset-contable /semana /pausa /reanudar /ayuda");
   return { isPaused: () => paused };
 }
 
