@@ -65,13 +65,19 @@ describe("Regresión 20 abr 2026 — sync-overwrite borra realizedPnl en PAPER-L
     });
   });
 
-  it("contra-prueba: en LIVE_MODE el sync sí toca capas (ajusta a real/split)", () => {
+  it("contra-prueba LIVE con fix definitivo: efectivo=min(real, declarado+rp), deposit no declarado queda invisible", () => {
+    // Tarea B corregida (20 abr 2026): el primer fix "efectivo=real" era el bug
+    // opuesto catastrófico — user tenía $17.92 personales encima de $100 operativos
+    // y el bot los trataba como capital. Fix definitivo:
+    //   operationalCap = max(0, declarado + realizedPnl)
+    //   efectivo       = min(real, operationalCap)
+    // Aquí: real=120 pero declarado=100 rp=0 → operationalCap=100 → efectivo=100.
+    // Los $20 que Binance tiene de más NO son operativos hasta que el user
+    // haga /capital 120 para redeclarar el baseline.
     const eng = new SimpleBotEngine({});
     eng._capitalDeclarado = 100;
+    eng.realizedPnl = 0;
     eng.capa1Cash = 60; eng.capa2Cash = 40;
-
-    // Binance reporta USDC=120 (ganancia real 20%). Pre-fix, efectivo=min(100,120)=100
-    // truncaba la ganancia. Post-fix (Tarea B), efectivo=real=120 → capas suben.
     return eng.syncCapitalFromBinance({
       binanceReadOnlyRequest: makeFakeBinance(120),
       binancePublicRequest:   makeFakeBinance(120),
@@ -79,11 +85,10 @@ describe("Regresión 20 abr 2026 — sync-overwrite borra realizedPnl en PAPER-L
     }).then(r => {
       assert.equal(r.ok, true);
       assert.equal(r.skipped, undefined, "en LIVE no hay skip");
-      // real=120, efectivo=120 (NO min con declarado=100). Ganancia visible.
-      assert.ok(Math.abs(eng._capitalEfectivo - 120) < 0.01, `efectivo=120 (real), got ${eng._capitalEfectivo}`);
+      // real=120, operationalCap=max(0, 100+0)=100, efectivo=min(120,100)=100
+      assert.ok(Math.abs(eng._capitalEfectivo - 100) < 0.01, `efectivo=100 (cap), got ${eng._capitalEfectivo}`);
       const total = eng.capa1Cash + eng.capa2Cash;
-      // committed = 0 (sin posiciones abiertas) → split 60/40 de 120
-      assert.ok(Math.abs(total - 120) < 0.02, `capa1+capa2 ≈ 120 (refleja ganancia), got ${total}`);
+      assert.ok(Math.abs(total - 100) < 0.02, `capa1+capa2=100 (deposit no declarado invisible), got ${total}`);
     });
   });
 

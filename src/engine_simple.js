@@ -1025,18 +1025,27 @@ class SimpleBotEngine {
 
       const real       = usdcLibre + valorPosiciones;
       const declarado  = this._capitalDeclarado || INITIAL_CAPITAL;
-      // ── Tarea B (20 abr 2026) — efectivo = real en LIVE_MODE ─────────
-      // Antes: efectivo = Math.min(declarado, real). Esto truncaba ganancias
-      // reales: si el bot ganaba dinero y real > declarado, efectivo quedaba
-      // capado a declarado → capas no reflejaban el beneficio → bot no podía
-      // sizing sobre capital ganado hasta que el usuario subiese /capital
-      // manualmente, y ese /capital reseteaba el histórico, perdiendo el PnL.
-      //
-      // Fix: en LIVE_MODE, Binance es la fuente de verdad. efectivo = real.
-      // Las ganancias se reflejan inmediatamente en las capas y en sizing.
-      // La semántica de /capital ahora preserva realizedPnl (ver
-      // setCapitalEverywhere). Para reset duro, existe /reset-contable.
-      const efectivo   = real;
+      // ── Tarea B corregida (20 abr 2026) — efectivo acotado por operationalCap ──
+      // Antes del primer fix: efectivo = min(declarado, real) — truncaba ganancias
+      //   reales porque realizedPnl no se contaba en el cap.
+      // Primer fix (commit b7fafbd): efectivo = real — bug opuesto catastrófico:
+      //   si el user tenía $117.92 en Binance ($100 operativos + $17.92 personales),
+      //   el bot trataba los $17.92 personales como capital operativo.
+      // Fix definitivo: operationalCap = max(0, declarado + realizedPnl),
+      //   efectivo = min(real, operationalCap). Garantías:
+      //   - Fondos personales en la misma cuenta spot quedan invisibles (invariante
+      //     de aislamiento).
+      //   - Ganancias vía trades reales (realizedPnl>0) sí elevan el cap operativo
+      //     — coherente con que esas ganancias son "dinero del bot".
+      //   - Pérdidas (realizedPnl<0) bajan el cap operativo — el bot reduce sizing.
+      //   - Insolvencia (declarado+rp<0) → cap=0 vía Math.max — no capas negativas.
+      //   - withdrawal real (real<cap) → efectivo=real — conservador, bot no
+      //     asume más de lo que realmente hay.
+      //   - /capital v redeclarado sube declarado, sube cap inmediatamente —
+      //     único path legítimo para que el bot acceda a fondos nuevos.
+      const rp = Number.isFinite(this.realizedPnl) ? this.realizedPnl : 0;
+      const operationalCap = Math.max(0, declarado + rp);
+      const efectivo = Math.min(real, operationalCap);
 
       // 3) Ajustar capa1Cash / capa2Cash respetando:
       //    - el split 60/40 del EFECTIVO

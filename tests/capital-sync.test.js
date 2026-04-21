@@ -176,12 +176,11 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 
-  describe("Escenario 3: real > declarado → efectivo = real (Tarea B 20 abr 2026)", () => {
-    it("$500 real vs $100 declarado → efectivo=$500 (Binance es fuente de verdad)", async () => {
-      // Tarea B (20 abr 2026): antes efectivo=min(declarado,real)=100 (truncaba
-      // ganancias). Ahora efectivo=real=500 → capas reflejan el capital real
-      // disponible. El user ajusta _capitalDeclarado con /capital explícito
-      // cuando quiere redeclarar el baseline.
+  describe("Escenario 3: real > declarado + rp → efectivo capado por operationalCap", () => {
+    it("$500 real vs declarado=$100 rp=0 → efectivo=$100 (exceso invisible, aislamiento fondos personales)", async () => {
+      // Tarea B corregida (20 abr 2026): operationalCap = max(0, declarado + rp).
+      // El bot nunca reclama fondos por encima del baseline declarado + PnL acumulado,
+      // manteniendo aislados los fondos personales del user en la misma cuenta spot.
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(500),
@@ -189,10 +188,9 @@ describe("T0 — Capital dinámico", () => {
       });
       assert.equal(r.ok, true);
       assert.equal(r.capitalReal, 500);
-      assert.equal(r.capitalEfectivo, 500, "Tarea B: efectivo=real (no cap)");
-      // capa1 = 500*0.60 - 0 = 300; capa2 = 500*0.40 - 0 = 200
-      assert.ok(Math.abs(eng.capa1Cash - 300) < 0.01, `capa1Cash=${eng.capa1Cash}`);
-      assert.ok(Math.abs(eng.capa2Cash - 200) < 0.01, `capa2Cash=${eng.capa2Cash}`);
+      assert.equal(r.capitalEfectivo, 100, "efectivo=min(real, declarado+rp)=min(500,100)=100");
+      assert.ok(Math.abs(eng.capa1Cash - 60) < 0.01, `capa1Cash=60`);
+      assert.ok(Math.abs(eng.capa2Cash - 40) < 0.01, `capa2Cash=40`);
     });
   });
 
@@ -291,20 +289,18 @@ describe("T0 — Capital dinámico", () => {
     });
   });
 
-  describe("Tarea B (20 abr 2026): efectivo=real, sin cap artificial", () => {
-    it("real=$9999 → capitalEfectivo=9999 (Binance es source of truth)", async () => {
-      // Antes: invariante "efectivo jamás > declarado" — truncaba ganancias.
-      // Ahora: efectivo = real sin cap. El user ajusta _capitalDeclarado con
-      // /capital si quiere redefinir el baseline. Esto desbloquea sizing
-      // sobre ganancias reales.
+  describe("Tarea B corregida (20 abr 2026): efectivo ≤ operationalCap", () => {
+    it("real=$9999 con declarado=100 rp=0 → capitalEfectivo=100 (exceso invisible)", async () => {
+      // Garantía de aislamiento: fondos personales en la misma cuenta spot
+      // NO son operativos. Sólo trades reales (rp>0) o /capital explícito
+      // pueden elevar el cap operativo.
       const eng = new SimpleBotEngine({});
       const r = await eng.syncCapitalFromBinance({
         binanceReadOnlyRequest: makeFakeBinance(9999),
         binancePublicRequest: makeFakeBinance(9999),
       });
-      assert.equal(r.capitalEfectivo, 9999, "Tarea B: sin cap");
-      // capas distribuidas sobre real: 9999*0.60 = 5999.4 + 9999*0.40 = 3999.6 = 9999
-      assert.ok(Math.abs(eng.capa1Cash + eng.capa2Cash - 9999) < 0.01);
+      assert.equal(r.capitalEfectivo, 100);
+      assert.ok(Math.abs(eng.capa1Cash + eng.capa2Cash - 100) < 0.01);
     });
   });
 
