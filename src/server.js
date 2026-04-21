@@ -24,6 +24,7 @@ const { evaluateIncomingParams, calcSyncStats } = require("./sync");
 const { SimpleBotEngine } = require("./engine_simple");
 const tg         = require("./telegram");
 const S = require("./trading/state");
+const { getReportingState } = require("./reporting_state");
 const wsAuth     = require("./ws_auth");
 const { SlidingWindowLimiter, extractIp } = require("./rate_limit");
 const secrets    = require("./secrets");
@@ -425,7 +426,21 @@ for(const sp of simplePairs){
   tg.testTelegram && tg.testTelegram();
   // Auto reports disabled — use /situacion on demand
   S.tgControls = tg.startCommandListener(
-  () => ({...S.bot.getState(), instance:S.bot.mode, syncHistory: S.syncHistory, dailyPnlPct:S.bot._dailyPnlPct||0, momentumMult:S.bot.hourMultiplier||1, cryptoPanic:cryptoPanic.getStatus()}),
+  // BUG A fix (20 abr 2026, commit 3): callback usa getReportingState(S)
+  // para que totalValue/returnPct/winRate/log/portfolio/cash/trades/
+  // realizedPnl/totalFees vengan de S.simpleBot (fuente real) en vez de
+  // S.bot (zombie no-op). Contexto de mercado (marketRegime, fearGreed,
+  // prices, dailyTrades) sigue viniendo de S.bot via el spread interno
+  // del helper. Consumido por /estado, /posiciones, /semana→buildWeekly,
+  // buildDaily si alguien vuelve a enganchar scheduleReports.
+  () => ({
+    ...getReportingState(S),
+    instance:S.bot.mode,
+    syncHistory: S.syncHistory,
+    dailyPnlPct:S.bot._dailyPnlPct||0,
+    momentumMult:S.bot.hourMultiplier||1,
+    cryptoPanic:cryptoPanic.getStatus(),
+  }),
   {
     getBalance:    getAccountBalance,
     // F2: source of truth for paused = simpleBot.paused (persisted on disk).

@@ -5,6 +5,7 @@
 
 const S = require("./state");
 const tg = require("../telegram");
+const { getReportingState } = require("../reporting_state");
 const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchLongShortRatio, fetchFundingRate, fetchOpenInterest, fetchLiquidations, fetchBTCDominance, fetchCoinbasePremium, fetchExchangeFlow, fetchBinanceReserve, fetchRedditSentiment } = require("../feeds");
 const { getTradingScore } = require("../market");
 const { runIntradayWalkForward } = require("../backtest");
@@ -235,7 +236,15 @@ setInterval(async()=>{
     try {
       ({signals,newTrades,circuitBreaker,optimizerResult,drawdownAlert,dailyLimit,dailyUsed}=S.bot.evaluate());
       // evaluate() es no-op: devuelve signals=[], newTrades=[] pero actualiza régimen y equity
-      if(S.bot.tick%60===0){try{checkCapitalAlert(S.bot.getState());}catch(e){}}
+      // BUG A fix (20 abr 2026, commit 3): checkCapitalAlert necesita
+      // totalValue real (simpleBot), no el zombie congelado. getReportingState
+      // fusiona contexto de S.bot (marketRegime/fearGreed) con verdad
+      // financiera de S.simpleBot (totalValue, drawdownPct). s.recentWinRate
+      // no está en el merge — sigue leyéndose del campo del zombie que
+      // simpleBot no duplica; la alerta usa WR>=42 como gate operacional,
+      // el zombie no lo actualiza tras la migración así que el umbral es
+      // efectivamente inerte en el path zombie pero activo vía regimeToBull.
+      if(S.bot.tick%60===0){try{checkCapitalAlert(getReportingState(S));}catch(e){}}
     } catch(evalErr) {
       console.error("[LIVE] bot.evaluate() error:", evalErr.message);
       console.error(evalErr.stack?.split("\n").slice(0,3).join("\n"));
