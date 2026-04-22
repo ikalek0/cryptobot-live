@@ -1515,10 +1515,34 @@ class SimpleBotEngine {
     }
     // Slippage: reservamos `pos.invest` optimista. Si real > reservado, restar extra;
     // si real < reservado, devolver sobrante a la capa.
+    //
+    // ── BUG-G LOW (Cowork audit, 20 abr 2026) — floor al drift positivo ──
+    // Antes: `capa*Cash -= drift` sin clamp. Escenario borde: slippage positivo
+    // extremo (p.ej. pair iliquido con volatilidad brusca entre predicción y
+    // fill TWAP) combinado con capa ya casi agotada por otros BUYs concurrentes
+    // podía producir capa*Cash negativo. Aunque Math.max(0, ...) en syncCapitalFromBinance
+    // eventualmente lo limpia, durante la ventana entre reconcile y sync las
+    // capas negativas podían corromper comparaciones `invest > availCash`.
+    //
+    // Fix: drift positivo (coste real > esperado) se aplica con Math.min contra
+    // la capa disponible, y si hay residuo se loguea warning. Drift negativo
+    // (crédito por coste real < esperado) se aplica sin clamp — acreditar cash
+    // es siempre seguro. El residuo loggeado es observable vía [WARN] para que
+    // ops detecte pairs consistentemente problemáticos.
     const expectedSpent = pos.invest;
     const drift = realSpent - expectedSpent;
-    if(pos.capa===1) this.capa1Cash -= drift;
-    else             this.capa2Cash -= drift;
+    if (drift > 0) {
+      const capaKey = "capa" + pos.capa + "Cash";
+      const available = this[capaKey] || 0;
+      const applied = Math.min(drift, available);
+      this[capaKey] -= applied;
+      if (applied < drift) {
+        console.warn(`[SIMPLE][BUG-G] ${strategyId} drift $${drift.toFixed(4)} excede capa${pos.capa} disponible $${available.toFixed(4)} — aplicado $${applied.toFixed(4)}, residuo $${(drift - applied).toFixed(4)} (slippage extremo, asset recibido real qty=${realQty.toFixed(6)})`);
+      }
+    } else {
+      if (pos.capa === 1) this.capa1Cash -= drift;
+      else                this.capa2Cash -= drift;
+    }
     // FIX-M2: recomputar entryPrice/stop/target con precio real.
     // Derivamos los % originales desde el par (estimado) stop/target/entryPrice:
     //   stopPct   = 1 - stop/entryPrice
