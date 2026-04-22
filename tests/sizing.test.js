@@ -120,7 +120,8 @@ describe("Sizing through SimpleBotEngine", () => {
     bot.capa1Cash -= invest;
     bot.portfolio["BNB_1h_RSI"] = {
       pair: "BNBUSDC", capa: 1, entryPrice: price, qty, invest,
-      stop: price * 0.992, target: price * 1.016, openTs: Date.now()
+      stop: price * 0.992, target: price * 1.016, openTs: Date.now(),
+      status: "filled" // BUG-D: fixtures sintéticos deben marcar status explícito
     };
     assert.ok(Math.abs(bot.capa1Cash - (initialCapa1 - invest)) < 1e-9);
     // Fees aside, total value should be approximately CAP (minus fee on the invest)
@@ -518,7 +519,8 @@ describe("FIX-B: sizing base is min(tv, INITIAL_CAPITAL)", () => {
     // Inflate an existing position: entry 100, qty 1.0, current price 200 → mark-to-market = 200
     bot.portfolio["INFLATED"] = {
       pair: "BNBUSDC", capa: 1, invest: 20*K, qty: 1.0,
-      entryPrice: 100, stop: 99, target: 101, openTs: Date.now()
+      entryPrice: 100, stop: 99, target: 101, openTs: Date.now(),
+      status: "filled" // BUG-D: fixtures sintéticos deben marcar status explícito
     };
     bot.capa1Cash = 40*K;
     bot.capa2Cash = 40*K;
