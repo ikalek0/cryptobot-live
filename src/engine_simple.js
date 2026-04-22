@@ -1015,6 +1015,15 @@ class SimpleBotEngine {
       let valorPosiciones = 0;
       const missingPrices = [];
       for (const [stratId, pos] of Object.entries(this.portfolio || {})) {
+        // ── BUG-D MATIZ (Cowork audit): skip pending en valoración MTM ──
+        // Pending tiene qty estimada (invest/price pre-fill), pero en Binance
+        // aún no hay asset acreditado y el usdcLibre sigue reflejando el cash
+        // no gastado. Sumar MTM de pending doble-cuenta contra usdcLibre →
+        // real inflado → efectivo calculado en sync más alto → capa*Cash
+        // redistribuido sobre base fantasma. La ventana es corta (<5min hasta
+        // cleanup) pero dentro de ella el sync del intervalo 5min puede
+        // pillarla. Skip mantiene el invariante "solo asset confirmado cuenta".
+        if (pos.status !== "filled") continue;
         const px = this.prices[pos.pair];
         if (!px || px <= 0) { missingPrices.push(pos.pair); continue; }
         valorPosiciones += (pos.qty || 0) * px;
@@ -1374,6 +1383,22 @@ class SimpleBotEngine {
     }
     // Manage open positions
     for(const [id,pos] of Object.entries(this.portfolio)){
+      // ── BUG-D CRITICAL fix (Cowork audit, post-c5a992b) ──────────────
+      // Pending positions tienen entryPrice/stop/target ESTIMADOS pre-fill,
+      // computed en _onCandleClose línea 670 con el price del stream en el
+      // momento de la señal. Durante la ventana TWAP (hasta 90s en pares
+      // ilíquidos), applyRealBuyFill aún no ha reconciliado los valores con
+      // el fill real de Binance. Un tick adverso que cruce el stop estimado
+      // disparaba SELL fantasma contra Binance (realQty=0 → -2010 en LIVE,
+      // o contabilidad virtual incorrecta en PAPER), además de contaminar
+      // _stratTrades con pnlPct ficticio, mover capa, y dejar asset huérfano
+      // cuando applyRealBuyFill llegaba después a un portfolio[id] borrado.
+      //
+      // Fix: skip posiciones no filled. _cleanupStalePending (STALE_MS=5min)
+      // sigue procesándolas via su propio loop con reconciliación Binance.
+      // Con este guard, la ventana 5min de STALE_MS ya no es peligrosa —
+      // da margen holgado a latencia Binance sin SELL fantasma intermedio.
+      if (pos.status !== "filled") continue;
       const price = this.prices[pos.pair];
       if(!price) continue;
       const pnlPct=(price-pos.entryPrice)/pos.entryPrice*100;
@@ -1611,9 +1636,18 @@ class SimpleBotEngine {
   }
 
   totalValue(){
+    // ── BUG-D MATIZ (Cowork audit): skip pending en MTM sum ───────────────
+    // totalValue alimenta sizingBase en _onCandleClose:583 (Math.min(tv,capRef)).
+    // Si un pending infla tv durante la ventana TWAP, otras estrategias que
+    // evalúen en el mismo tick leen sizingBase optimista y pueden sobre-
+    // dimensionar sus BUYs. Cash de pending YA está descontado de capa1/2Cash,
+    // y su qty*price estimado NO representa asset real hasta applyRealBuyFill.
+    // Skip mantiene tv = cash disponible + MTM de asset realmente acreditado.
     return this.capa1Cash + this.capa2Cash +
-      Object.values(this.portfolio).reduce((s,pos)=>
-        s+pos.qty*(this.prices[pos.pair]||pos.entryPrice),0);
+      Object.values(this.portfolio).reduce((s,pos)=>{
+        if (pos.status !== "filled") return s;
+        return s + pos.qty * (this.prices[pos.pair] || pos.entryPrice);
+      }, 0);
   }
 
   globalWR(){
