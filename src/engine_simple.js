@@ -194,7 +194,14 @@ class SimpleBotEngine {
     // Regla: el bot jamás opera con más que DECLARADO. Si Binance tiene
     // menos, opera con menos. Si tiene más, el resto es invisible.
     // Posiciones fuera de this.portfolio (incidente 12 abril) NO cuentan.
-    this._capitalDeclarado      = INITIAL_CAPITAL;
+    // ── BUG-H fix (22 abr 2026) — _capitalDeclarado persistido ───────────
+    // Antes: asignación directa a INITIAL_CAPITAL ignoraba saved. Cualquier
+    // /capital N del usuario se perdía en el primer restart → syncCapital-
+    // FromBinance leía INITIAL_CAPITAL del .env y reseteaba capas. Dormant
+    // en PAPER-LIVE por el guard del commit b7fafbd; activo en LIVE cada
+    // 5min. Fix: leer saved.capitalDeclarado (sin underscore en JSON, mismo
+    // convención que capitalReal/capitalEfectivo) con fallback a INITIAL_CAPITAL.
+    this._capitalDeclarado      = saved.capitalDeclarado ?? INITIAL_CAPITAL;
     this._capitalReal           = saved.capitalReal     ?? INITIAL_CAPITAL;
     this._capitalEfectivo       = saved.capitalEfectivo ?? INITIAL_CAPITAL;
     this._usdcLibre             = saved.usdcLibre       ?? null;
@@ -580,8 +587,10 @@ class SimpleBotEngine {
     // ── Position sizing (FIX-B + T0: usar min(tv, capRef) para bloquear inflación por mark-to-market,
     // donde capRef = min(declarado, efectivo) — nunca superar lo declarado aunque Binance tenga más)
     const tv = this.totalValue();
-    const capDeclaradoLocal = this._capitalDeclarado || INITIAL_CAPITAL;
-    const capEfectivoLocal  = this._capitalEfectivo  || capDeclaradoLocal;
+    // BUG-H P3 (22 abr 2026): || → ?? para que _capitalDeclarado===0
+    // (insolvencia extrema declarada) NO caiga a INITIAL_CAPITAL.
+    const capDeclaradoLocal = this._capitalDeclarado ?? INITIAL_CAPITAL;
+    const capEfectivoLocal  = this._capitalEfectivo  ?? capDeclaradoLocal;
     const capRef            = Math.min(capDeclaradoLocal, capEfectivoLocal);
     const sizingBase = Math.min(tv, capRef);
     const kellyFrac = Math.max(0.05, Math.min(0.5, kelly.kelly || 0.1));
@@ -1033,7 +1042,8 @@ class SimpleBotEngine {
       }
 
       const real       = usdcLibre + valorPosiciones;
-      const declarado  = this._capitalDeclarado || INITIAL_CAPITAL;
+      // BUG-H P3 (22 abr 2026): || → ?? idem al caller de _onCandleClose.
+      const declarado  = this._capitalDeclarado ?? INITIAL_CAPITAL;
       // ── Tarea B corregida (20 abr 2026) — efectivo acotado por operationalCap ──
       // Antes del primer fix: efectivo = min(declarado, real) — truncaba ganancias
       //   reales porque realizedPnl no se contaba en el cap.
@@ -1778,6 +1788,10 @@ class SimpleBotEngine {
       // pero persistir evita el "ventana" de 5min sin valor conocido)
       capitalReal:     this._capitalReal,
       capitalEfectivo: this._capitalEfectivo,
+      // BUG-H (22 abr 2026): _capitalDeclarado persistido. Sin esto,
+      // /capital N se perdía en cada restart porque el constructor caía
+      // siempre a INITIAL_CAPITAL del .env.
+      capitalDeclarado: this._capitalDeclarado,
       usdcLibre:       this._usdcLibre,
       valorPosiciones: this._valorPosiciones,
       // ── BUG B: contabilidad explícita de PnL persistida (20 abr 2026) ──
