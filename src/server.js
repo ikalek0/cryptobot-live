@@ -1388,7 +1388,9 @@ function resetAccounting() {
   S.simpleBot._ddAlert10  = false;
   S.simpleBot._ddCircuitBreakerTripped = false;
   // Redistribuir capas sobre el _capitalDeclarado actual sin PnL histórico.
-  const cap = S.simpleBot._capitalDeclarado || 100;
+  // BUG-L: ?? en vez de || para consistencia con BUG-H. Con || un
+  // _capitalDeclarado=0 legítimo caería al default 100 silenciosamente.
+  const cap = S.simpleBot._capitalDeclarado ?? 100;
   S.simpleBot.capa1Cash = cap * 0.60;
   S.simpleBot.capa2Cash = cap * 0.40;
   console.log(`[RESET-ACCOUNTING] realizedPnl ${before.realizedPnl.toFixed(4)}→0 · totalFees ${before.totalFees.toFixed(4)}→0 · peakTv ${before.peakTv}→null · CB reset`);
