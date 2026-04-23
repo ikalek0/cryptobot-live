@@ -12,6 +12,7 @@ const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
 const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState, getClient: getDbClient } = require("./database");
+const { shutdown: bootShutdown } = require("./boot_hardening");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -1067,8 +1068,14 @@ async function save() {
   if(S.bot.regimeDetector) s.regimeDetector = S.bot.regimeDetector.serialize();
   await saveState(s);
 }
-process.on("SIGTERM",async()=>{await save();process.exit(0);});
-process.on("SIGINT", async()=>{await save();process.exit(0);});
+// BUG-I: antes, SIGTERM/SIGINT solo persistía S.bot (engine zombie) vía save();
+// S.simpleBot quedaba fuera → restart limpio podía perder hasta 60s de
+// realizedPnl, cambios de /capital, /reset-contable o fills recientes.
+// El patrón ya existía en uncaughtException (L1080-1094); la función shutdown
+// en src/boot_hardening.js lo replica para SIGTERM/SIGINT con try/catch
+// independientes para cada save.
+process.on("SIGTERM", () => bootShutdown("SIGTERM", { save, saveSimpleState, simpleBot: S.simpleBot }));
+process.on("SIGINT",  () => bootShutdown("SIGINT",  { save, saveSimpleState, simpleBot: S.simpleBot }));
 
 // ── Capturar errores no manejados — FIX-M5: persistir + morir limpiamente ───
 // Antes de M5 este handler solo logueaba y seguía, lo que dejaba el proceso
