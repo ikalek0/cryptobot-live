@@ -1905,6 +1905,10 @@ async function verifyLiveBalance() {
         }
       }
       for (const [id, pos] of Object.entries(S.simpleBot.portfolio || {})) {
+        // BUG-K: skip pending — tienen pos.qty reservada optimísticamente pero
+        // el fill aún está en vuelo en Binance (realQty=0) → falso positivo
+        // al restart que pausaba 30min. Mismo patrón que BUG-D una capa arriba.
+        if (pos.status !== "filled") continue;
         const asset = (pos.pair || "").replace(/USDC$|USDT$/, "");
         const bal = balances.find(b => b.asset === asset);
         const realQty = bal ? parseFloat(bal.free || 0) : 0;
