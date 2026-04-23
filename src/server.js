@@ -982,7 +982,7 @@ app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
   res.json({ok:true});
 });
 
-app.post("/api/set-capital", mutationLimiter, (req,res) => {
+app.post("/api/set-capital", mutationLimiter, async (req,res) => {
   const { secret, capitalUSD } = req.body || {};
   if (!checkBotSecret(secret))
     return onAuthFailure(req, res);
@@ -998,7 +998,11 @@ app.post("/api/set-capital", mutationLimiter, (req,res) => {
     return res.status(400).json({ error: "Capital sanity check failed (>$1M)" });
   }
   try {
-    setCapitalEverywhere(n);
+    // BUG-J: await saved antes del 200 — garantiza que el cambio de capital
+    // esté persistido en disco/PG antes de responder al cliente. Si PM2 mata
+    // el proceso justo después del 200, el estado ya está safe.
+    const r = setCapitalEverywhere(n);
+    await r.saved;
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -1014,11 +1018,13 @@ app.post("/api/set-capital", mutationLimiter, (req,res) => {
 // Reset contable duro. Opuesto semántico de /api/set-capital (que preserva
 // realizedPnl). Ver setResetContable() arriba. Guard: rechaza si hay
 // posiciones abiertas. Requiere BOT_SECRET y pasa por mutationLimiter.
-app.post("/api/reset-accounting", mutationLimiter, (req,res) => {
+app.post("/api/reset-accounting", mutationLimiter, async (req,res) => {
   const { secret } = req.body || {};
   if (!checkBotSecret(secret)) return onAuthFailure(req, res);
   try {
+    // BUG-J: await saved antes del 200. Ver nota en /api/set-capital.
     const r = resetAccounting();
+    await r.saved;
     res.json({ ok: true, reset: r.before });
   } catch (e) {
     return res.status(400).json({ error: e.message });
@@ -1332,7 +1338,23 @@ function setCapitalEverywhere(newCap) {
     }
   }
   console.log(`[SET-CAPITAL] Capital declarado = $${newCap.toFixed(2)} (realizedPnl preservado)`);
-  return { ok: true, capital: newCap, realizedPnlPreserved: true };
+  // BUG-J: persistir inmediato antes del return. Patrón {ok, ...datos, saved:
+  // Promise} en vez de async function porque telegram.js:222-228 captura
+  // throws síncronos de validación con try/catch sync; convertir a async
+  // rompería ese flujo (el throw iría a la Promise y el send("❌") no
+  // dispararía). El HTTP handler debe hacer `await r.saved` antes del res.json.
+  // El try/catch interno evita unhandledRejection si PG/disco falla — el
+  // save fail loggea pero no tumba la response.
+  const saved = (async () => {
+    try {
+      if (S.simpleBot && typeof S.simpleBot.saveState === "function") {
+        await saveSimpleState(S.simpleBot.saveState());
+      }
+    } catch (e) {
+      console.warn("[SET-CAPITAL] save failed:", e && e.message ? e.message : String(e));
+    }
+  })();
+  return { ok: true, capital: newCap, realizedPnlPreserved: true, saved };
 }
 
 // ── Tarea B (20 abr 2026): reset contable duro ─────────────────────────
@@ -1370,7 +1392,21 @@ function resetAccounting() {
   S.simpleBot.capa1Cash = cap * 0.60;
   S.simpleBot.capa2Cash = cap * 0.40;
   console.log(`[RESET-ACCOUNTING] realizedPnl ${before.realizedPnl.toFixed(4)}→0 · totalFees ${before.totalFees.toFixed(4)}→0 · peakTv ${before.peakTv}→null · CB reset`);
-  return { ok: true, before };
+  // BUG-J: persistir inmediato antes del return. Patrón {ok, ...datos, saved:
+  // Promise} en vez de async function porque telegram.js:264 captura el
+  // resultado síncrono y usa `r.before` directamente; convertir a async
+  // rompería ese flujo. El HTTP handler debe hacer `await r.saved` antes del
+  // res.json. El try/catch interno evita unhandledRejection si el save falla.
+  const saved = (async () => {
+    try {
+      if (S.simpleBot && typeof S.simpleBot.saveState === "function") {
+        await saveSimpleState(S.simpleBot.saveState());
+      }
+    } catch (e) {
+      console.warn("[RESET-ACCOUNTING] save failed:", e && e.message ? e.message : String(e));
+    }
+  })();
+  return { ok: true, before, saved };
 }
 
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
