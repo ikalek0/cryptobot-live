@@ -1130,6 +1130,20 @@ class SimpleBotEngine {
 
       console.log(`[SIMPLE][CAPITAL-SYNC] declarado=$${declarado.toFixed(2)} real=$${real.toFixed(2)} efectivo=$${efectivo.toFixed(2)} usdcLibre=$${usdcLibre.toFixed(2)} valorPos=$${valorPosiciones.toFixed(2)} capa1=$${this.capa1Cash.toFixed(2)} capa2=$${this.capa2Cash.toFixed(2)}${changed?" (ajustado)":""}`);
 
+      // BUG-O: lazy-init _peakTv post-sync. Si _peakTv sigue null tras el
+      // primer sync exitoso (boot fresh sin saved.peakTv, o resetAccounting
+      // dejándolo en null como sentinela), inicializar al MAX entre
+      // totalValue y _capitalEfectivo. Sin esto, getState() inicializaría
+      // _peakTv = totalValue() en su primer cálculo — pero si totalValue
+      // (=cash sumando capas tras sync) refleja un drop puntual contra el
+      // capital efectivo recién recibido, _checkDrawdownAlerts dispararía
+      // un falso CB de drawdown 80%+ en el primer tick post-sync.
+      // Invariante: peak inicial >= efectivo, así DD = 0 al boot post-sync.
+      if (this._peakTv === null) {
+        this._peakTv = Math.max(this.totalValue(), this._capitalEfectivo);
+        console.log(`[SIMPLE][PEAKTV] lazy-init post-sync: ${this._peakTv}`);
+      }
+
       return {
         ok: true,
         capitalDeclarado: this._capitalDeclarado,
