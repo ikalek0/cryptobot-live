@@ -11,7 +11,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
-const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState } = require("./database");
+const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState, getClient } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -93,7 +93,16 @@ try {
   const savedSimple = await loadSimpleState().catch(()=>null);
   S.simpleBot = new SimpleBotEngine(savedSimple || {});
   console.log("[SIMPLE] 7 estrategias inicializadas (Capa1+Capa2)");
-  S.simpleBot.setContext(null, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
+  // BUG-Q: antes se pasaba null como pool → engine_simple.this._db=null →
+  // el branch `if(this._db) logTrade(...)` en _onCandleClose nunca ejecutaba,
+  // y trade_log quedaba vacío aunque PG estuviera conectado. loadState() en L76
+  // ya disparó getClient() (que cachea el pool en scope de database.js e imprime
+  // "[DB] PostgreSQL conectado ✓"); acá lo recuperamos para inyectarlo al
+  // simpleBot. Misma instancia, sin segunda conexión. Si pgDisabled=true (circuit
+  // breaker), getClient() devuelve null y logTrade se vuelve no-op defensivo
+  // (trade_logger.js:23) — comportamiento idéntico al pre-fix para ese caso.
+  const pgForSimple = await getClient();
+  S.simpleBot.setContext(pgForSimple, "live", S.bot?.marketRegime||"UNKNOWN", S.bot?.fearGreed||50);
 } catch(e) {
   console.warn("[SIMPLE] Error init:", e.message);
   S.simpleBot = new SimpleBotEngine({});
