@@ -773,6 +773,10 @@ app.get("/api/simpleBot/state", (_,res) => {
     bnbBalance:    +(sb._bnbBalance || 0).toFixed(8),
     bnbLowAlert:   (sb._bnbBalance || 0) < 0.005,
     lastFeeMode:   sb._lastFeeMode || null,
+    // BUG-P: exponer log para que el dashboard / watchdogs externos puedan
+    // mostrar el historial reciente de trades. slice(-200) acota tamaño
+    // del payload (sb.log puede crecer ilimitado en bots de larga vida).
+    log: Array.isArray(sb.log) ? sb.log.slice(-200) : [],
   });
 });
 app.get("/api/state",  (_,res)=>res.json(S.bot?{...S.bot.getState(),instance:LIVE_MODE?"LIVE":"PAPER-LIVE",blacklist:S.bot.autoBlacklist.getStatus(),syncHistory: S.syncHistory,dailyPnlPct:S.bot._dailyPnlPct||0,momentumMult:S.bot.hourMultiplier||1,cryptoPanic:cryptoPanic?.getStatus?.()??null}:{loading:true,instance:LIVE_MODE?"LIVE":"PAPER-LIVE",totalValue:0}));
