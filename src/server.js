@@ -12,6 +12,7 @@ const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
 const { saveState, loadState, deleteState, saveSimpleState, loadSimpleState, getClient: getDbClient } = require("./database");
+const { shutdown: bootShutdown } = require("./boot_hardening");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { PaperShadow } = require("./paperShadow");
@@ -981,7 +982,7 @@ app.post("/api/set-alert-config", mutationLimiter, (req,res) => {
   res.json({ok:true});
 });
 
-app.post("/api/set-capital", mutationLimiter, (req,res) => {
+app.post("/api/set-capital", mutationLimiter, async (req,res) => {
   const { secret, capitalUSD } = req.body || {};
   if (!checkBotSecret(secret))
     return onAuthFailure(req, res);
@@ -997,7 +998,11 @@ app.post("/api/set-capital", mutationLimiter, (req,res) => {
     return res.status(400).json({ error: "Capital sanity check failed (>$1M)" });
   }
   try {
-    setCapitalEverywhere(n);
+    // BUG-J: await saved antes del 200 — garantiza que el cambio de capital
+    // esté persistido en disco/PG antes de responder al cliente. Si PM2 mata
+    // el proceso justo después del 200, el estado ya está safe.
+    const r = setCapitalEverywhere(n);
+    await r.saved;
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -1013,11 +1018,13 @@ app.post("/api/set-capital", mutationLimiter, (req,res) => {
 // Reset contable duro. Opuesto semántico de /api/set-capital (que preserva
 // realizedPnl). Ver setResetContable() arriba. Guard: rechaza si hay
 // posiciones abiertas. Requiere BOT_SECRET y pasa por mutationLimiter.
-app.post("/api/reset-accounting", mutationLimiter, (req,res) => {
+app.post("/api/reset-accounting", mutationLimiter, async (req,res) => {
   const { secret } = req.body || {};
   if (!checkBotSecret(secret)) return onAuthFailure(req, res);
   try {
+    // BUG-J: await saved antes del 200. Ver nota en /api/set-capital.
     const r = resetAccounting();
+    await r.saved;
     res.json({ ok: true, reset: r.before });
   } catch (e) {
     return res.status(400).json({ error: e.message });
@@ -1067,8 +1074,14 @@ async function save() {
   if(S.bot.regimeDetector) s.regimeDetector = S.bot.regimeDetector.serialize();
   await saveState(s);
 }
-process.on("SIGTERM",async()=>{await save();process.exit(0);});
-process.on("SIGINT", async()=>{await save();process.exit(0);});
+// BUG-I: antes, SIGTERM/SIGINT solo persistía S.bot (engine zombie) vía save();
+// S.simpleBot quedaba fuera → restart limpio podía perder hasta 60s de
+// realizedPnl, cambios de /capital, /reset-contable o fills recientes.
+// El patrón ya existía en uncaughtException (L1080-1094); la función shutdown
+// en src/boot_hardening.js lo replica para SIGTERM/SIGINT con try/catch
+// independientes para cada save.
+process.on("SIGTERM", () => bootShutdown("SIGTERM", { save, saveSimpleState, simpleBot: S.simpleBot }));
+process.on("SIGINT",  () => bootShutdown("SIGINT",  { save, saveSimpleState, simpleBot: S.simpleBot }));
 
 // ── Capturar errores no manejados — FIX-M5: persistir + morir limpiamente ───
 // Antes de M5 este handler solo logueaba y seguía, lo que dejaba el proceso
@@ -1325,7 +1338,23 @@ function setCapitalEverywhere(newCap) {
     }
   }
   console.log(`[SET-CAPITAL] Capital declarado = $${newCap.toFixed(2)} (realizedPnl preservado)`);
-  return { ok: true, capital: newCap, realizedPnlPreserved: true };
+  // BUG-J: persistir inmediato antes del return. Patrón {ok, ...datos, saved:
+  // Promise} en vez de async function porque telegram.js:222-228 captura
+  // throws síncronos de validación con try/catch sync; convertir a async
+  // rompería ese flujo (el throw iría a la Promise y el send("❌") no
+  // dispararía). El HTTP handler debe hacer `await r.saved` antes del res.json.
+  // El try/catch interno evita unhandledRejection si PG/disco falla — el
+  // save fail loggea pero no tumba la response.
+  const saved = (async () => {
+    try {
+      if (S.simpleBot && typeof S.simpleBot.saveState === "function") {
+        await saveSimpleState(S.simpleBot.saveState());
+      }
+    } catch (e) {
+      console.warn("[SET-CAPITAL] save failed:", e && e.message ? e.message : String(e));
+    }
+  })();
+  return { ok: true, capital: newCap, realizedPnlPreserved: true, saved };
 }
 
 // ── Tarea B (20 abr 2026): reset contable duro ─────────────────────────
@@ -1359,11 +1388,27 @@ function resetAccounting() {
   S.simpleBot._ddAlert10  = false;
   S.simpleBot._ddCircuitBreakerTripped = false;
   // Redistribuir capas sobre el _capitalDeclarado actual sin PnL histórico.
-  const cap = S.simpleBot._capitalDeclarado || 100;
+  // BUG-L: ?? en vez de || para consistencia con BUG-H. Con || un
+  // _capitalDeclarado=0 legítimo caería al default 100 silenciosamente.
+  const cap = S.simpleBot._capitalDeclarado ?? 100;
   S.simpleBot.capa1Cash = cap * 0.60;
   S.simpleBot.capa2Cash = cap * 0.40;
   console.log(`[RESET-ACCOUNTING] realizedPnl ${before.realizedPnl.toFixed(4)}→0 · totalFees ${before.totalFees.toFixed(4)}→0 · peakTv ${before.peakTv}→null · CB reset`);
-  return { ok: true, before };
+  // BUG-J: persistir inmediato antes del return. Patrón {ok, ...datos, saved:
+  // Promise} en vez de async function porque telegram.js:264 captura el
+  // resultado síncrono y usa `r.before` directamente; convertir a async
+  // rompería ese flujo. El HTTP handler debe hacer `await r.saved` antes del
+  // res.json. El try/catch interno evita unhandledRejection si el save falla.
+  const saved = (async () => {
+    try {
+      if (S.simpleBot && typeof S.simpleBot.saveState === "function") {
+        await saveSimpleState(S.simpleBot.saveState());
+      }
+    } catch (e) {
+      console.warn("[RESET-ACCOUNTING] save failed:", e && e.message ? e.message : String(e));
+    }
+  })();
+  return { ok: true, before, saved };
 }
 
 // ── TWAP: divide orden en partes para reducir slippage ───────────────────────
@@ -1862,6 +1907,10 @@ async function verifyLiveBalance() {
         }
       }
       for (const [id, pos] of Object.entries(S.simpleBot.portfolio || {})) {
+        // BUG-K: skip pending — tienen pos.qty reservada optimísticamente pero
+        // el fill aún está en vuelo en Binance (realQty=0) → falso positivo
+        // al restart que pausaba 30min. Mismo patrón que BUG-D una capa arriba.
+        if (pos.status !== "filled") continue;
         const asset = (pos.pair || "").replace(/USDC$|USDT$/, "");
         const bal = balances.find(b => b.asset === asset);
         const realQty = bal ? parseFloat(bal.free || 0) : 0;
