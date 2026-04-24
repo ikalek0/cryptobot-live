@@ -225,7 +225,7 @@ setInterval(async()=>{
     // No operar hasta que pase 1 hora desde el arranque
     if (!S.liveReady) {
       const remaining = Math.ceil((getLiveStartTime() - Date.now()) / 60000);
-      broadcast({ type:"tick", data:{ ...S.bot.getState(), instance:process.env.LIVE_MODE==="true"?"LIVE":"PAPER-LIVE", binanceLive: S.binanceLive, liveReady:false, liveReadyIn:remaining } });
+      broadcast({ type:"tick", data:{ ...getReportingState(S), instance:process.env.LIVE_MODE==="true"?"LIVE":"PAPER-LIVE", binanceLive: S.binanceLive, liveReady:false, liveReadyIn:remaining } });
       if(ticks%6===0) save().catch(e=>console.error("[SAVE]",e));
       ticks++;
       return;
@@ -444,7 +444,7 @@ setInterval(async()=>{
     broadcast({
       type:"tick",
       data:{
-        ...S.bot.getState(),signals,newTrades,circuitBreaker,optimizerResult,
+        ...getReportingState(S),signals,newTrades,circuitBreaker,optimizerResult,
         binanceLive: S.binanceLive,instance:process.env.LIVE_MODE==="true"?"LIVE":"PAPER-LIVE",
         marketDefensive:marketGuard.isDefensive(),
         tradingHour:getTradingScore(),
